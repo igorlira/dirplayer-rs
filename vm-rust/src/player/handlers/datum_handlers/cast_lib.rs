@@ -131,29 +131,14 @@ impl CastLibDatumHandlers {
                 }
             };
 
-            let (c_start, c_end) = match &player.movie.file {
-                Some(file) => (file.config.min_member as u32, file.config.max_member as u32),
-                None => return Err(ScriptError::new("findEmpty: no movie file loaded".to_string())),
-            };
-
             let start = if !args.is_empty() {
-                let member_ref = player.get_datum(&args[0]).to_member_ref()?;
-                let member_num = member_ref.cast_member as u32;
-                if member_num > c_end {
-                    return Ok(player.alloc_datum(Datum::Int(member_num as i32)));
-                }
-                if member_num > c_start { member_num } else { c_start }
+                player.get_datum(&args[0]).to_member_ref()?.cast_member as u32
             } else {
-                c_start
+                1
             };
-
             let cast = player.movie.cast_manager.get_cast(cast_lib_num)?;
-            for slot in start..=c_end {
-                if !cast.members.contains_key(&slot) {
-                    return Ok(player.alloc_datum(Datum::Int(slot as i32)));
-                }
-            }
-            Ok(player.alloc_datum(Datum::Int(c_end as i32 + 1)))
+            let slot = cast.find_empty_slot(start);
+            Ok(player.alloc_datum(Datum::Int(slot as i32)))
         })
     }
 }

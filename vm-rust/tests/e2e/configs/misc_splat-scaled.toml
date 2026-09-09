@@ -1,0 +1,13 @@
+[movie]
+path = "dcr_misc/splat/splat.dcr"
+
+# Same domain gate as the unscaled run — see `misc_splat.toml`.
+[external_params]
+_moviePath = "http://jellygames2.com/splat.dcr"
+# The layout fullscreen uses — see `misc_spectral_wizard-scaled.toml`.
+swStretchStyle = "meet"
+
+[test]
+suite = "misc"
+tags = ["3d", "flash"]
+default_timeout = 300.0

@@ -3,3 +3,4 @@ path = "dcr_intel/BoxPusher.dcr"
 
 [test]
 suite = "intel"
+tags = ["3d"]

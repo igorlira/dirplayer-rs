@@ -291,6 +291,7 @@ extern "C" {
     pub fn onScriptInstanceSnapshot(script_ref: ScriptInstanceId, data: js_sys::Object);
     pub fn onExternalEvent(event: &str);
     pub fn onFlashMemberLoaded(sprite_num: i32, cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32, paused_at_start: bool, asserted_frame: i32);
+    pub fn onFlashMemberWarm(sprite_num: i32, cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32, paused_at_start: bool);
     pub fn onFlashMemberUnloaded(sprite_num: i32);
     pub fn onFlashResetAll();
     pub fn onStageSizeChanged(width: u32, height: u32, center: bool);
@@ -328,6 +329,11 @@ impl JsApi {
     }
     pub fn dispatch_flash_member_loaded(sprite_num: i32, cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32, paused_at_start: bool, asserted_frame: i32) {
         onFlashMemberLoaded(sprite_num, cast_lib, cast_member, swf_data, width, height, paused_at_start, asserted_frame);
+    }
+    /// Movie-load warm-up: pre-create an UNBOUND Ruffle instance for a Flash
+    /// triple the score will show later (see `warm_up_flash_instances`).
+    pub fn dispatch_flash_member_warm(sprite_num: i32, cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32, paused_at_start: bool) {
+        onFlashMemberWarm(sprite_num, cast_lib, cast_member, swf_data, width, height, paused_at_start);
     }
     pub fn dispatch_flash_member_unloaded(sprite_num: i32) {
         onFlashMemberUnloaded(sprite_num);
@@ -2101,6 +2107,7 @@ impl JsApi {
     pub fn dispatch_movie_loaded(_: &DirectorFile) {}
     pub fn dispatch_movie_load_failed(_: &str, _: &str) {}
     pub fn dispatch_flash_member_loaded(_: i32, _: i32, _: i32, _: &[u8], _: u32, _: u32, _: bool, _: i32) {}
+    pub fn dispatch_flash_member_warm(_: i32, _: i32, _: i32, _: &[u8], _: u32, _: u32, _: bool) {}
     pub fn dispatch_flash_member_unloaded(_: i32) {}
     pub fn dispatch_flash_reset_all() {}
     pub fn dispatch_stage_size_changed(_: u32, _: u32, _: bool) {}
@@ -2409,6 +2416,10 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
         Datum::Shockwave3dObjectRef(s3d_ref) => {
             map.str_set("type", &safe_js_string("shockwave3dObject"));
             map.str_set("value", &safe_js_string(&format!("{}(\"{}\")", s3d_ref.object_type, s3d_ref.name)));
+        }
+        Datum::MixerSoundObjectRef(_, name) => {
+            map.str_set("type", &safe_js_string("soundObject"));
+            map.str_set("value", &safe_js_string(name));
         }
         Datum::Transform3d(_) => {
             map.str_set("type", &safe_js_string("transform"));

@@ -1,0 +1,18 @@
+[movie]
+# Xform / Shockwave.com "Burnin' Rubber" — Shockwave 3D + Havok, D11.5.
+# `Preloader.dcr` is the shipped entry point; it just `preloadNetThing`s
+# `BurninRubber.dcr` and jumps to it, so the test loads the main movie directly.
+# The tracks and the garage live in sibling `Data/*.cct` external casts, loaded
+# at runtime via `castLib(x).fileName = _movie.path & "Data/..."`.
+path = "dcr_misc/burnin_rubber/BurninRubber.dcr"
+
+# NB: NO `_moviePath` override. `prepareMovie` derives `gDataLoc` from
+# `_movie.path` and the runtime `castLib(...).fileName` writes resolve the
+# `Data/*.cct` external casts against it, so it must stay the real served
+# location. The `contains "http://"` test that switches the movie out of
+# authoring mode is satisfied by the harness URL on its own.
+
+[test]
+suite = "misc"
+tags = ["3d", "havok"]
+default_timeout = 300.0

@@ -547,17 +547,17 @@ impl TextMember {
         }
 
         // Update directional light color from TextInfo
-        if let Some(light) = scene.lights.iter_mut().find(|l| l.name == BuiltInSymbol::DefaultDirectional) {
+        if let Some(light) = scene.lights.iter_mut().find(|l| l.name.as_str().eq_ignore_ascii_case("UIDirectional")) {
             light.color = [dir_r as f32 / 255.0, dir_g as f32 / 255.0, dir_b as f32 / 255.0];
         }
-        if let Some(light) = scene.lights.iter_mut().find(|l| l.name == BuiltInSymbol::DefaultAmbient) {
+        if let Some(light) = scene.lights.iter_mut().find(|l| l.name.as_str().eq_ignore_ascii_case("UIAmbient")) {
             light.color = [amb_r as f32 / 255.0, amb_g as f32 / 255.0, amb_b as f32 / 255.0];
         }
 
         // Apply directionalPreset to light node transform (3D Z-up version)
         if let Some(ti) = ti {
             if ti.directional_preset > 0 && ti.directional_preset <= 9 {
-                if let Some(light_node) = scene.nodes.iter_mut().find(|n| n.name == BuiltInSymbol::DefaultDirectional) {
+                if let Some(light_node) = scene.nodes.iter_mut().find(|n| n.name.as_str().eq_ignore_ascii_case("UIDirectional")) {
                     light_node.transform = Self::directional_preset_to_transform_3d(ti.directional_preset);
                 }
             }
@@ -627,6 +627,8 @@ impl TextMember {
             visibility: 1,
             near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
             screen_width: 640, screen_height: 480,
+            projection_ortho: false,
+            ortho_height: 0.0,
         });
 
         let info = Shockwave3dInfo {
@@ -667,7 +669,7 @@ impl TextMember {
         }));
     }
 
-    /// Build a rotation matrix for the DefaultDirectional light node
+    /// Build a rotation matrix for the UIDirectional light node
     /// from a directionalPreset value (1-9).
     ///
     /// The mesh front-face normal is (0,0,-1) and edge normals are inverted
@@ -1234,7 +1236,30 @@ impl Shockwave3dMember {
                 .or_else(|| scene.motions.iter().find(|m| m.name == model_name))
                 .map(|m| m.name.clone())
         });
-        let motion = match resolved.or_else(|| self.runtime_state.current_motion.clone()) {
+        // The member-level fallback is for the LEGACY single-player member, where
+        // `runtime_state.current_motion` really is "this member's motion". Once
+        // another model already owns a bonesPlayer, that field is just whichever
+        // model acted last (`sync_legacy_from_bones_player`), and binding it here
+        // hands one model a completely unrelated model's clip — together with that
+        // clip's loop flag.
+        //
+        // AreaZero spawns every robot into one member and each robot's enterFrame
+        // opens with `p.model.bonesPlayer.playRate = gGame.TimeMP`, which lands
+        // here. A freshly spawned RobotTank (whose `new` deliberately empties its
+        // playlist with `play(spawn, 0); playNext()`) was therefore given the
+        // previous robot's LOOPING RobotGunCrouchFire1_Animation. `[PS] Robot Tank`
+        // leaves #Spawn only when `bonesPlayer.currentTime` stops advancing — the
+        // end of its non-looping spawn clip — so the looping intruder pinned it in
+        // #Spawn forever: a wave-5 tank that stands at the C spawner outside the
+        // hangar gate and never walks in.
+        let another_model_is_bound = self
+            .runtime_state
+            .bones_players
+            .iter()
+            .any(|(name, bp)| *name != model_name && bp.current_motion.is_some());
+        let motion = match resolved.or_else(|| {
+            if another_model_is_bound { None } else { self.runtime_state.current_motion.clone() }
+        }) {
             Some(m) => m,
             None => return,
         };
@@ -1285,6 +1310,23 @@ pub struct BonesPlayerState {
     pub blend_weight: f32,
     pub blend_duration: f32,
     pub blend_elapsed: f32,
+    /// This player's motion came from the member's "Animation: Play" auto-play
+    /// rather than from a script. Director hands auto-play out at member load, so a
+    /// movie that then drives the model itself must be able to TAKE OVER — its
+    /// first `play()`/`queue()` replaces the auto-play clip instead of lining up
+    /// behind it. Burnin' Rubber 3's logo is why: the Menu cast is downloaded at
+    /// runtime, so the member is re-created AFTER `SetupLogo` has already run its
+    /// `ResetAllAnimation`, auto-play re-seeds each letter with the member's LOOPING
+    /// flag, and `PlayAllAnimation`'s `queue("<model>-Key", 0)` then waits behind a
+    /// motion that never ends — the intro replays for ever.
+    pub from_auto_play: bool,
+    /// Root motion already pushed onto the model NODE, in node-local units.
+    /// IFX strips the root bone's translation out of the posed skeleton and
+    /// adds it to the node's scene-graph transform unless `root_lock` is set
+    /// (docs/w3d-skeleton-motion-spec.md §1). `tick_w3d_animations` applies the
+    /// DELTA against this each frame, so a script assigning `model.transform`
+    /// mid-clip re-bases the walk instead of fighting it.
+    pub root_clearance: [f32; 3],
 }
 
 impl Default for BonesPlayerState {
@@ -1306,7 +1348,51 @@ impl Default for BonesPlayerState {
             blend_weight: 1.0,
             blend_duration: 0.0,
             blend_elapsed: 0.0,
+            root_clearance: [0.0; 3],
+            from_auto_play: false,
         }
+    }
+}
+
+/// A script's replacing writes to a skinned model's node transform, relative to
+/// the model's own bonesPlayer.
+///
+/// Director composes a bonesPlayer's root clearance onto the model NODE,
+/// destructively (U3D `IFXBonesManagerImpl::UpdateMesh` → `GetRootClearance`;
+/// measured on Rifleman's clone hops and on AreaZero's live robots). A script
+/// that then REPLACES a component of the node's transform wipes the clearance
+/// from that component — `transform = t`, `transform.rotation = v`,
+/// `transform.position = v` — while the composing calls (`translate`, `rotate`,
+/// `pointAt`) and a chained `transform.scale.x = s` keep it. dirplayer's node
+/// never absorbs the clearance, so the renderer strips whatever Director's node
+/// would still be carrying — see `skeleton::root_strip_matrix`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NodeScriptWrites {
+    /// The posed root, in skin space, when a script last replaced the node's
+    /// ROTATION while a motion was bound on the model's bonesPlayer. `None`
+    /// while no such write has happened — including a write made BEFORE the
+    /// clip started, since the clearance then lands on top of it (AreaZero's
+    /// robots: `model.transform = …getWorldTransform()`, then `play()`).
+    pub rotation_replaced_at: Option<[f32; 16]>,
+    /// A script replaced the node's POSITION while a motion was bound.
+    pub position_replaced: bool,
+}
+
+/// One camera's fog settings (Director: `camera.fog`).
+#[derive(Clone, Copy, Debug)]
+pub struct CameraFog {
+    pub enabled: bool,
+    pub near: f32,
+    pub far: f32,
+    pub color: (f32, f32, f32),
+    /// 0 = #linear, 1 = #exponential, 2 = #exponential2
+    pub mode: u8,
+}
+
+impl Default for CameraFog {
+    fn default() -> Self {
+        // Director's documented camera fog defaults.
+        Self { enabled: false, near: 0.0, far: 1000.0, color: (1.0, 1.0, 1.0), mode: 0 }
     }
 }
 
@@ -1314,6 +1400,16 @@ impl Default for BonesPlayerState {
 #[derive(Clone, Debug, Default)]
 pub struct Shockwave3dRuntimeState {
     // ─── Animation ───
+    /// Whether the member's "Animation: Play" auto-play has already been handed
+    /// out. It is ONE-SHOT: the renderer's auto-play block runs every frame, so
+    /// without this it re-seeds a player the moment anything clears it — and
+    /// `removeModifier(#keyframePlayer)` is exactly a script clearing it. Burnin'
+    /// Rubber 3's `SetupLogo` runs `ResetAllAnimation` (that removal over every
+    /// model) and only then `PlayAllAnimation`, which re-adds the modifier and
+    /// `queue(<model>-Key, 0)` — loop OFF. Re-seeding put the member's own looping
+    /// clip back underneath, the queue landed behind it, and the logo intro
+    /// restarted for ever.
+    pub auto_play_seeded: bool,
     pub animation_time: f32,
     pub animation_playing: bool,
     pub current_motion: Option<Symbol>,
@@ -1342,6 +1438,58 @@ pub struct Shockwave3dRuntimeState {
     // ─── Per-node overrides (keyed by node name) ───
     /// Transform overrides for nodes (set via Lingo) — used by renderer
     pub node_transforms: std::collections::HashMap<Symbol, [f32; 16]>,
+    /// How many clone hops produced this node. Absent/0 = an originally parsed node.
+    ///
+    /// Director re-applies the biped-COM fold on EVERY clone hop — measured with
+    /// `put` in Director 11.5 against Rifleman's spawn code, where the source model
+    /// reads `(0,0,-90)`, after `cloneModelFromCastmember` `(0,0,-180)`, and after
+    /// `.clone()` `(0,0,+90)`. Rifleman reaches its soldiers through TWO hops and so
+    /// carries one more `r0` than we ever applied, which is the 180 degrees that left
+    /// them drawing 90 out.
+    ///
+    /// Only hops BEYOND the first change the drawn result, so this counter is what
+    /// keeps the correction off every one-hop rig (Agent Free Ride's riders,
+    /// AreaZero's robots and its FPS weapon). Deliberately NOT expressed by recording
+    /// `model_root_com` for the clone and letting the renderer strip: the strip is
+    /// only valid while the node still holds the fold, and a script that assigns the
+    /// transform outright destroys it — that is what blanked AreaZero's weapon. Hop
+    /// count is a property of how the node was BUILT and nothing can invalidate it
+    /// afterwards.
+    /// Carries the rig's `r0` with the count: a cloned node is not in the scene's
+    /// `model_root_com` table (that only holds originally-parsed models), so the
+    /// matrix has to travel with the clone or the second hop has nothing to fold.
+    pub clone_hop_count: std::collections::HashMap<Symbol, (u32, [f32; 16])>,
+    /// The subset of `clone_hop_count` whose LINEAGE was actually folded, i.e.
+    /// whose source rig had its reference motion in its own cast member (see
+    /// `W3dScene::model_com_folded`).
+    ///
+    /// `clone_hop_count`'s r0 has two consumers that disagree, exactly as
+    /// `model_root_com`'s do:
+    ///
+    ///  * the per-hop RE-FOLD of the node transform, which is only correct for a
+    ///    lineage Director folds in the first place — gate it on this set. Without
+    ///    the gate, TRECH's avatar (cloned from an unfolded rig) picks up a spurious
+    ///    Rz(-90) per hop and the mech is drawn lying on its side.
+    ///  * the renderer's clone tier, which uses r0 to REPLACE an idle-clip strip
+    ///    with the rig's own root and needs it for folded and unfolded lineages
+    ///    alike (Street Sesh's skater, AreaZero's robots) — it must NOT gate.
+    pub clone_com_folded: std::collections::HashSet<Symbol>,
+    /// Nodes whose biped-COM fold a script has DESTROYED by replacing the node's
+    /// own transform outright (`model.transform = t`, or a chained
+    /// `model.transform.rotation = v` flushed by `sync_persistent_transforms`).
+    ///
+    /// A clone carries its source's fold in its transform but is deliberately
+    /// absent from `model_root_com`, so the renderer has to decide whether the
+    /// node still holds that fold before stripping it from the skin. Composing
+    /// operations — `translate`, `rotate`, `pointAt`, and `addChild`'s
+    /// re-parent — KEEP the fold and are deliberately not recorded here; only a
+    /// wholesale replacement of the matrix loses it.
+    pub broken_root_com_fold: std::collections::HashSet<Symbol>,
+    /// What a script has REPLACED on each node's transform, and the root
+    /// clearance the node's bonesPlayer was handing it at the time — the input
+    /// the renderer's strip keys on. See [`NodeScriptWrites`] and
+    /// `skeleton::root_strip_matrix` (rule 3).
+    pub node_script_writes: std::collections::HashMap<Symbol, NodeScriptWrites>,
     /// Persistent Transform3d DatumRefs per node — returned by .transform getter
     /// so that chained mutations (model.transform.position = v) persist
     pub node_transform_datums: std::collections::HashMap<Symbol, crate::player::DatumRef>,
@@ -1383,11 +1531,20 @@ pub struct Shockwave3dRuntimeState {
     pub ambient_color: Option<(f32, f32, f32)>,
 
     // ─── Fog ───
+    // Member-level fallback, used by any camera that has no own entry in
+    // `camera_fog` (and by the pre-per-camera call sites).
     pub fog_enabled: bool,
     pub fog_near: f32,
     pub fog_far: f32,
     pub fog_color: (f32, f32, f32),
     pub fog_mode: u8, // 0=linear, 1=exp, 2=exp2
+    /// Per-camera fog. Director's `fog` is a property of the CAMERA
+    /// ("camera(whichCamera).fog.enabled", Scripting Dictionary 11.5), not of
+    /// the world: two cameras rendering the same member fog independently.
+    /// Burnin' Rubber's menu is exactly that — `CameraFire` (the tunnel) is
+    /// fogged to white while the orthographic `CameraMenu` that draws the whole
+    /// UI on top is not, so a member-wide fog whited out the entire menu.
+    pub camera_fog: std::collections::HashMap<Symbol, CameraFog>,
 
     // ─── Post-processing effects ───
     pub bloom_enabled: bool,
@@ -1424,6 +1581,19 @@ pub struct Shockwave3dRuntimeState {
     /// Each mesh has a Vec of texture layers, each layer has texture coordinates
     pub mesh_deform: std::collections::HashMap<Symbol, MeshDeformState>,
 
+    /// Cached `meshDeform.mesh[m].face[f].neighbor` adjacency, keyed by
+    /// "modelname:meshindex" (0-based mesh index, as the meshDeformMesh refs are).
+    /// The value is `(face_count, per_face_neighbours)`; each face carries its
+    /// three edge neighbours in the documented order (the edge OPPOSITE corner 1,
+    /// 2, then 3), `None` meaning no neighbour across that edge, and each entry
+    /// `(mesh_index, face_index, vertex_index, flipped)` already 1-based.
+    /// Cached because the adjacency is a whole-mesh property: building it per
+    /// face read is O(faces²), and Rifleman's navmesh reads every face five
+    /// times while it builds its A* graph. `face_count` is the staleness guard —
+    /// a rebuilt mesh (`newMesh`/`build`) changes it and forces a recompute.
+    pub meshdeform_face_neighbors:
+        std::collections::HashMap<Symbol, (usize, Vec<[Option<(u32, u32, u32, u8)>; 3]>)>,
+
     // ─── Particle emitter state ───
     /// Per-resource emitter state: resource_name -> emitter properties
     pub emitters: std::collections::HashMap<Symbol, EmitterState>,
@@ -1433,6 +1603,8 @@ pub struct Shockwave3dRuntimeState {
 
     // ─── Subdivision Surface (SDS) state ───
     pub sds_state: std::collections::HashMap<Symbol, SdsState>,
+    /// `#inker` modifier state, keyed by model node name.
+    pub inker_state: std::collections::HashMap<Symbol, InkerState>,
 
     // ─── Reset tracking ───
     pub world_reset: bool,
@@ -1456,6 +1628,19 @@ pub struct Shockwave3dRuntimeState {
     pub camera_root_nodes: std::collections::HashMap<Symbol, Symbol>,
     /// Per-camera colorBuffer.clearAtRender: camera_name -> bool
     pub camera_clear_at_render: std::collections::HashMap<Symbol, bool>,
+    /// `sprite(n).camera(i).rect` — the viewport rectangle, in sprite-local
+    /// pixels, that this camera renders into (Director 11.5 Scripting
+    /// Dictionary, "rect (camera)"). camera(1) always fills the sprite, so
+    /// only the extra cameras a movie adds with `addCamera` need an entry.
+    /// Fly Like A Bird gives its poo-cam `rect(530, 270, 630, 370)` — a 100px
+    /// inset in the bottom-right corner; rendering it full-viewport painted the
+    /// underground view of the bomb camera over the entire game.
+    pub camera_rects: std::collections::HashMap<Symbol, (i32, i32, i32, i32)>,
+    /// Per-camera colorBuffer.clearValue: camera_name -> RGB. "The color used to
+    /// clear out the color buffer if colorBuffer.clearAtRender is set to TRUE"
+    /// (Director 11.5 Scripting Dictionary, "clearValue"). Unset falls back to the
+    /// member's bgColor.
+    pub camera_clear_values: std::collections::HashMap<Symbol, (u8, u8, u8)>,
 
     // ─── Camera overlays/backdrops ───
     /// Per-camera overlay list: camera_name -> Vec<CameraOverlay>
@@ -1490,6 +1675,20 @@ pub struct Shockwave3dRuntimeState {
     /// Per-model collision modifier state, keyed by model node name. Drives
     /// native W3D collision detection in `events::tick_w3d_collisions`.
     pub collision_modifiers: std::collections::HashMap<Symbol, W3dCollisionModifier>,
+
+    // ─── model.modifier list ───
+    /// Explicit `addModifier` / `removeModifier` results, keyed by model node
+    /// name then modifier symbol (true = added, false = removed). The `modifier`
+    /// getter starts from what the IMPORT attached — Director gives an animated
+    /// model its #bonesPlayer / #keyframePlayer without any script asking — and
+    /// then applies these overrides on top.
+    pub modifier_overrides: std::collections::HashMap<Symbol, std::collections::HashMap<Symbol, bool>>,
+
+    /// Clone node name -> the node it was cloned FROM. A clone is renamed
+    /// ("tree_c4" -> "trap_nT_0_tree_c4"), but motions stay scene-global and keep
+    /// naming the ORIGINAL node, so a clone's own animation can only be found
+    /// through its origin. See `motion_origin_name`.
+    pub clone_source: std::collections::HashMap<Symbol, Symbol>,
 }
 
 /// Native Shockwave3D #collision modifier state (Director 11.5 collision
@@ -1586,6 +1785,11 @@ pub struct MeshBuildData {
     pub normal_list: Vec<[f32; 3]>,
     /// #flat = 0, #smooth = 1, None = not called
     pub generate_normals_style: Option<u8>,
+    /// `newMesh`'s 7th argument, the TEXTURE LAYER count (Director 11.5
+    /// Scripting Dictionary, `newMesh`). Each face exposes one
+    /// `face[i].textureLayer[n]` entry per layer, so the count has to survive
+    /// from newMesh() to the point the face list is materialised.
+    pub texture_layer_count: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -1599,6 +1803,10 @@ pub struct CameraOverlay {
     pub scale_x: f64,
     pub scale_y: f64,
     pub reg_point: [f64; 2],
+    /// Whether a script actually assigned `regPoint`, as opposed to it sitting
+    /// at its documented `point(0,0)` default. Rotation needs to tell those
+    /// apart — see the pivot note in `render_overlays_to_fbo`.
+    pub reg_point_explicit: bool,
     pub shader_name: Symbol,
 }
 
@@ -1614,6 +1822,7 @@ impl Default for CameraOverlay {
             scale_x: 1.0,
             scale_y: 1.0,
             reg_point: [0.0, 0.0],
+            reg_point_explicit: false,
             shader_name: Symbol::empty(),
         }
     }
@@ -1629,6 +1838,51 @@ pub struct LodState {
 impl Default for LodState {
     fn default() -> Self {
         Self { level: 100, auto_mode: true, bias: 100.0 }
+    }
+}
+
+/// `#inker` MODIFIER state, per model node (Director 11.5 Scripting Dictionary,
+/// "#inker modifier properties"): "adds silhouettes, creases, and boundary edges to an
+/// existing model".
+///
+/// Distinct from the `#inker` SHADER TYPE the renderer already handled — a movie adds
+/// this with `model.addModifier(#inker)` and keeps its ordinary #standard shader.
+/// SweeTarts 3D's level-3 bubble is exactly that: a #sphere with a reflection map, then
+/// `addModifier(#inker)` / `lineColor = rgb(255,255,255)` / `silhouettes = 1` /
+/// `lineOffset = -10` for the white rim that makes it read as a bubble.
+#[derive(Clone, Debug)]
+pub struct InkerState {
+    /// Colour of the lines the inker draws. Dictionary default rgb(0, 0, 0).
+    pub line_color: (u8, u8, u8),
+    /// Lines along the border of the model, outlining its shape.
+    pub silhouettes: bool,
+    /// Lines in creases. Dictionary default TRUE.
+    pub creases: bool,
+    /// Crease-detection sensitivity, range -1.0..+1.0. Dictionary default 0.01.
+    pub crease_angle: f32,
+    /// Lines around the boundary of the surface. Dictionary default TRUE.
+    pub boundary: bool,
+    /// Where lines are drawn relative to the surface and the camera, range
+    /// -100.0..+100.0. Dictionary default -2.0.
+    pub line_offset: f32,
+    /// Whether `line_offset` is applied at all. Dictionary default FALSE.
+    pub use_line_offset: bool,
+}
+
+impl Default for InkerState {
+    fn default() -> Self {
+        Self {
+            line_color: (0, 0, 0),
+            // The dictionary states defaults for boundary/creases/creaseAngle/lineOffset/
+            // useLineOffset but not for silhouettes; TRUE matches its siblings and is what
+            // the modifier is chiefly for.
+            silhouettes: true,
+            creases: true,
+            crease_angle: 0.01,
+            boundary: true,
+            line_offset: -2.0,
+            use_line_offset: false,
+        }
     }
 }
 
@@ -1675,8 +1929,19 @@ pub struct EmitterState {
     pub mode: String,       // "burst" or "stream"
     pub is_loop: bool,
     pub direction: [f64; 3],
-    pub region: [f64; 3],
-    pub has_region: bool, // true once a script assigns emitter.region (emit there, not at the model node)
+    /// `emitter.region` — one, two, or four vectors: a point, the endpoints of a
+    /// line, or the vertices of a quadrilateral that particles are born on
+    /// (Director 11.5 Scripting Dictionary, "region (emitter)"; default
+    /// `[vector(0,0,0)]`). Stored in full: only keeping the first vector threw
+    /// away the extent, so a 2-/4-vector region emitted from a single point.
+    ///
+    /// The vectors are in the particle model resource's own space — the MODEL's
+    /// transform then places the whole system. Rasterwerks' spawn burst is the
+    /// case that proves it: a 60x60 quad centred on the origin, with the model
+    /// moved to the spawning player. Treated as world coordinates it fired at
+    /// (-30, 0, -30) forever, nowhere near anyone.
+    pub region: Vec<[f64; 3]>,
+    pub has_region: bool, // true once a script assigns emitter.region
     pub distribution: String, // "linear", "gaussian"
     pub angle: f64,
     pub min_speed: f64,
@@ -1688,10 +1953,17 @@ impl Default for EmitterState {
     fn default() -> Self {
         Self {
             num_particles: 1000, // Director #particle default
-            mode: "burst".to_string(),
+            // "#burst or #stream (default)" (Director 11.5 Scripting Dictionary,
+            // "mode (emitter)"). Defaulting to burst dumped every particle of a
+            // system that never sets the property into one clump at the emitter —
+            // Bottle Rocket's exhaust (`RcktRec` sets speed/angle but no mode) came
+            // out as a single opaque square instead of a jet.
+            mode: "stream".to_string(),
             is_loop: true,
-            direction: [0.0, 1.0, 0.0],
-            region: [0.0, 0.0, 0.0],
+            // "The default value of this property is vector(1,0,0)" (Director 11.5
+            // Scripting Dictionary, "direction").
+            direction: [1.0, 0.0, 0.0],
+            region: vec![[0.0, 0.0, 0.0]],
             has_region: false,
             distribution: "linear".to_string(),
             angle: 180.0,
@@ -1745,9 +2017,98 @@ pub struct ParticleSystemState {
     pub blend_end: f32,         // blendRange.end — opacity PERCENT (0..100) at death
     pub texture_name: String,   // particle billboard texture (lowercased gpu key)
     pub seed: u32,              // evolving RNG so respawns aren't a fixed per-index pattern
+    /// Set by a Lingo property write that invalidates the particle distribution
+    /// (currently `lifetime`, whose value every age is scaled against). It is
+    /// NOT acted on there: a script configures a system one property at a time
+    /// and `emitter.*` lives in a different map, so at the moment of the write
+    /// the mode / region / direction / speeds are still whatever they were.
+    /// `initialize()` reads all of those — a `#stream` even births and
+    /// fast-forwards every particle inside it — so running it early stamps the
+    /// whole system with default state. The per-frame tick clears this flag
+    /// after it has copied the emitter across, which is the only point where
+    /// the system is fully described.
+    pub needs_reinit: bool,
 }
 
 impl Shockwave3dRuntimeState {
+    /// Drop every piece of per-node state for nodes that no longer exist.
+    ///
+    /// `deleteModel`/`deleteGroup`/`deleteCamera` used to remove the node from
+    /// `scene.nodes` and nothing else, so a movie that spawns and destroys nodes
+    /// grew these maps without bound for the life of the session. Two of them
+    /// (`node_transform_datums`, `user_data`) hold a `DatumRef`, so the datums
+    /// they point at could never be reclaimed either — the arena is refcounted,
+    /// and this was the reference that never went away.
+    ///
+    /// AreaZero is the case that exposed it: every robot spawns ~8 nodes and
+    /// every wave destroys them again, so by the later waves the maps hold tens
+    /// of thousands of dead entries. That is both a memory leak and a speed one —
+    /// `node_transforms` is walked on the render hot path.
+    pub fn purge_nodes(&mut self, doomed: &std::collections::HashSet<Symbol>) {
+        if doomed.is_empty() { return; }
+        self.bones_players.retain(|k, _| !doomed.contains(k));
+        self.node_transforms.retain(|k, _| !doomed.contains(k));
+        self.node_transform_datums.retain(|k, _| !doomed.contains(k));
+        self.node_rotation_hints.retain(|k, _| !doomed.contains(k));
+        self.node_visibility.retain(|k, _| !doomed.contains(k));
+        self.node_shaders.retain(|k, _| !doomed.contains(k));
+        self.node_shaders_indexed.retain(|k| !doomed.contains(k));
+        self.clone_hop_count.retain(|k, _| !doomed.contains(k));
+        self.clone_com_folded.retain(|k| !doomed.contains(k));
+        self.node_script_writes.retain(|k, _| !doomed.contains(k));
+        self.mesh_deform.retain(|k, _| !doomed.contains(k));
+        self.detached_nodes.retain(|k| !doomed.contains(k));
+        self.point_at_orientations.retain(|k, _| !doomed.contains(k));
+        self.lod_state.retain(|k, _| !doomed.contains(k));
+        self.sds_state.retain(|k, _| !doomed.contains(k));
+        self.collision_modifiers.retain(|k, _| !doomed.contains(k));
+        self.user_data.retain(|k, _| !doomed.contains(k));
+        self.modifier_overrides.retain(|k, _| !doomed.contains(k));
+        // Camera-keyed state — camera names ARE node names, so deleting a camera
+        // must take these with it.
+        self.camera_projection_mode.retain(|k, _| !doomed.contains(k));
+        self.camera_ortho_height.retain(|k, _| !doomed.contains(k));
+        self.camera_root_nodes.retain(|k, _| !doomed.contains(k));
+        self.camera_clear_at_render.retain(|k, _| !doomed.contains(k));
+        self.camera_rects.retain(|k, _| !doomed.contains(k));
+        self.camera_clear_values.retain(|k, _| !doomed.contains(k));
+        self.camera_fog.retain(|k, _| !doomed.contains(k));
+        self.camera_overlays.retain(|k, _| !doomed.contains(k));
+        self.camera_backdrops.retain(|k, _| !doomed.contains(k));
+        self.render_targets.retain(|k, _| !doomed.contains(k));
+        // Compound keys: "<model>:<meshindex>" and "<model>:<boneindex>".
+        let doomed_prefixes: Vec<String> = doomed.iter()
+            .map(|s| format!("{}:", s.as_str().to_ascii_lowercase()))
+            .collect();
+        let is_doomed_compound = |k: &str| {
+            let kl = k.to_ascii_lowercase();
+            doomed_prefixes.iter().any(|p| kl.starts_with(p.as_str()))
+        };
+        self.meshdeform_face_neighbors.retain(|k, _| !is_doomed_compound(k.as_str()));
+        self.bone_transform_overrides.retain(|k, _| !is_doomed_compound(k));
+    }
+
+    /// Drop per-RESOURCE state for a model resource that has been deleted.
+    ///
+    /// `deleteModelResource` fell through to a no-op arm, so the resource stayed
+    /// in the scene AND kept its build data and its persistent face list — and
+    /// that face list is a `DatumRef` to a list of one PropList per face. AreaZero
+    /// builds a fresh `newMesh` trail resource for EVERY rocket fired
+    /// (`[PS] Rocket.CreateTrail`), so the rockets alone leaked a mesh plus 40+
+    /// proplists apiece, and the renderer kept carrying their GPU buffers forward
+    /// because the resource never left the scene.
+    pub fn purge_model_resource(&mut self, resource: Symbol) {
+        self.mesh_build_data.remove(&resource);
+        self.emitters.remove(&resource);
+        self.particles.remove(&resource);
+        self.lod_state.remove(&resource);
+        self.sds_state.remove(&resource);
+        // The face list is parked in shader_texture_lists under a "face:<name>"
+        // pseudo-key (see get_model_resource_prop).
+        let face_key = Symbol::from_str(&format!("face:{}", resource.as_str()));
+        self.shader_texture_lists.remove(&face_key);
+    }
+
     /// Per-model bonesPlayer state (read), case-insensitive by model node name.
     pub fn bones_player(&self, model: Symbol) -> Option<&BonesPlayerState> {
         self.bones_players.get(&model)
@@ -1758,6 +2119,86 @@ impl Shockwave3dRuntimeState {
     /// route here so each model animates independently.
     pub fn bones_player_mut(&mut self, model: Symbol) -> &mut BonesPlayerState {
         self.bones_players.entry(model).or_default()
+    }
+
+    /// Record a script write that REPLACED components of `node`'s transform: a
+    /// whole `transform =`, or a chained `transform.rotation/position/scale =`
+    /// flushed by `sync_persistent_transforms`. Composing operations must not
+    /// come here. See [`NodeScriptWrites`].
+    pub fn note_node_transform_replaced(
+        &mut self,
+        scene: Option<&crate::director::chunks::w3d::types::W3dScene>,
+        node: Symbol,
+        rotation: bool,
+        position: bool,
+    ) {
+        use crate::director::chunks::w3d::skeleton as skel;
+        if !rotation && !position {
+            return;
+        }
+        // The clearance this node's bonesPlayer is handing it right now: the
+        // bound clip's root at the player's current sample time — the same
+        // matrix the renderer draws with this frame.
+        let clearance = self
+            .bones_player(node)
+            .filter(|bp| bp.current_motion.is_some())
+            .and_then(|bp| {
+                let scene = scene?;
+                let skeleton = skel::skeleton_for_model(scene, node)?;
+                let motion = scene.motions.iter().find(|m| Some(m.name) == bp.current_motion);
+                let t = motion
+                    .map(|m| skel::effective_motion_time(
+                        bp.animation_time,
+                        bp.animation_start_time,
+                        bp.animation_end_time,
+                        bp.animation_loop,
+                        m.duration(),
+                    ))
+                    .unwrap_or(0.0);
+                Some(skel::posed_root_matrix(skeleton, motion, t))
+            })
+            // A clone of a FOLDED lineage is born with its source's player already
+            // running (the source auto-plays its in-member clip and the clone
+            // copies the modifier), so in Director a script write lands after
+            // play even when this engine has bound no motion on the clone yet.
+            // The clearance such a node carries is exactly the r0 the hop
+            // carried. Rasterwerks' `BotModel_0N` clones of MA_BASEMESH are the
+            // case: without this they faced ~120 deg off.
+            .or_else(|| {
+                if self.clone_com_folded.contains(&node) {
+                    self.clone_hop_count.get(&node).map(|(_, r0)| *r0)
+                } else {
+                    None
+                }
+            });
+        let entry = self.node_script_writes.entry(node).or_default();
+        if rotation {
+            // A replacement made while no clip is bound leaves nothing for the
+            // clearance to cancel against: the node absorbs all of it at play().
+            entry.rotation_replaced_at = clearance;
+        }
+        if position {
+            entry.position_replaced = clearance.is_some();
+        }
+    }
+
+    /// The runtime half of `skeleton::root_strip_matrix`'s inputs for `model`.
+    pub fn root_strip_state(&self, model: Symbol) -> crate::director::chunks::w3d::skeleton::RootStripState {
+        let clone_r0 = if self.broken_root_com_fold.contains(&model) {
+            None
+        } else {
+            self.clone_hop_count.get(&model).map(|(_, r0)| *r0)
+        };
+        crate::director::chunks::w3d::skeleton::RootStripState {
+            clone_r0,
+            has_bones_player: self
+                .bones_player(model)
+                .map_or(false, |bp| bp.current_motion.is_some()),
+            rotation_replaced_at: self
+                .node_script_writes
+                .get(&model)
+                .and_then(|w| w.rotation_replaced_at),
+        }
     }
 
     /// Mirror a model's per-node animation state into the member-level single
@@ -1802,25 +2243,27 @@ impl Shockwave3dRuntimeState {
             fog_mode: 1, // 0=linear, 1=exp, 2=exp2
             ..Default::default()
         };
-        // Seed camera transform from 3DPR camera position/rotation.
-        // When stored position has x=0 and y=0, Director auto-computes the camera
-        // to center the member's default_rect in the viewport using the default FOV.
-        let camera_position = info.camera_position.map(|(px, py, pz)| {
-            if px == 0.0 && py == 0.0 {
-                let w = (info.default_rect.2 - info.default_rect.0) as f32;
-                let h = (info.default_rect.3 - info.default_rect.1) as f32;
-                if w > 0.0 && h > 0.0 {
-                    let default_fov = 34.516_f32;
-                    let aspect = w / h;
-                    let h_half_fov = ((default_fov / 2.0).to_radians().tan() * aspect).atan();
-                    ((w / 2.0), (h / 2.0), (w / 2.0) / h_half_fov.tan())
-                } else {
-                    (px, py, pz)
-                }
-            } else {
-                (px, py, pz)
-            }
-        });
+        // Seed the camera transform from the 3DPR camera position/rotation, VERBATIM.
+        //
+        // This used to reinterpret any stored position with x=0 and y=0 as "unset"
+        // and replace it with a frame-the-default-rect camera at
+        // (w/2, h/2, (w/2)/tan(hFov/2)). That rule belongs to EXTRUDED 3D TEXT, whose
+        // glyphs are laid out in the member's pixel rect and which is framed from
+        // `TextInfo` on the conversion path above — that path computes the same value
+        // itself and hands `from_info` a position whose x is already w/2, so it never
+        // depended on this copy.
+        //
+        // Applied here it hit real W3D worlds, and (0, 0, 250) is Director's DEFAULT
+        // camera position — i.e. exactly what a member whose camera was never moved in
+        // the authoring tool stores. SweeTarts 3D is the proof: `initnumbers` parents the
+        // HUD planes to camera[1] at world (x, 42, 188) with the default `addChild`
+        // (#preserveWorld), so the offset the HUD keeps for the rest of the game is
+        // `inverse(cameraWorld) * thatWorld`, frozen at that instant. With the authored
+        // (0, 0, 250) that is (x, 42, -62) — 62 units in front, filling the top corners
+        // at the fieldOfView 75 the game settles on. With the synthesised
+        // (300, 250, 804.7) it became (x - 335, -208, -616.7): behind and below, off
+        // screen, and "LEVEL 1" and the score never appeared.
+        let camera_position = info.camera_position;
         if let Some((px, py, pz)) = camera_position {
             let (rx, ry, rz) = info.camera_rotation.unwrap_or((0.0, 0.0, 0.0));
             // Build camera transform from position + Euler rotation (degrees)
@@ -1865,8 +2308,76 @@ impl Shockwave3dRuntimeState {
                 }
             }
         }
-        // Note: animationEnabled auto-start is handled in the rendering path
-        // when the sprite first appears on stage, not here at parse time.
+        // Per-NODE object-keyframe auto-play, seeded HERE, at member load.
+        //
+        // Director attaches a #keyframePlayer to every object carrying object
+        // keyframes and starts it when the member's "Animation: Play" flag is on,
+        // so a member holding several independently-animated objects runs several
+        // clocks — the single member-level `current_motion` can only carry one.
+        //
+        // It has to happen at LOAD, not at the member's first RENDER, because a
+        // movie's setup runs in between and Director's ordering is load-then-script.
+        // Burnin' Rubber 3's `SetupLogo` does `ResetAllAnimation` — `removeModifier`
+        // over every model in the Logo member — and only then does `PlayAllAnimation`
+        // re-add the modifier and `queue("<model>-Key", 0)`, loop OFF, so the intro
+        // plays once and holds. Seeding at first render landed AFTER that removal:
+        // each letter got the member's own LOOPING clip back and the queued one
+        // waited behind a motion that never ends, so the logo intro replayed for ever.
+        //
+        // Ownership is `keyframe_motion_for_model`'s test — a "<node>-Key" motion, or
+        // a single-track motion whose track NAMES the node — never "the first motion
+        // in the member", which is what seeds foreign clips into a member that scripts
+        // fill at runtime. Gated on more than one motion so a single-clip member keeps
+        // taking the member-level path in the renderer unchanged.
+        if info.animation_enabled {
+            if let Some(scene) = scene {
+                if scene.motions.len() > 1 {
+                    let owned: Vec<(Symbol, bool, Symbol)> = scene
+                        .nodes
+                        .iter()
+                        .filter_map(|n| {
+                            crate::director::chunks::w3d::skeleton::keyframe_motion_for_model(
+                                scene, n.name,
+                            )
+                            .map(|m| {
+                                let is_model = n.node_type
+                                    == crate::director::chunks::w3d::types::W3dNodeType::Model;
+                                (n.name, is_model, m.name)
+                            })
+                        })
+                        .collect();
+                    if !owned.is_empty() {
+                        state.auto_play_seeded = true;
+                        for (node, is_model, motion) in owned {
+                            let bp = state.bones_player_mut(node);
+                            bp.current_motion = Some(motion);
+                            bp.animation_playing = true;
+                            // A NON-MODEL node (camera, light) plays its clip ONCE and
+                            // holds the final frame — never on the member's "Animation:
+                            // Loop" flag.
+                            //
+                            // Director drives such a node from the motion's TRACK, which
+                            // names it, while the #keyframePlayer modifier itself lives on
+                            // a model. Burnin' Rubber 3's logo is the case and it is
+                            // measured, not inferred: "Logo_Camera-Key" is queued by
+                            // `PlayAllAnimation` onto the MODEL carrier "Dummy Animation
+                            // Node Logo_Camera" (loop 0), and its single track names the
+                            // CAMERA "Logo_Camera". Director reports
+                            // `camera.getWorldTransform()` as the dummy-derived pose, yet
+                            // RENDERS the camera further along the flight — so the track
+                            // poses the camera too. Leaving the camera unposed parks the
+                            // logo short of its final framing (~293 px of lettering against
+                            // ~400 in a capture of the real game); letting it LOOP replayed
+                            // the intro for ever, because `PlayAllAnimation` walks
+                            // `member.model[i]` and so can never queue over a camera.
+                            // Playing it once and holding is what the game shows.
+                            bp.animation_loop = is_model && info.loops;
+                            bp.from_auto_play = true;
+                        }
+                    }
+                }
+            }
+        }
         state
     }
 }
@@ -1903,6 +2414,7 @@ impl Default for ParticleSystemState {
             blend_end: 100.0,
             texture_name: String::new(),
             seed: 0x9E3779B9,
+            needs_reinit: false,
         }
     }
 }
@@ -1925,9 +2437,138 @@ impl ParticleSystemState {
         for i in 0..count {
             self.seed = self.seed.wrapping_mul(1664525).wrapping_add(1013904223);
             let r = (self.seed >> 8) as f32 / 16_777_216.0; // 0..1
-            self.ages[i] = if self.stream { r * self.lifetime } else { self.lifetime };
-            self.alive[i] = false;
+            if self.stream {
+                // A #stream emitter is CONTINUOUS: at any instant its particles
+                // are spread across every age from birth to death. Prime it that
+                // way instead of leaving the whole system dead and waiting for
+                // `age >= lifetime` to trip the recycle path — that made a stream
+                // invisible for one full particle lifetime after it started.
+                //
+                // Harmless where the lifetime is a few milliseconds (the missile
+                // trails warm up within a frame either way), decisive where it is
+                // not: Rasterwerks' spawn burst is a 1.2 s stream that only plays
+                // for 1.2 s, so the warm-up consumed the entire effect and nothing
+                // was ever drawn.
+                self.ages[i] = r * self.lifetime;
+                self.alive[i] = true;
+                self.emitted[i] = true;
+                self.respawn(i);
+                // Fast-forward to where a particle born that long ago would be.
+                let age = self.ages[i];
+                for k in 0..3 {
+                    self.positions[i][k] += self.velocities[i][k] * age;
+                }
+            } else {
+                // #burst emits ALL particles at the same time (Director 11.5
+                // Scripting Dictionary, "mode (emitter)"), so start them due at
+                // once and let the first update() birth them together.
+                self.ages[i] = self.lifetime;
+                self.alive[i] = false;
+            }
         }
+    }
+
+    /// Place particle `i` at a fresh birth: a random point in the emitter region
+    /// with a velocity along `direction`, spread by `angle_range` and scaled into
+    /// the emitter's min..max speed band.
+    fn respawn(&mut self, i: usize) {
+        // Evolve the RNG each respawn so particles don't all return to the
+        // same fixed per-index offset/velocity (that produced regular bands).
+        self.seed = self.seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        let hash = self.seed;
+        let r1 = (hash & 0xFF) as f32 / 255.0 - 0.5;
+        let r2 = ((hash >> 8) & 0xFF) as f32 / 255.0 - 0.5;
+        let r3 = ((hash >> 16) & 0xFF) as f32 / 255.0 - 0.5;
+        let offset = match self.emitter_shape {
+            1 => [r1 * self.emitter_size[0], 0.0, 0.0],              // line
+            2 => [r1 * self.emitter_size[0], 0.0, r2 * self.emitter_size[2]], // plane
+            3 => {                                                      // sphere
+                let len = (r1*r1 + r2*r2 + r3*r3).sqrt().max(0.01);
+                let s = self.emitter_size[0] * ((hash & 0xFF) as f32 / 255.0);
+                [r1/len * s, r2/len * s, r3/len * s]
+            }
+            4 => [r1 * self.emitter_size[0], r2 * self.emitter_size[1], r3 * self.emitter_size[2]], // cube
+            _ => [0.0, 0.0, 0.0],                                      // point
+        };
+        self.positions[i] = [
+            self.emitter_position[0] + offset[0],
+            self.emitter_position[1] + offset[1],
+            self.emitter_position[2] + offset[2],
+        ];
+        // "The direction of emission of a given particle will deviate from that
+        // vector by a random angle between 0 and the value of the emitter's angle
+        // property. The effective range of this property is 0.0 to 180.0"
+        // (Director 11.5 Scripting Dictionary, "angle (3D)"). So a birth direction
+        // is a unit vector inside a CONE of half-angle `angle_range` about
+        // `direction`, and 180 degrees is the whole sphere.
+        //
+        // Perturbing each axis independently (`direction + r * spread` per
+        // component) samples a BOX in velocity space instead, so a 180-degree
+        // burst came out as a cube: Bottle Rocket's firework filled the frame
+        // corner to corner in a square pattern rather than expanding as a ball.
+        //
+        // The polar angle is drawn uniformly in THETA, exactly as documented:
+        // each particle "will deviate from that vector by a random angle between 0
+        // and the value of the emitter's angle property". That concentrates
+        // particles toward the cone axis and thins them toward the rim, which is
+        // what makes a narrow emitter read as a bright jet with soft edges — the
+        // Intel Bottle Rocket capture shows its exhaust brightest ON the axis, and
+        // a threshold-measured width of only ~11 degrees for an authored angle of
+        // 20. Sampling uniformly per unit SOLID angle instead spread the same
+        // particles evenly across the full 20 degrees, leaving the jet too faint
+        // near the nozzle to see.
+        //
+        // It also keeps `angle = 180` (the default) a genuinely full sphere, which
+        // the same movie's firework depends on — halving the aperture to preserve
+        // a solid-angle-uniform distribution turned its explosion into a hemisphere
+        // bunched on one side.
+        self.seed = self.seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        let u1 = (self.seed >> 8) as f32 / 16_777_216.0; // 0..1
+        self.seed = self.seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        let u2 = (self.seed >> 8) as f32 / 16_777_216.0; // 0..1
+
+        // `direction = vector(0,0,0)` means "emitted in all directions"
+        // (Director 11.5 Scripting Dictionary, "direction"), i.e. a full sphere.
+        let d_len = (self.direction[0] * self.direction[0]
+            + self.direction[1] * self.direction[1]
+            + self.direction[2] * self.direction[2])
+            .sqrt();
+        let (axis, theta_max) = if d_len > 1e-6 {
+            (
+                [self.direction[0] / d_len, self.direction[1] / d_len, self.direction[2] / d_len],
+                self.angle_range.clamp(0.0, std::f32::consts::PI),
+            )
+        } else {
+            // `direction = vector(0,0,0)` means all directions, i.e. a full sphere
+            // regardless of the angle.
+            ([0.0, 0.0, 1.0], std::f32::consts::PI)
+        };
+        // Orthonormal basis around the cone axis; pick the seed vector least
+        // parallel to it so the cross product never degenerates.
+        let seed_vec = if axis[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+        let cross = |a: [f32; 3], b: [f32; 3]| {
+            [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+        };
+        let mut t1 = cross(axis, seed_vec);
+        let t1_len = (t1[0] * t1[0] + t1[1] * t1[1] + t1[2] * t1[2]).sqrt().max(1e-6);
+        t1 = [t1[0] / t1_len, t1[1] / t1_len, t1[2] / t1_len];
+        let t2 = cross(axis, t1);
+
+        let theta = u1 * theta_max;
+        let (sin_t, cos_t) = theta.sin_cos();
+        let phi = u2 * std::f32::consts::TAU;
+        let (sin_p, cos_p) = phi.sin_cos();
+        let dir = [
+            axis[0] * cos_t + t1[0] * sin_t * cos_p + t2[0] * sin_t * sin_p,
+            axis[1] * cos_t + t1[1] * sin_t * cos_p + t2[1] * sin_t * sin_p,
+            axis[2] * cos_t + t1[2] * sin_t * cos_p + t2[2] * sin_t * sin_p,
+        ];
+
+        // "Particles are emitted at random speeds between a minimum and a maximum"
+        // (Director 11.5 Scripting Dictionary, emitter.minSpeed / maxSpeed) — the
+        // band is min..max, not min +/- range/2.
+        let speed = self.initial_speed + (r1 + 0.5) * self.speed_range;
+        self.velocities[i] = [dir[0] * speed, dir[1] * speed, dir[2] * speed];
     }
 
     pub fn update(&mut self, dt: f32) {
@@ -1935,6 +2576,10 @@ impl ParticleSystemState {
             if i >= self.ages.len() { break; }
 
             self.ages[i] += dt;
+            // How much of this step the particle actually existed for. A full `dt`
+            // for one that was already alive; only the post-birth remainder for one
+            // that respawns below.
+            let mut step = dt;
 
             if self.ages[i] >= self.lifetime {
                 // `emitter.loop = 0` means the particle DIES at the end of its
@@ -1955,60 +2600,55 @@ impl ParticleSystemState {
                 // Recycle
                 self.ages[i] -= self.lifetime;
                 self.alive[i] = true;
-                // Evolve the RNG each respawn so particles don't all return to the
-                // same fixed per-index offset/velocity (that produced regular bands).
-                self.seed = self.seed.wrapping_mul(1664525).wrapping_add(1013904223);
-                let hash = self.seed;
-                let r1 = (hash & 0xFF) as f32 / 255.0 - 0.5;
-                let r2 = ((hash >> 8) & 0xFF) as f32 / 255.0 - 0.5;
-                let r3 = ((hash >> 16) & 0xFF) as f32 / 255.0 - 0.5;
-                let offset = match self.emitter_shape {
-                    1 => [r1 * self.emitter_size[0], 0.0, 0.0],              // line
-                    2 => [r1 * self.emitter_size[0], 0.0, r2 * self.emitter_size[2]], // plane
-                    3 => {                                                      // sphere
-                        let len = (r1*r1 + r2*r2 + r3*r3).sqrt().max(0.01);
-                        let s = self.emitter_size[0] * ((hash & 0xFF) as f32 / 255.0);
-                        [r1/len * s, r2/len * s, r3/len * s]
-                    }
-                    4 => [r1 * self.emitter_size[0], r2 * self.emitter_size[1], r3 * self.emitter_size[2]], // cube
-                    _ => [0.0, 0.0, 0.0],                                      // point
-                };
-                self.positions[i] = [
-                    self.emitter_position[0] + offset[0],
-                    self.emitter_position[1] + offset[1],
-                    self.emitter_position[2] + offset[2],
-                ];
-                // Direction with angle spread
-                let spread = self.angle_range;
-                let jx = r1 * spread;
-                let jy = r2 * spread;
-                let jz = r3 * spread;
-                let speed = self.initial_speed + r1 * self.speed_range;
-                self.velocities[i] = [
-                    (self.direction[0] + jx) * speed,
-                    (self.direction[1] + jy) * speed,
-                    (self.direction[2] + jz) * speed,
-                ];
+                self.respawn(i);
+                // The particle was born PART WAY through this step — `ages[i]` is
+                // exactly how long ago — so it may only travel for that remainder,
+                // not for the whole `dt`.
+                //
+                // Integrating it over a full step instead put every particle one
+                // whole tick's travel past the emitter, so the head of a jet was
+                // missing: Bottle Rocket's exhaust (280 units/s at ~70 ms per tick)
+                // started 20 world units below the nozzle and looked detached from
+                // the rocket. Quantising it the other way — to whole steps only —
+                // collapses a continuous jet into concentric shells, which is what
+                // three hard rings in its 250 ms plume looked like.
+                step = self.ages[i];
             }
 
             if self.alive[i] {
                 // Apply gravity
-                self.velocities[i][0] += self.gravity[0] * dt;
-                self.velocities[i][1] += self.gravity[1] * dt;
-                self.velocities[i][2] += self.gravity[2] * dt;
+                self.velocities[i][0] += self.gravity[0] * step;
+                self.velocities[i][1] += self.gravity[1] * step;
+                self.velocities[i][2] += self.gravity[2] * step;
 
-                // Apply wind drag
+                // "drag ... indicates the percentage of each particle's velocity
+                // that is lost in each SIMULATION STEP. This property has a range
+                // of 0 (no velocity lost) to 100 (all velocity lost and the
+                // particle stops moving)" (Director 11.5 Scripting Dictionary,
+                // "drag"). `self.drag` already holds that percentage as a 0..1
+                // fraction, so it is applied once per step and must NOT be scaled
+                // by dt as well — doing so cut it to a sixtieth of its value and
+                // effectively disabled it. The particle velocity relaxes toward
+                // `wind` (the medium's own velocity) by that fraction each step.
+                //
+                // This is a per-step property in Director too, and this tick runs
+                // once per movie frame, so the decay tracks the movie's tempo the
+                // same way Director's did. Measured against the Intel demo capture:
+                // Bottle Rocket runs ~14 fps and its explosion (drag = 8) loses
+                // ~45% of its speed every half second — 0.92^7 = 0.56 — and its
+                // fireball converges to a fixed radius instead of expanding out of
+                // frame, which is exactly what the reference video shows.
                 if self.drag > 0.0 {
-                    let factor = 1.0 - self.drag * dt;
-                    self.velocities[i][0] = self.velocities[i][0] * factor + self.wind[0] * self.drag * dt;
-                    self.velocities[i][1] = self.velocities[i][1] * factor + self.wind[1] * self.drag * dt;
-                    self.velocities[i][2] = self.velocities[i][2] * factor + self.wind[2] * self.drag * dt;
+                    let factor = 1.0 - self.drag;
+                    self.velocities[i][0] = self.velocities[i][0] * factor + self.wind[0] * self.drag;
+                    self.velocities[i][1] = self.velocities[i][1] * factor + self.wind[1] * self.drag;
+                    self.velocities[i][2] = self.velocities[i][2] * factor + self.wind[2] * self.drag;
                 }
 
                 // Integrate position
-                self.positions[i][0] += self.velocities[i][0] * dt;
-                self.positions[i][1] += self.velocities[i][1] * dt;
-                self.positions[i][2] += self.velocities[i][2] * dt;
+                self.positions[i][0] += self.velocities[i][0] * step;
+                self.positions[i][1] += self.velocities[i][1] * step;
+                self.positions[i][2] += self.velocities[i][2] * step;
             }
         }
     }
@@ -2354,9 +2994,9 @@ impl HavokSpring {
             rigid_body_b: None,
             point_a: [0.0; 3],
             point_b: [0.0; 3],
-            rest_length: 0.0,
-            elasticity: 0.5,
-            damping: 0.1,
+            rest_length: 1.0,
+            elasticity: 1.0,
+            damping: 0.5,
             on_compression: true,
             on_extension: true,
         }
@@ -2382,7 +3022,7 @@ impl HavokLinearDashpot {
             rigid_body_b: None,
             point_a: [0.0; 3],
             point_b: [0.0; 3],
-            strength: 0.5,
+            strength: 1.0,
             damping: 0.1,
         }
     }
@@ -2405,9 +3045,9 @@ impl HavokAngularDashpot {
             name,
             rigid_body_a: None,
             rigid_body_b: None,
-            rotation_axis: [0.0, 1.0, 0.0],
+            rotation_axis: [0.0, 0.0, 1.0],
             rotation_angle: 0.0,
-            strength: 0.5,
+            strength: 1.0,
             damping: 0.1,
         }
     }
@@ -2920,7 +3560,120 @@ pub enum CastMemberType {
     PhysXPhysics(PhysXPhysicsMember),
     Groove3gm(Groove3gmMember),
     Transition(TransitionMember),
+    Mixer(MixerMember),
     Unknown,
+}
+
+/// A Director 11 Sound Mixer cast member (`new(#mixer)`).
+///
+/// "Audio mixer" in the 11.5 Scripting Dictionary: a container that owns named
+/// SOUND OBJECTS (`createSoundObject` / `getSoundObjectList` /
+/// `deleteSoundObject`), mixes them, and is driven as a unit through
+/// `play()` / `stop()` / `pause()` / `mute` / `unmute` / `reset`.
+///
+/// Burnin' Rubber 3 gives every car one: `[M] Cars` builds a mixer per vehicle
+/// and hangs the engine, tyre and skid loops off it as sound objects, riding
+/// their `volume` and `playRate` per frame from the car's speed and slip.
+#[derive(Clone, Debug)]
+pub struct MixerMember {
+    /// 0-255, "255 indicates full volume and 0 indicates no [sound]"
+    /// (Director 11.5 Scripting Dictionary, `volume (Mixer)`).
+    pub volume: i32,
+    /// Milliseconds of audio the engine processes at a time. "bufferSize is a
+    /// multiple of 10, and its default value is 100" (`bufferSize (Mixer)`).
+    pub buffer_size: i32,
+    pub status: MixerStatus,
+    pub muted: bool,
+    /// Sound objects in creation order. "Sound objects with duplicate names are
+    /// not allowed" (`createSoundObject`).
+    pub objects: Vec<MixerSoundObject>,
+}
+
+impl MixerMember {
+    pub fn new() -> Self {
+        Self {
+            volume: 255,
+            buffer_size: 100,
+            status: MixerStatus::Stopped,
+            muted: false,
+            objects: Vec::new(),
+        }
+    }
+
+    pub fn object(&self, name: &str) -> Option<&MixerSoundObject> {
+        self.objects.iter().find(|o| o.name.eq_ignore_ascii_case(name))
+    }
+
+    pub fn object_mut(&mut self, name: &str) -> Option<&mut MixerSoundObject> {
+        self.objects.iter_mut().find(|o| o.name.eq_ignore_ascii_case(name))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MixerStatus {
+    Stopped,
+    Playing,
+    Paused,
+}
+
+impl MixerStatus {
+    pub fn symbol(&self) -> &'static str {
+        match self {
+            MixerStatus::Stopped => "stopped",
+            MixerStatus::Playing => "playing",
+            MixerStatus::Paused => "paused",
+        }
+    }
+}
+
+/// One named sound in a mixer. Created by
+/// `mixer.createSoundObject(name, castMem {, startTime, endTime, loopCount,
+/// loopStartTime, loopEndTime, preLoadTime})` — Burnin' Rubber 3 passes the
+/// optional arguments as a PROPERTY LIST (`[#loopCount: 0, #loopStartTime: 135,
+/// …]`), which is the form the dictionary's `proplist` parameter documents.
+#[derive(Clone, Debug)]
+pub struct MixerSoundObject {
+    pub name: String,
+    /// The sound cast member this object plays, when created from `castMem`.
+    pub member: Option<CastMemberRef>,
+    /// The file path, when created from `filepath`.
+    pub file: String,
+    pub start_time: i32,
+    pub end_time: i32,
+    /// 0 = loop forever, which is what every one of BR3's engine loops asks for.
+    pub loop_count: i32,
+    pub loop_start_time: i32,
+    pub loop_end_time: i32,
+    pub volume: i32,
+    /// Playback speed multiplier — BR3 rides this with engine RPM.
+    pub play_rate: f32,
+    /// `filterList`: audio filters attached to this object. Held as the same
+    /// live list datum across reads so `filterList.append(audioFilter(...))`
+    /// sticks, the way `userData` is held for a 3D node.
+    pub filter_list: Option<crate::player::DatumRef>,
+    /// SoundManager channel this object is currently sounding on, if any.
+    pub channel: Option<usize>,
+    pub status: MixerStatus,
+}
+
+impl MixerSoundObject {
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            member: None,
+            file: String::new(),
+            start_time: 0,
+            end_time: -1,
+            loop_count: 1,
+            loop_start_time: 0,
+            loop_end_time: -1,
+            volume: 255,
+            play_rate: 1.0,
+            filter_list: None,
+            channel: None,
+            status: MixerStatus::Stopped,
+        }
+    }
 }
 
 /// A score/puppet transition member. Director stores these as raw member-type 14,
@@ -2979,6 +3732,7 @@ pub enum CastMemberTypeId {
     PhysXPhysics,
     Groove3gm,
     Transition,
+    Mixer,
     Unknown,
 }
 
@@ -3036,6 +3790,9 @@ impl fmt::Debug for CastMemberType {
             Self::Transition(_) => {
                 write!(f, "Transition")
             }
+            Self::Mixer(_) => {
+                write!(f, "Mixer")
+            }
             Self::Groove3gm(_) => {
                 write!(f, "Groove3gm")
             }
@@ -3065,6 +3822,7 @@ impl CastMemberTypeId {
             Self::Shockwave3d => Ok("shockwave3d"),
             Self::HavokPhysics => Ok("havok"),
             Self::PhysXPhysics => Ok("physics"),
+            Self::Mixer => Ok("mixer"),
             // Director/Groove report .3GM shape members as #G3D — the Groove
             // Lingo gates shape loading on `member.type = #G3D`
             // (gGroove: LoadShape only if #G3D), so returning #groove made every
@@ -3099,6 +3857,7 @@ impl CastMemberType {
             // No dedicated CastMemberTypeId; transitions are score-driven, not queried
             // via `the type of member`, so Unknown is adequate here.
             Self::Transition(_) => CastMemberTypeId::Transition,
+            Self::Mixer(_) => CastMemberTypeId::Mixer,
             Self::Unknown => CastMemberTypeId::Unknown,
         };
     }
@@ -3123,6 +3882,7 @@ impl CastMemberType {
             Self::PhysXPhysics(_) => "physics",
             Self::Groove3gm(_) => "groove3gm",
             Self::Transition(_) => "transition",
+            Self::Mixer(_) => "mixer",
             _ => "unknown",
         };
     }
@@ -3258,6 +4018,20 @@ impl CastMemberType {
         return match self {
             Self::Movie(data) => { Some(data) }
             _ => { None }
+        }
+    }
+
+    pub fn as_mixer(&self) -> Option<&MixerMember> {
+        match self {
+            Self::Mixer(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    pub fn as_mixer_mut(&mut self) -> Option<&mut MixerMember> {
+        match self {
+            Self::Mixer(m) => Some(m),
+            _ => None,
         }
     }
 
@@ -3724,6 +4498,7 @@ impl CastMember {
                         trim_white_space: bitmap_info.trim_white_space,
                         was_trimmed: false,
                         version: 0,
+                        hi_res: Default::default(),
                     });
                 }
             }
@@ -4274,10 +5049,23 @@ impl CastMember {
             screen_width: 640,
             screen_height: 480,
             transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,100.0,1.0],
+            projection_ortho: false,
+            ortho_height: 0.0,
         });
-        // Default ambient light
+        // An empty 3D member's two lights. Director calls them UIAmbient / UIDirectional
+        // and reports exactly two — MEASURED in the message window on SweeTarts 3D's
+        // script-built world member (`light.count -- 2`) and on the Havok "Properties"
+        // demo. Movies address them by INDEX, so the order matters as much as the names.
+        //
+        // The COLOURS and the AIM are still dirplayer's own (Director's Properties dump
+        // says UIAmbient rgb(17,17,17), and aims UIDirectional by the member's default
+        // CAMERA rotated -45 deg about world X). Both were tried and both made Properties
+        // darker than the render it has a reference for — under this renderer's one-sided
+        // `max(N·L, 0)` the camera-derived Z axis has a negative Y and lights nothing
+        // facing up — so they need a Director RENDER to check against, not a property
+        // read. Only the naming is corrected here.
         scene.lights.push(W3dLight {
-            name: BuiltInSymbol::DefaultAmbient.into(),
+            name: BuiltInSymbol::UIAmbient.into(),
             light_type: W3dLightType::Ambient,
             color: [0.3, 0.3, 0.3],
             enabled: true,
@@ -4285,9 +5073,9 @@ impl CastMember {
             attenuation: [1.0, 0.0, 0.0],
             ..Default::default()
         });
-        // Default directional light (IFX default: 0.75)
+        // Directional key light (IFX default intensity: 0.75)
         scene.lights.push(W3dLight {
-            name: BuiltInSymbol::DefaultDirectional.into(),
+            name: BuiltInSymbol::UIDirectional.into(),
             light_type: W3dLightType::Directional,
             color: [0.75, 0.75, 0.75],
             enabled: true,
@@ -4297,10 +5085,10 @@ impl CastMember {
         });
         // Light node for the directional light — rotated to point from upper-right
         scene.nodes.push(W3dNode {
-            name: BuiltInSymbol::DefaultDirectional.into(),
+            name: BuiltInSymbol::UIDirectional.into(),
             node_type: W3dNodeType::Light,
             parent_name: BuiltInSymbol::World.into(),
-            resource_name: BuiltInSymbol::DefaultDirectional.into(),
+            resource_name: BuiltInSymbol::UIDirectional.into(),
             model_resource_name: Symbol::empty(),
             shader_name: Symbol::empty(),
             visibility: 1,
@@ -4314,6 +5102,8 @@ impl CastMember {
                 0.32, 0.74, 0.59, 0.0,
                 0.0, 0.0, 0.0, 1.0,
             ],
+            projection_ortho: false,
+            ortho_height: 0.0,
         });
         scene
     }
@@ -4633,7 +5423,7 @@ impl CastMember {
                     number, xm.raw_data.len()
                 );
                 let w3d_data = xm.raw_data.clone();
-                let parsed_scene = if !w3d_data.is_empty() {
+                let mut built_scene = if !w3d_data.is_empty() {
                     match crate::director::chunks::w3d::parse_w3d(&w3d_data) {
                         Ok(mut scene) => {
                             debug!("W3D parsed: {} materials, {} nodes, {} meshes",
@@ -4645,15 +5435,15 @@ impl CastMember {
                                     ..Default::default()
                                 });
                             }
-                            Some(std::rc::Rc::new(scene))
+                            scene
                         }
                         Err(e) => {
                             warn!("W3D parse error: {}", e);
-                            Some(std::rc::Rc::new(Self::create_empty_w3d_scene()))
+                            Self::create_empty_w3d_scene()
                         }
                     }
                 } else {
-                    Some(std::rc::Rc::new(Self::create_empty_w3d_scene()))
+                    Self::create_empty_w3d_scene()
                 };
                 let info = Shockwave3dInfo::from(&chunk.specific_data_raw)
                     .unwrap_or(Shockwave3dInfo {
@@ -4663,6 +5453,14 @@ impl CastMember {
                         camera_position: None, camera_rotation: None,
                         bg_color: None, ambient_color: None,
                     });
+                // NOT seeded from `info.ambient_color`, though Director's Havok
+                // "Properties" dump reports `UIAmbient ambient rgb(17,17,17)` against a
+                // 3DPR ambient that says the same. Dropping our 0.3 grey to that darkened
+                // the demo well past its reference, and the same dump exposes a second,
+                // deeper disagreement (see the UIDirectional note in `from_info`) — the
+                // two have to be settled together, against a Director RENDER rather than
+                // a property read.
+                let parsed_scene = Some(std::rc::Rc::new(built_scene));
                 let source_scene = parsed_scene.clone();
                 return Some(CastMember {
                     number,
@@ -5134,6 +5932,32 @@ impl CastMember {
         if box_w == 0 { box_w = 100; }
         if box_h == 0 { box_h = 20; }
 
+        // A single line can never be shorter than the member's own
+        // `fixedLineSpace`. Paige (which XMED serialises) computes
+        //     new_line_height = ascent + descent + leading;
+        //     if (par_style->leading_fixed > new_line_height)
+        //         new_line_height = par_style->leading_fixed;
+        // so `leading_fixed` is a MINIMUM line height, never a squeeze — the same
+        // rule the renderer already follows. A one-line box IS one line, so its
+        // height is bounded below by it.
+        //
+        // `page_height` (Paige's doc_bottom) does not always honour that: for a
+        // member authored EMPTY it holds the bare font extent. Rasterwerks'
+        // kill-feed scratch member `txtArialBold12_512` reads page_height 15
+        // against fixedLineSpace 16 and TextInfo height 16, and the multi-line
+        // reconciliation above cannot separate "info_h ballooned by 1" from
+        // "info_h is the authored box" — so it took 15 and `member.rect` came
+        // back 512x15 for a 512x16 member.
+        //
+        // C_MsgBox is what that broke: it copyPixels the member's `.image` into
+        // a 512x16 line image over `rect(0, 0, 512, 16)` to clear the alpha, then
+        // blits each kill/chat line in. One row short of the source left the last
+        // row of every line image untouched and opaque, drawing a white rule under
+        // each row of the kill feed, running the full width of the image.
+        if !box_type_is_adjust && line_count_for_box <= 1 && styled_text.fixed_line_space > 0 {
+            box_h = box_h.max(styled_text.fixed_line_space);
+        }
+
         // Keep synthesized TextInfo dimensions aligned with effective member box.
         text_info.width = box_w as u32;
         text_info.height = box_h as u32;
@@ -5141,6 +5965,7 @@ impl CastMember {
         let box_type = text_info.box_type_symbol();
         let word_wrap = text_info.word_wrap();
         let xmed_bg_color = styled_text.bg_color;
+        let xmed_fore_color = styled_text.default_fore_color;
         // Member-level fontStyle list: derived from the first styled span's
         // bold/italic/underline flags so `member.fontStyle` matches Director's
         // getter (which returns [#italic] for member 35 etc.). The XMED parse
@@ -5244,13 +6069,28 @@ impl CastMember {
 
         // Preserve XMED foreColor at the member level so it persists
         // even when Lingo sets member.text or member.html (which may clear styled span colors)
+        //
+        // A member authored EMPTY still gets ONE styled span, but it spans no
+        // characters and carries no authored colour — it is synthesised black
+        // (0xFF000000). Ignore the spans entirely in that case and take the
+        // authored style itself (`default_fore_color`, read from the Section 7
+        // style table), the same way `default_font_name` / `default_font_size`
+        // already override span[0] for empty members.
+        //
+        // Rasterwerks' `txtArialBold12_512` is exactly this: an empty 512x16
+        // scratch member the kill feed writes one line into and blits out
+        // through `member.image` into an overlay texture. Reading the placeholder
+        // span made every kill and chat line black on a dark panel instead of the
+        // authored light grey.
         let member_color = text_member.html_styled_spans.first()
+            .filter(|_| !text_member.text.is_empty())
             .and_then(|s| s.style.color)
             .map(|c| ColorRef::Rgb(
                 ((c >> 16) & 0xFF) as u8,
                 ((c >> 8) & 0xFF) as u8,
                 (c & 0xFF) as u8,
             ))
+            .or_else(|| xmed_fore_color.map(|(r, g, b)| ColorRef::Rgb(r, g, b)))
             .unwrap_or(ColorRef::PaletteIndex(255));
 
         // Extract XMED backColor from Section 0x0000 document header (indices 30-32).
@@ -6545,6 +7385,7 @@ impl CastMember {
                         trim_white_space: false,
                         was_trimmed: false,
                         version: 0,
+                        hi_res: Default::default(),
                     };
                     let image_ref = bitmap_manager.add_bitmap(bitmap);
                     let info = crate::director::enums::BitmapInfo {

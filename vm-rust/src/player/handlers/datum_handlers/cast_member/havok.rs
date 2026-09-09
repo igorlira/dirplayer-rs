@@ -394,6 +394,149 @@ impl HavokPhysicsMemberHandlers {
     /// Returns: (step_result, step_callbacks, collision_callbacks)
     /// Step callbacks: Vec<(handler_name, script_instance, sub_dt)>
     /// Collision callbacks: Vec<(handler_name, script_instance, collision_info_datum)>
+    /// Match this step's contacts against registered collision interests and
+    /// build the Lingo callback payloads. Shared by the one-shot and interleaved
+    /// step paths.
+    fn collect_collision_callbacks(
+        player: &mut crate::player::DirPlayer,
+        member_ref: &CastMemberRef,
+    ) -> Vec<(Symbol, DatumRef, DatumRef)> {
+        let member = player.movie.cast_manager.find_member_by_ref(member_ref);
+        let havok = member.and_then(|m| match &m.member_type {
+            CastMemberType::HavokPhysics(h) => Some(h),
+            _ => None,
+        });
+        let mut raw_collisions: Vec<(Symbol, DatumRef, Symbol, Symbol, [f64;3], [f64;3], f64)> = Vec::new();
+        if let Some(havok) = havok {
+        // Collision interests matched against cached contacts
+            for contact in &havok.state.collision_list_cache {
+                for interest in &havok.state.collision_interests {
+                    if interest.handler_name.is_none() || interest.script_instance.is_none() { continue; }
+                    let matches = if interest.rb_name2 == BuiltInSymbol::All || interest.rb_name2 == BuiltInSymbol::All {
+                        contact.body_a == interest.rb_name1
+                            || contact.body_b == interest.rb_name1
+                    } else {
+                        (contact.body_a == interest.rb_name1 && contact.body_b == interest.rb_name2)
+                        || (contact.body_a == interest.rb_name2 && contact.body_b == interest.rb_name1)
+                    };
+                    // Gate on the registerInterest threshold: the Xtra only
+                    // fires the callback when the impact (normal relative)
+                    // speed reaches the threshold, so a body merely resting on
+                    // or sliding along a surface (nrv≈0) doesn't trigger a
+                    // collision event. (Frequency throttling is not yet
+                    // applied; freq is 0 for the player car so it's a no-op
+                    // there, and the scripts self-throttle via sndCollisionWait.)
+                    if matches && contact.normal_rel_vel >= interest.threshold {
+                        // Report the registered body (rb_name1) first so the
+                        // callback can treat cd[1] as "self" and cd[2] as the
+                        // other object (matches the Havok Xtra ordering).
+                        let (name_self, name_other) =
+                            if contact.body_b.eq_ignore_ascii_case(&interest.rb_name1.as_str()) {
+                                (contact.body_b.clone(), contact.body_a.clone())
+                            } else {
+                                (contact.body_a.clone(), contact.body_b.clone())
+                            };
+                        raw_collisions.push((
+                            interest.handler_name.clone().unwrap(),
+                            interest.script_instance.clone().unwrap(),
+                            name_self, name_other,
+                            contact.point, contact.normal, contact.normal_rel_vel,
+                        ));
+                    }
+                }
+            }
+        }
+        drop(member);
+
+        // Now allocate datums (requires mutable player, no longer borrowing havok)
+        let mut collision_cbs = Vec::new();
+        for (handler, instance, ba, bb, pt, nm, nrv) in raw_collisions {
+            // Match the Havok Xtra collision-callback signature
+            // `(bodyNameA, bodyNameB, contactPoint, contactNormal, nrv)`:
+            // cd[3]/cd[4] are VECTORS and cd[5] is the impact speed. (The old
+            // 8-flat-scalar form put contactPoint.z at cd[5], so scripts that
+            // read cd[5] as an impact speed — On the Run's DriveHuman damage
+            // logic — saw a position instead.)
+            let ba_r = player.alloc_datum(Datum::String(ba.to_string()));
+            let bb_r = player.alloc_datum(Datum::String(bb.to_string()));
+            let pt_r = player.alloc_datum(Datum::Vector(pt));
+            let nm_r = player.alloc_datum(Datum::Vector(nm));
+            let nrv_r = player.alloc_datum(Datum::Float(nrv));
+            let info = player.alloc_datum(Datum::List(
+                DatumType::List,
+                VecDeque::from([ba_r, bb_r, pt_r, nm_r, nrv_r]),
+                false,
+            ));
+            collision_cbs.push((handler, instance, info));
+        }
+        collision_cbs
+    }
+
+    /// INTERLEAVED step, phase 1. Parses args, snapshots the step's forces and
+    /// returns everything the async caller needs to drive the substep loop and
+    /// fire step callbacks BETWEEN substeps — which is when the Xtra fires them.
+    ///
+    /// Firing them only after the completed step is wrong for any callback whose
+    /// output depends on body state: Rifleman's character controller computes a
+    /// hover spring from its current distance to the ground, so it must see each
+    /// substep's result. (Banking one impulse and replaying it per substep was
+    /// tried and diverges — it is positive feedback.)
+    pub fn begin_interleaved_step(
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<(CastMemberRef, super::havok_physics::StepPrep, f64, f64, Vec<(Symbol, DatumRef)>), ScriptError> {
+        reserve_player_mut(|player| {
+            let member_ref = match player.get_datum(datum) {
+                Datum::CastMember(r) => r.to_owned(),
+                _ => return Err(ScriptError::new("Cannot call Havok handler on non-cast-member".to_string())),
+            };
+            let (prep, time_increment) = Self::step_begin_phase(player, &member_ref, args)?;
+            let havok = Self::havok_mut(player, &member_ref)?;
+            let sim_time_at_start = havok.state.sim_time;
+            let cbs: Vec<(Symbol, DatumRef)> = havok.state.step_callbacks.clone();
+            Ok((member_ref, prep, time_increment, sim_time_at_start, cbs))
+        })
+    }
+
+    /// Clear the step-callback force accumulator. Called before each substep's
+    /// callbacks in the interleaved path.
+    ///
+    /// `applyForce` ACCUMULATES (`+=`). With the callback firing once per step
+    /// that was fine — one contribution, replayed each substep. Interleaved, the
+    /// callback fires per substep, so without clearing, gravity piles up 1x, 2x,
+    /// ... Nx across the step: a total impulse (N+1)/2 times too large. Havok
+    /// clears the force accumulator on every integrate step; this mirrors that.
+    pub fn clear_step_forces(member_ref: &CastMemberRef) -> Result<(), ScriptError> {
+        reserve_player_mut(|player| {
+            let havok = Self::havok_mut(player, member_ref)?;
+            for rb in &mut havok.state.rigid_bodies {
+                rb.step_force = [0.0; 3];
+                rb.step_torque = [0.0; 3];
+            }
+            Ok(())
+        })
+    }
+
+    /// INTERLEAVED step, phase 2: run a single substep.
+    pub fn interleaved_substep(
+        member_ref: &CastMemberRef,
+        prep: &super::havok_physics::StepPrep,
+    ) -> Result<(), ScriptError> {
+        reserve_player_mut(|player| Self::step_substep_phase(player, member_ref, prep))
+    }
+
+    /// INTERLEAVED step, phase 3: the per-step tail plus collision callbacks.
+    pub fn finish_interleaved_step(
+        member_ref: &CastMemberRef,
+        time_increment: f64,
+    ) -> Result<(DatumRef, Vec<(Symbol, DatumRef, DatumRef)>), ScriptError> {
+        reserve_player_mut(|player| {
+            let step_result = Self::step_finish_phase(player, member_ref, time_increment)?;
+            let collision_cbs = Self::collect_collision_callbacks(player, member_ref);
+            Ok((step_result, collision_cbs))
+        })
+    }
+
     pub fn step_with_callbacks(
         datum: &DatumRef,
         args: &Vec<DatumRef>,
@@ -423,12 +566,14 @@ impl HavokPhysicsMemberHandlers {
                 // Step callbacks
                 let time_step = havok.state.time_step;
                 let sub_steps = havok.state.sub_steps;
+                let mut time_step_increment = time_step;
                 let sub_dt = {
                     let time_inc = if !args.is_empty() {
                         player.get_datum(&args[0]).to_float().unwrap_or(time_step)
                     } else {
                         time_step
                     };
+                    time_step_increment = time_inc;
                     let num_sub = if args.len() > 1 {
                         player.get_datum(&args[1]).int_value().unwrap_or(sub_steps)
                     } else {
@@ -436,72 +581,33 @@ impl HavokPhysicsMemberHandlers {
                     };
                     if num_sub > 0 { time_inc / num_sub as f64 } else { time_inc }
                 };
+                // Fired ONCE per step, passing the ACCUMULATED simulation
+                // time (not a delta). A script derives its own timestep from
+                // successive callbacks:
+                //   on OnStep me, kSimTime
+                //     lTimeStep = kSimTime - pOldSimTime
+                // Passing a constant `sub_dt` made that difference 0 from the
+                // second call on, silently zeroing anything scaled by the
+                // timestep — Rifleman's character controller scales its entire
+                // movement impulse by it, so the player could not be moved.
+                //
+                // KNOWN DIVERGENCE, deliberately left: the Xtra fires this per
+                // SUBSTEP. Firing per substep here fixes Rifleman's character,
+                // whose hover impulse does not scale with the timestep and so
+                // gets 1/subSteps of the intended support at this rate (its z
+                // sinks 19.80 → 19.78 → 19.74 instead of resting at ~19.97).
+                // But a callback that applies FORCE then applies it subSteps
+                // times per step, against a force law calibrated at the current
+                // rate — measured: that regresses age_of_speed. Fixing this
+                // properly means scaling forces applied from inside a step
+                // callback by 1/subSteps, not just changing the callback count.
+                let _ = (sub_dt, time_step_increment);
                 for (handler, instance) in &havok.state.step_callbacks {
-                    step_cbs.push((handler.clone(), instance.clone(), sub_dt));
-                }
-
-                // Collision interests matched against cached contacts
-                for contact in &havok.state.collision_list_cache {
-                    for interest in &havok.state.collision_interests {
-                        if interest.handler_name.is_none() || interest.script_instance.is_none() { continue; }
-                        let matches = if interest.rb_name2 == BuiltInSymbol::All || interest.rb_name2 == BuiltInSymbol::All {
-                            contact.body_a == interest.rb_name1
-                                || contact.body_b == interest.rb_name1
-                        } else {
-                            (contact.body_a == interest.rb_name1 && contact.body_b == interest.rb_name2)
-                            || (contact.body_a == interest.rb_name2 && contact.body_b == interest.rb_name1)
-                        };
-                        // Gate on the registerInterest threshold: the Xtra only
-                        // fires the callback when the impact (normal relative)
-                        // speed reaches the threshold, so a body merely resting on
-                        // or sliding along a surface (nrv≈0) doesn't trigger a
-                        // collision event. (Frequency throttling is not yet
-                        // applied; freq is 0 for the player car so it's a no-op
-                        // there, and the scripts self-throttle via sndCollisionWait.)
-                        if matches && contact.normal_rel_vel >= interest.threshold {
-                            // Report the registered body (rb_name1) first so the
-                            // callback can treat cd[1] as "self" and cd[2] as the
-                            // other object (matches the Havok Xtra ordering).
-                            let (name_self, name_other) =
-                                if contact.body_b.eq_ignore_ascii_case(&interest.rb_name1.as_str()) {
-                                    (contact.body_b.clone(), contact.body_a.clone())
-                                } else {
-                                    (contact.body_a.clone(), contact.body_b.clone())
-                                };
-                            raw_collisions.push((
-                                interest.handler_name.clone().unwrap(),
-                                interest.script_instance.clone().unwrap(),
-                                name_self, name_other,
-                                contact.point, contact.normal, contact.normal_rel_vel,
-                            ));
-                        }
-                    }
+                    step_cbs.push((handler.clone(), instance.clone(), havok.state.sim_time));
                 }
             }
-            drop(member);
 
-            // Now allocate datums (requires mutable player, no longer borrowing havok)
-            let mut collision_cbs = Vec::new();
-            for (handler, instance, ba, bb, pt, nm, nrv) in raw_collisions {
-                // Match the Havok Xtra collision-callback signature
-                // `(bodyNameA, bodyNameB, contactPoint, contactNormal, nrv)`:
-                // cd[3]/cd[4] are VECTORS and cd[5] is the impact speed. (The old
-                // 8-flat-scalar form put contactPoint.z at cd[5], so scripts that
-                // read cd[5] as an impact speed — On the Run's DriveHuman damage
-                // logic — saw a position instead.)
-                let ba_r = player.alloc_datum(Datum::String(ba.to_string()));
-                let bb_r = player.alloc_datum(Datum::String(bb.to_string()));
-                let pt_r = player.alloc_datum(Datum::Vector(pt));
-                let nm_r = player.alloc_datum(Datum::Vector(nm));
-                let nrv_r = player.alloc_datum(Datum::Float(nrv));
-                let info = player.alloc_datum(Datum::List(
-                    DatumType::List,
-                    VecDeque::from([ba_r, bb_r, pt_r, nm_r, nrv_r]),
-                    false,
-                ));
-                collision_cbs.push((handler, instance, info));
-            }
-
+            let collision_cbs = Self::collect_collision_callbacks(player, &member_ref);
             Ok((step_result, step_cbs, collision_cbs))
         })
     }
@@ -521,74 +627,37 @@ impl HavokPhysicsMemberHandlers {
                 }
             };
 
-            match handler_name {
-                "initialize" | "Initialize" => Self::initialize(player, &member_ref, args),
-                "shutdown" | "shutDown" | "Shutdown" => Self::shutdown(player, &member_ref),
+            match_ci!(handler_name, {
+                "initialize" => Self::initialize(player, &member_ref, args),
+                "shutDown" => Self::shutdown(player, &member_ref),
                 "step" => Self::step(player, &member_ref, args),
-
                 "reset" => Self::reset(player, &member_ref),
-                "rigidBody" | "rigidbody" => Self::get_rigid_body(player, &member_ref, args),
+                "rigidBody" => Self::get_rigid_body(player, &member_ref, args),
                 "spring" => Self::get_spring(player, &member_ref, args),
-                "linearDashpot" | "lineardashpot" => {
-                    Self::get_linear_dashpot(player, &member_ref, args)
-                }
-                "angularDashpot" | "angulardashpot" => {
-                    Self::get_angular_dashpot(player, &member_ref, args)
-                }
-                "makeMovableRigidBody" | "makemovablerigidbody" => {
-                    Self::make_movable_rigid_body(player, &member_ref, args)
-                }
-                "makeFixedRigidBody" | "makefixedrigidbody" => {
-                    Self::make_fixed_rigid_body(player, &member_ref, args)
-                }
-                "makeSpring" | "makespring" => Self::make_spring(player, &member_ref, args),
-                "makeLinearDashpot" | "makelineardashpot" => {
-                    Self::make_linear_dashpot(player, &member_ref, args)
-                }
-                "makeAngularDashpot" | "makeangulardashpot" => {
-                    Self::make_angular_dashpot(player, &member_ref, args)
-                }
-                "deleteRigidBody" | "deleterigidbody" => {
-                    Self::delete_rigid_body(player, &member_ref, args)
-                }
-                "deleteSpring" | "deletespring" => {
-                    Self::delete_spring(player, &member_ref, args)
-                }
-                "deleteLinearDashpot" | "deletelineardashpot" => {
-                    Self::delete_linear_dashpot(player, &member_ref, args)
-                }
-                "deleteAngularDashpot" | "deleteangulardashpot" => {
-                    Self::delete_angular_dashpot(player, &member_ref, args)
-                }
-                "registerInterest" | "registerinterest" => {
-                    Self::register_interest(player, &member_ref, args)
-                }
-                "removeInterest" | "removeinterest" => {
-                    Self::remove_interest(player, &member_ref, args)
-                }
-                "registerStepCallback" | "registerstepcallback" => {
-                    Self::register_step_callback(player, &member_ref, args)
-                }
-                "removeStepCallback" | "removestepcallback" => {
-                    Self::remove_step_callback(player, &member_ref, args)
-                }
-                "enableCollision" | "enablecollision" => {
-                    Self::enable_collision(player, &member_ref, args)
-                }
-                "disableCollision" | "disablecollision" => {
-                    Self::disable_collision(player, &member_ref, args)
-                }
-                "enableAllCollisions" | "enableallcollisions" => {
-                    Self::enable_all_collisions(player, &member_ref, args)
-                }
-                "disableAllCollisions" | "disableallcollisions" => {
-                    Self::disable_all_collisions(player, &member_ref, args)
-                }
+                "linearDashpot" => Self::get_linear_dashpot(player, &member_ref, args),
+                "angularDashpot" => Self::get_angular_dashpot(player, &member_ref, args),
+                "makeMovableRigidBody" => Self::make_movable_rigid_body(player, &member_ref, args),
+                "makeFixedRigidBody" => Self::make_fixed_rigid_body(player, &member_ref, args),
+                "makeSpring" => Self::make_spring(player, &member_ref, args),
+                "makeLinearDashpot" => Self::make_linear_dashpot(player, &member_ref, args),
+                "makeAngularDashpot" => Self::make_angular_dashpot(player, &member_ref, args),
+                "deleteRigidBody" => Self::delete_rigid_body(player, &member_ref, args),
+                "deleteSpring" => Self::delete_spring(player, &member_ref, args),
+                "deleteLinearDashpot" => Self::delete_linear_dashpot(player, &member_ref, args),
+                "deleteAngularDashpot" => Self::delete_angular_dashpot(player, &member_ref, args),
+                "registerInterest" => Self::register_interest(player, &member_ref, args),
+                "removeInterest" => Self::remove_interest(player, &member_ref, args),
+                "registerStepCallback" => Self::register_step_callback(player, &member_ref, args),
+                "removeStepCallback" => Self::remove_step_callback(player, &member_ref, args),
+                "enableCollision" => Self::enable_collision(player, &member_ref, args),
+                "disableCollision" => Self::disable_collision(player, &member_ref, args),
+                "enableAllCollisions" => Self::enable_all_collisions(player, &member_ref, args),
+                "disableAllCollisions" => Self::disable_all_collisions(player, &member_ref, args),
                 "getProp" => {
                     let prop = player.get_datum(&args[0]).string_value()?;
                     let result = Self::get_prop(player, &member_ref, &prop)?;
                     Ok(player.alloc_datum(result))
-                }
+                },
                 "count" => {
                     // count(#rigidBody) etc.
                     let prop = player.get_datum(&args[0]).string_value()?;
@@ -598,7 +667,7 @@ impl HavokPhysicsMemberHandlers {
                     } else {
                         Ok(player.alloc_datum(Datum::Int(0)))
                     }
-                }
+                },
                 "getAt" | "getPropRef" => {
                     // member("havok").rigidBody[i] — getAt dispatches here
                     let prop = player.get_datum(&args[0]).string_value()?;
@@ -618,12 +687,12 @@ impl HavokPhysicsMemberHandlers {
                     } else {
                         Ok(player.alloc_datum(list_datum))
                     }
-                }
+                },
                 _ => Err(ScriptError::new(format!(
                     "No handler {} for Havok member",
                     handler_name
-                ))),
-            }
+                )))
+            })
         })
     }
 
@@ -1206,11 +1275,69 @@ impl HavokPhysicsMemberHandlers {
         Ok(DatumRef::Void)
     }
 
-    fn step(
+    /// Phase 1 of an INTERLEAVED step: parse the arguments and snapshot this
+    /// step's forces, returning the prep so the caller can run substeps itself.
+    /// Used by `step_with_callbacks_interleaved`, which fires step callbacks
+    /// between substeps the way the Xtra does.
+    pub fn step_begin_phase(
         player: &mut crate::player::DirPlayer,
         member_ref: &CastMemberRef,
         args: &Vec<DatumRef>,
+    ) -> Result<(super::havok_physics::StepPrep, f64), ScriptError> {
+        let (time_increment, num_sub_steps) = Self::step_args(player, member_ref, args)?;
+        let havok = Self::havok_mut(player, member_ref)?;
+        let prep = super::havok_physics::step_begin(&mut havok.state, time_increment, num_sub_steps);
+        Ok((prep, time_increment))
+    }
+
+    /// Phase 2: one substep. Called once per substep, with the step callbacks
+    /// invoked in between so a state-dependent callback re-evaluates against
+    /// the position the previous substep produced.
+    pub fn step_substep_phase(
+        player: &mut crate::player::DirPlayer,
+        member_ref: &CastMemberRef,
+        prep: &super::havok_physics::StepPrep,
+    ) -> Result<(), ScriptError> {
+        let havok = Self::havok_mut(player, member_ref)?;
+        super::havok_physics::step_substep(&mut havok.state, prep);
+        Ok(())
+    }
+
+    /// Phase 3: the once-per-step tail (force clearing, damping, sleep) plus
+    /// the ground-Z estimate and W3D transform sync that `step` does.
+    pub fn step_finish_phase(
+        player: &mut crate::player::DirPlayer,
+        member_ref: &CastMemberRef,
+        time_increment: f64,
     ) -> Result<DatumRef, ScriptError> {
+        {
+            let havok = Self::havok_mut(player, member_ref)?;
+            super::havok_physics::step_finish(&mut havok.state, time_increment);
+        }
+        Self::step_post(player, member_ref)
+    }
+
+    fn havok_mut<'a>(
+        player: &'a mut crate::player::DirPlayer,
+        member_ref: &CastMemberRef,
+    ) -> Result<&'a mut crate::player::cast_member::HavokPhysicsMember, ScriptError> {
+        let member = player
+            .movie
+            .cast_manager
+            .find_mut_member_by_ref(member_ref)
+            .ok_or_else(|| ScriptError::new("Havok member not found".to_string()))?;
+        match &mut member.member_type {
+            CastMemberType::HavokPhysics(h) => Ok(h),
+            _ => Err(ScriptError::new("Not a Havok member".to_string())),
+        }
+    }
+
+    /// Argument parsing shared by the one-shot and interleaved step paths.
+    fn step_args(
+        player: &mut crate::player::DirPlayer,
+        member_ref: &CastMemberRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<(f64, i32), ScriptError> {
         let time_increment = if !args.is_empty() {
             player.get_datum(&args[0]).to_float()?
         } else {
@@ -1238,19 +1365,15 @@ impl HavokPhysicsMemberHandlers {
             }
         };
 
-        let member = player
-            .movie
-            .cast_manager
-            .find_mut_member_by_ref(member_ref)
-            .ok_or_else(|| ScriptError::new("Havok member not found".to_string()))?;
-        let havok = match &mut member.member_type {
-            CastMemberType::HavokPhysics(h) => h,
-            _ => return Err(ScriptError::new("Not a Havok member".to_string())),
-        };
+        Ok((time_increment, num_sub_steps))
+    }
 
-        // Use native Havok physics (replaces Rapier)
-        super::havok_physics::step_native(&mut havok.state, time_increment, num_sub_steps);
-
+    /// The per-step tail shared by both paths: ground-Z estimate and W3D sync.
+    fn step_post(
+        player: &mut crate::player::DirPlayer,
+        member_ref: &CastMemberRef,
+    ) -> Result<DatumRef, ScriptError> {
+        let havok = Self::havok_mut(player, member_ref)?;
         // Detect ground Z on first step if not set
         // Derive ground Z from the scene if not set yet.
         // If we have collision meshes, the per-body raycast in
@@ -1289,7 +1412,7 @@ impl HavokPhysicsMemberHandlers {
         // Without this, Lingo sees a stale initial transform and wheel.ls's
         // `pCar.getModel().transform.inverse() * pRealWorldPos` produces garbage
         // local points → wrong torque lever arms → car flips.
-        drop(member);
+        drop(havok);
         let w3d_ref = CastMemberRef { cast_lib: w3d_cast_lib, cast_member: w3d_cast_member };
         for (name, t) in &sync_data {
             if t.iter().any(|v| !v.is_finite()) { continue; }
@@ -1299,6 +1422,23 @@ impl HavokPhysicsMemberHandlers {
         }
 
         Ok(DatumRef::Void)
+    }
+
+    fn step(
+        player: &mut crate::player::DirPlayer,
+        member_ref: &CastMemberRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        let (time_increment, num_sub_steps) = Self::step_args(player, member_ref, args)?;
+        {
+            let havok = Self::havok_mut(player, member_ref)?;
+            let prep = super::havok_physics::step_begin(&mut havok.state, time_increment, num_sub_steps);
+            for _ in 0..prep.n_subs {
+                super::havok_physics::step_substep(&mut havok.state, &prep);
+            }
+            super::havok_physics::step_finish(&mut havok.state, time_increment);
+        }
+        Self::step_post(player, member_ref)
     }
 
     fn reset(
@@ -2344,4 +2484,172 @@ fn axis_angle_to_transform(ax: f32, ay: f32, az: f32, angle: f32, px: f32, py: f
         t*x*z + s*y, t*y*z - s*x, t*z*z + c,   0.0,
         px,          py,          pz,          1.0,
     ]
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod steering_response_tests {
+    //! Deterministic stand-in for a car holding full lock, with no track, no
+    //! collisions and no AI. Measuring steering through gameplay is hopelessly
+    //! noisy — repeat runs of the same manoeuvre disagree on the SIGN of the
+    //! yaw rate as the car clips walls — so the balance between the per-frame
+    //! angular impulse and the drag opposing it is pinned here instead.
+    //!
+    //! Numbers are Age of Speed 2's: chassis mass 100 with the authored
+    //! half-extents, worldScale 0.0254, angular drag 100000, and the impulse
+    //! the movie applies every frame at full lock,
+    //!   turnGain(2.5) * mass(100) * powerCoeff(1) * rotCoeff(3.65) * dt * 25
+    //!
+    //! Run with:
+    //!   cargo test --lib --manifest-path vm-rust/Cargo.toml steering_response
+    //!   TRACE_YAW=1 cargo test ... -- --nocapture
+    use crate::player::cast_member::{HavokPhysicsState, HavokRigidBody};
+    use crate::player::symbols::symbol::Symbol;
+    use crate::player::symbols::symbol_table::init_symbol_table;
+    use super::super::havok_physics::{box_unit_inertia, recompute_body_inertia, step_native};
+
+    const WORLD_SCALE: f64 = 0.0254;
+    const HALF_EXTENTS: [f64; 3] = [144.70, 192.35, 34.31];
+    const MASS: f64 = 100.0;
+    const ANGULAR_DRAG: f64 = 100_000.0;
+    const DT: f64 = 0.018;
+
+    fn chassis_state() -> HavokPhysicsState {
+        init_symbol_table();
+        let mut state = HavokPhysicsState::default();
+        state.scale = WORLD_SCALE;
+        state.gravity = [0.0, 0.0, 0.0];
+        state.drag_params = [0.0, ANGULAR_DRAG];
+        let mut rb = HavokRigidBody::new_movable(Symbol::from_str("veh_chassis_1"), MASS, true);
+        let unit_i = box_unit_inertia(HALF_EXTENTS);
+        recompute_body_inertia(MASS, unit_i, &mut rb.inertia_tensor,
+                               &mut rb.inverse_inertia_tensor, &mut rb.inverse_mass);
+        rb.inertia_half_extents = HALF_EXTENTS;
+        rb.unit_inertia_tensor = unit_i;
+        rb.active = true;
+        state.rigid_bodies.push(rb);
+        state
+    }
+
+    /// Hold full lock for `frames` at `subs` substeps; return the settled yaw.
+    ///
+    fn settled_yaw_with(frames: usize, subs: i32) -> f64 {
+        let mut state = chassis_state();
+        let impulse = 2.5 * MASS * 1.0 * 3.65 * DT * 25.0;
+        // The engine compensates a DISPLAY-scale tensor with (1/worldScale)^2 in
+        // applyAngularImpulse. A metre-scale tensor needs no such factor, so the
+        // two must move together or the impulse and the drag disagree by 1550x.
+        let inv_scale_sq = (1.0 / WORLD_SCALE) * (1.0 / WORLD_SCALE);
+        // NB: apply_drag now applies the same factor internally for the
+        // display-scale case, so both sides of the balance carry it.
+        let trace = std::env::var("TRACE_YAW").is_ok();
+        for f in 0..frames {
+            let dw = state.rigid_bodies[0].inverse_inertia_tensor[8] * impulse * inv_scale_sq;
+            state.rigid_bodies[0].angular_velocity[2] += dw;
+            step_native(&mut state, DT, subs);
+            if trace && f < 8 {
+                println!("      subs={subs} f{f} -> w={:+.5}",
+                         state.rigid_bodies[0].angular_velocity[2]);
+            }
+        }
+        state.rigid_bodies[0].angular_velocity[2].abs()
+    }
+
+    /// Angular drag must not blow up or invert. It used to be added as a TORQUE
+    /// and integrated with explicit Euler, which is only CONDITIONALLY stable:
+    /// the per-substep decay is `angular_drag * I^-1 * sub_dt`, 1.445 here at
+    /// one substep. Past 1 the damping overshoots through zero into a
+    /// COUNTER-rotation; near 2 it diverges. `subSteps` is a solver-accuracy
+    /// knob and must not change the physics:
+    ///
+    ///     subSteps      1       2       5      10
+    ///     torque    -0.094   17.14   0.065   0.077   <- unstable, sign flip
+    ///     decay      0.192   0.144   0.112   0.100   <- stable, converging
+    ///
+    /// The residual spread is honest: with `a*dt = 1.445` the per-frame decay
+    /// is large, so more substeps genuinely means a more accurate continuous
+    /// decay (converging toward `exp(-a*dt)`). `w_eq = L/(drag*dt)` only holds
+    /// when `a*dt << 1`, so this is a stability tripwire, not a parity check.
+    #[test]
+    fn angular_drag_is_stable_at_every_substep_count() {
+        for subs in [1, 2, 5, 10] {
+            let w = settled_yaw_with(80, subs);
+            assert!(w.is_finite() && (0.0..2.0).contains(&w),
+                "subSteps={subs}: settled yaw {w:.4} rad/s is diverging or inverted");
+        }
+    }
+
+    /// STILL OPEN — the AoS2 defect itself.
+    ///
+    /// Director holds ~0.24 rad/s at full lock (median over every full-lock
+    /// frame above 150 km/h in a real capture; p90 0.305). We ramp without
+    /// settling, because the chassis inertia is in DISPLAY units: that makes
+    /// `drag * I^-1 * dt` about 0.001, so damping is ~1550x too weak to bite.
+    ///
+    /// DIRECTOR'S ACTUAL TENSOR, measured. `angularMomentum` is Get/Set on
+    /// hkRigidBody and L = I*w, so dividing it by `angularVelocity` reads the
+    /// real inertia straight out of a running Director. For this chassis
+    /// (mass 100), over thousands of frames with p10-p90 inside 0.1%:
+    ///
+    ///     I_xx = 259.84    I_yy = 279.00    I_zz = 489.80
+    ///
+    /// Ours, from the mesh AABB in display units: 1.272e6 / 7.372e5 / 1.931e6.
+    /// Times worldScale^2: 821 / 476 / 1246. So TWO errors compound:
+    ///
+    ///   1. UNITS. Director's is metre-scale (hundreds, not ~1e6). Confirmed.
+    ///   2. SHAPE. Even after the unit conversion we are 1.7-3.2x high, and not
+    ///      by a constant, so it is not another scale factor. Solving Director's
+    ///      diagonal back into an equivalent uniform box gives half-extents
+    ///      (2.76, 2.66, 0.86) m = (108.8, 104.6, 33.8) display units against
+    ///      our (144.7, 192.35, 34.3). Z agrees; our Y is ~2x too long. That is
+    ///      the AABB: `makeMovableRigidBody(.., isConvex=0)` routes to
+    ///      `box_unit_inertia` on the bounding box, while the engine derives it
+    ///      from the real geometry, and a car carries no mass at the nose and
+    ///      tail extremes.
+    ///
+    /// CONFIRMED ON A SECOND CAR. Age of Speed 1, mass 15000 (Director's
+    /// rigid body reports the same; its Lingo `pChassisMass = 500` is a
+    /// separate force constant, not the body mass):
+    ///
+    ///     Director   I_xx 170202   I_yy 67871   I_zz 230620
+    ///     ours*ws^2  I_xx 187781   I_yy 68936   I_zz 230632
+    ///
+    /// I_zz agrees to 0.005%. AoS1's chassis goes through the HKE mesh path, so
+    /// its tensor is polyhedron-derived and the SHAPE is already right — the
+    /// only error is the units. AoS2 is box-derived (makeMovableRigidBody with
+    /// isConvex=0 routes to `box_unit_inertia` on the AABB) and is additionally
+    /// 2-3x too large. Using `compute_polyhedron_unit_inertia` there too would
+    /// close that gap.
+    ///
+    /// WHY THE DRAG FIX CANNOT AFFECT AoS1: its angular drag is 30000 against
+    /// AoS2's 100000, and its inertia is far larger, so the per-frame decay is
+    /// `30000 * 2.7976e-9 * 1550 * 0.018` = 0.0023 — 0.23%, negligible. AoS1
+    /// damps through its Lingo terms (OppositeSteeringResistence = -7680, where
+    /// AoS2 sets both steering resistances to 0 and depends entirely on the
+    /// physics drag). Measured yaw accel is inconclusive by design: across 15
+    /// presses in a Director capture it runs median 1.212, p25 -0.003, p75
+    /// 1.524 — the track, not the engine, dominates. Do not chase an AoS1
+    /// steering delta through gameplay; the signal is not there to find.
+    ///
+    /// REFUTED — converting just the tensor to metres (x worldScale^2 in
+    /// `recompute_body_inertia`, dropping the matching `(1/worldScale)^2` from
+    /// applyAngularImpulse/applyTorque). The unit numbers come right (settles
+    /// at 0.112) but it WRECKS the car in game: `applyForceAtPoint` builds its
+    /// lever arm `r` in DISPLAY units, so `r x F` is display-scale and becomes
+    /// ~1550x too strong against a metre-scale tensor. Measured: the hover
+    /// forces tumble the chassis instantly — 8.7 km/h, all four wheels off the
+    /// ground, speed going negative. Converting the inertia means converting
+    /// the whole body space (positions, lever arms, contacts, meshes), not one
+    /// tensor.
+    #[test]
+    #[ignore = "KNOWN FAILING: documents the open AoS2 steering defect and the \
+refuted metre-inertia shortcut — see the doc comment before attempting a fix."]
+    fn steering_settles_like_director() {
+        let short = settled_yaw_with(10, 5);
+        let long = settled_yaw_with(60, 5);
+        println!("display-scale: yaw after 10 = {short:.4}, after 60 = {long:.4} rad/s (Director median 0.236, p90 0.305)");
+        assert!(long < short * 1.5,
+            "yaw never settles: {short:.3} rad/s after 10 frames but {long:.3} after 60");
+        assert!((0.10..=0.60).contains(&long),
+            "settled yaw {long:.3} rad/s is outside Director's band (~0.24, p90 0.305)");
+    }
 }

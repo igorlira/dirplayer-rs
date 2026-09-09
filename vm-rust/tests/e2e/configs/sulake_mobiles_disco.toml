@@ -3,3 +3,4 @@ path = "dcr_sulake/mobiles_disco/dcr_0519b_e/20000201_mobiles_disco.dcr"
 
 [test]
 suite = "sulake"
+tags = ["2d"]

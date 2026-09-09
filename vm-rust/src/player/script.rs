@@ -592,9 +592,29 @@ pub async fn player_set_obj_prop(
         Datum::MathRef(_) => reserve_player_mut(|player| {
             MathDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
         }),
-        Datum::Vector(..) => reserve_player_mut(|player| {
-            VectorDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
-        }),
+        Datum::Vector(..) => {
+            reserve_player_mut(|player| {
+                VectorDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
+            })?;
+            // `my.worldPosition.z = pFloor + 5` — the component write above
+            // landed on the vector the 3D getter just built, which is a COPY of
+            // derived node state. Replay the mutated vector onto the node it
+            // came from, which is what Director's lvalue chain does. See
+            // `DirPlayer::vector_prop_lvalue`.
+            let writeback = reserve_player_mut(|player| {
+                Ok(match player.vector_prop_lvalue.iter().rposition(|(v, _, _)| v == obj_ref) {
+                    Some(i) => {
+                        let (_, receiver, prop) = player.vector_prop_lvalue.remove(i);
+                        Some((receiver, prop))
+                    }
+                    None => None,
+                })
+            })?;
+            if let Some((receiver, prop)) = writeback {
+                Box::pin(player_set_obj_prop(&receiver, prop, obj_ref)).await?;
+            }
+            Ok(())
+        }
         Datum::SoundChannel(_) => reserve_player_mut(|player| {
             SoundChannelDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
         }),
@@ -610,6 +630,12 @@ pub async fn player_set_obj_prop(
             });
             crate::player::handlers::datum_handlers::shockwave3d_object::Shockwave3dObjectDatumHandlers::set_prop(obj_ref, prop_name.as_str(), &value_datum)
         }
+        Datum::MixerSoundObjectRef(..) => {
+            let value_datum = reserve_player_ref(|player| {
+                player.get_datum(value_ref).clone()
+            });
+            crate::player::handlers::datum_handlers::cast_member::mixer::MixerSoundObjectHandlers::set_prop(obj_ref, prop_name.as_str(), &value_datum)
+        }
         Datum::Transform3d(_) => reserve_player_mut(|player| {
             crate::player::handlers::datum_handlers::transform3d::Transform3dDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
         }),
@@ -618,6 +644,41 @@ pub async fn player_set_obj_prop(
         }
         Datum::PhysXObjectRef(_) => {
             crate::player::handlers::datum_handlers::physx_object::PhysXObjectDatumHandlers::set_prop(obj_ref, prop_name.as_str(), value_ref.clone())
+        }
+        // `model.shaderList.<prop> = value` — the UN-indexed broadcast form.
+        //
+        // Director 11.5 Scripting Dictionary, `shaderList`: "Set a property of
+        // all of the shaders of a model to the same value with this syntax
+        // (note the absence of an index for the shaderList):
+        //     member(whichCastmember).model(whichModel).shaderList.whichProperty
+        //         = propValue"
+        // and the per-property entries spell the same optionality out in their
+        // Usage lines, e.g. `blend (3D)`:
+        //     member(x).model(y).shaderList{[index]}.blend
+        //
+        // `model.shaderList` answers a LINEAR LIST of shader references, so the
+        // broadcast arrives here as a property set on that list. Gate it on
+        // every element being a SHADER reference: the indexed form
+        // (`shaderList[i].blend`) never reaches this arm, `textureList` and the
+        // other 3D collections hold different object types, and a property set
+        // on any other list still raises exactly as before.
+        //
+        // TRECH's `buildBody` opens with `jBody.shaderList.blend = 100` on the
+        // freshly cloned avatar mesh, so without this the whole login path died
+        // ("set_obj_prop was passed an invalid datum: [shader(...), ...]") and
+        // the game could never be entered.
+        Datum::List(_, ref items, _) if !items.is_empty() && items.iter().all(|item| {
+            matches!(
+                reserve_player_ref(|player| player.get_datum(item).clone()),
+                Datum::Shockwave3dObjectRef(ref r) if r.object_type == BuiltInSymbol::Shader
+            )
+        }) => {
+            let value_datum = reserve_player_ref(|player| player.get_datum(value_ref).clone());
+            for item in items {
+                crate::player::handlers::datum_handlers::shockwave3d_object::Shockwave3dObjectDatumHandlers
+                    ::set_prop(item, prop_name.as_str(), &value_datum)?;
+            }
+            Ok(())
         }
         Datum::Void | Datum::Null => {
             // In Director, setting a property on void/nothing is a no-op (silently ignored)
@@ -679,12 +740,56 @@ pub fn get_obj_prop(
             let is_void = matches!(obj_clone, Datum::Void);
             return Ok(player.alloc_datum(Datum::Int(if is_void { 1 } else { 0 })));
         }
+        Some(BuiltInSymbol::Vectorp) => {
+            let is_vector = matches!(obj_clone, Datum::Vector(_));
+            return Ok(player.alloc_datum(Datum::Int(if is_vector { 1 } else { 0 })));
+        }
         _ => {}
     }
 
     match obj_clone {
-        Datum::CastLib(cast_lib) => {
-            let cast_lib = player.movie.cast_manager.get_cast(cast_lib as u32)?;
+        Datum::CastLib(cast_lib_num) => {
+            // `castLib(x).member` with NO index — the cast library's member
+            // COLLECTION. Director 11.5 Scripting Dictionary, `member (Cast)`:
+            // "Cast library property; provides indexed or named access to the
+            // members of a cast library." `castLib(x).member[i]` compiles to
+            // getPropRef(#member, i) and is answered in CastLibDatumHandlers;
+            // the bare form lands here, and scripts walk it as a collection:
+            //     pcount = _movie.castLib("Engine").member.count
+            //     repeat with i = 1 to pcount
+            //       pMember = _movie.castLib("Engine").member[i]
+            // (Burnin' Rubber 2's `[M] Event Manager Functions.AddModule`, and
+            // the dictionary's own `put(castLib(n).name && "contains" &&
+            // castLib(n).member.count && "cast members.")`).
+            //
+            // Hand back one entry per member SLOT, 1..highest-in-use, so the
+            // list's own indices are the member numbers `member[i]` resolves —
+            // the same reasoning `numberOfCastMembers` already documents below:
+            // casts have gaps, and a walk keyed off `.count` must still reach
+            // every populated slot. Raising "Cannot get castLib property
+            // member" instead aborted both AddScript and AddModule on their
+            // very first statement.
+            if prop_name.eq_builtin(BuiltInSymbol::Member) {
+                let max_id = player
+                    .movie
+                    .cast_manager
+                    .get_cast(cast_lib_num as u32)?
+                    .max_member_id();
+                let items: std::collections::VecDeque<DatumRef> = (1..=max_id)
+                    .map(|n| {
+                        player.alloc_datum(Datum::CastMember(CastMemberRef {
+                            cast_lib: cast_lib_num as i32,
+                            cast_member: n as i32,
+                        }))
+                    })
+                    .collect();
+                return Ok(player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    items,
+                    false,
+                )));
+            }
+            let cast_lib = player.movie.cast_manager.get_cast(cast_lib_num as u32)?;
             Ok(player.alloc_datum(cast_lib.get_prop(prop_name)?))
         }
         Datum::CastMember(member_ref) => {
@@ -716,6 +821,19 @@ pub fn get_obj_prop(
                 let datum_clone = Datum::List(list_type, list.clone(), sorted);
                 let s = crate::player::datum_formatting::format_concrete_datum(&datum_clone, player);
                 return Ok(player.alloc_datum(Datum::String(s)));
+            }
+            // `meshDeform.mesh[m].face[f].neighbor`. `face[f]` is a plain list so
+            // that it keeps VALUE semantics (Splat harvests faces, deletes the
+            // model, and only then reads them), so the adjacency hangs off the
+            // identity of the datum that was handed out. This chained-prop path is
+            // the one Rifleman's `...face[f].neighbor` actually takes — the mirror
+            // intercept in ListDatumHandlers::get_prop is never reached for it.
+            if prop_name.as_str().eq_ignore_ascii_case("neighbor") {
+                if let Some(d) = crate::player::handlers::datum_handlers::shockwave3d_object
+                    ::meshdeform_face_neighbor_of(player, obj_ref)
+                {
+                    return Ok(player.alloc_datum(d));
+                }
             }
             Ok(player.alloc_datum(ListDatumUtils::get_prop(
                 &list,
@@ -1201,6 +1319,9 @@ pub fn get_obj_prop(
         }
         Datum::Shockwave3dObjectRef(_) => {
             crate::player::handlers::datum_handlers::shockwave3d_object::Shockwave3dObjectDatumHandlers::get_prop(obj_ref, prop_name.as_str())
+        }
+        Datum::MixerSoundObjectRef(..) => {
+            crate::player::handlers::datum_handlers::cast_member::mixer::MixerSoundObjectHandlers::get_prop(obj_ref, prop_name.as_str())
         }
         Datum::Transform3d(_) => {
             let result = crate::player::handlers::datum_handlers::transform3d::Transform3dDatumHandlers::get_prop(player, obj_ref, prop_name)?;

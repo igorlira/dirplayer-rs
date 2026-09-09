@@ -1,0 +1,25 @@
+[movie]
+# Xform / Shockwave.com "Burnin' Rubber 2" — Shockwave 3D + Havok, D11.
+# `Preloader.dcr` is the shipped entry point; its only job is
+# `preloadNetThing(_movie.path & "BurninRubber2.dcr")` followed by
+# `gotoNetMovie`, so the test loads the main movie directly.
+#
+# Unlike BR1 there are no loose `Data/*.txt` event files: everything the
+# engine needs at boot lives in the Internal cast, and the seven content
+# casts (Shared, Cars, Desert, Snow, City, Boulevard, Forest) are pulled at
+# runtime by `[PS] Download Casts MAIN` with
+# `preloadNetThing(_movie.path & "Data/<name>.cct")` and then linked into the
+# three placeholder libs `eShared` / `eCars` / `eTrack` via
+# `castLib(x).fileName = url`.
+path = "dcr_misc/burnin_rubber2/BurninRubber2.dcr"
+
+# NB: NO `_moviePath` override — `p.Root = _movie.path` is what every
+# `Data/*.cct` download URL is built from, so it must stay the real served
+# location. `_player.runMode` defaults to "Plugin", which is what puts
+# `InitGlobals` into `g.local = 0` (the network path) instead of the
+# authoring path that reads `\Data\...` off a local disk.
+
+[test]
+suite = "misc"
+tags = ["3d", "havok"]
+default_timeout = 300.0

@@ -2,6 +2,7 @@ import { useMeasure } from "@uidotdev/usehooks";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   set_stage_size,
+  set_stage_pixel_ratio,
   player_create_canvas,
   mouse_move,
   mouse_move_delta,
@@ -12,6 +13,9 @@ import {
   key_down,
   key_up,
   wants_pointer_lock,
+  wants_fullscreen,
+  player_set_fullscreen,
+  set_fullscreen_active,
   player_set_picking_mode,
   player_get_sprite_at,
   player_set_debug_selected_channel,
@@ -30,6 +34,7 @@ import {
   ime_composition_update,
   ime_composition_end,
   set_renderer_backend,
+  set_pointer_locked,
 } from "vm-rust";
 import { useAppDispatch } from "../../store/hooks";
 import { channelSelected } from "../../store/uiSlice";
@@ -188,7 +193,42 @@ function PanIcon() {
   );
 }
 
-export default function Stage({ showControls, enableGestures }: { showControls?: boolean; enableGestures?: boolean }) {
+// Corner arrows pointing outward / inward — the convention every video player
+// uses, so it reads as "fullscreen" without a label.
+function EnterFullscreenIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+      <path d="M16 3h3a2 2 0 0 1 2 2v3" />
+      <path d="M8 21H5a2 2 0 0 1-2-2v-3" />
+      <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+    </svg>
+  );
+}
+
+function ExitFullscreenIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 8h3a2 2 0 0 0 2-2V3" />
+      <path d="M21 8h-3a2 2 0 0 1-2-2V3" />
+      <path d="M3 16h3a2 2 0 0 1 2 2v3" />
+      <path d="M21 16h-3a2 2 0 0 0-2 2v3" />
+    </svg>
+  );
+}
+
+export default function Stage({
+  showControls,
+  enableGestures,
+  // Default ON: a fullscreen button is wanted almost everywhere, and unlike the
+  // pan/zoom gestures it cannot interfere with how a movie reads input. Hosts
+  // that want a bare stage turn it off explicitly.
+  showFullscreenButton = true,
+}: {
+  showControls?: boolean;
+  enableGestures?: boolean;
+  showFullscreenButton?: boolean;
+}) {
   const [outerMeasureRef, { width: outerWidth, height: outerHeight }] = useMeasure();
   const [stageMeasureRef, { width: stageWidth, height: stageHeight }] = useMeasure();
   const isStageCanvasCreated = useRef(false);
@@ -198,6 +238,9 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
   const [pan, setPan] = useState<Pt>({ x: 0, y: 0 });
   const [pickingMode, setPickingMode] = useState(false);
   const [panMode, setPanMode] = useState(false);
+  // Mirrors the browser's real fullscreen state so the toolbar button shows
+  // the right icon after an Esc / F11 exit we did not drive.
+  const [isFullscreen, setIsFullscreen] = useState(false);
   // Frontend-driven cursor override. JS keeps authority over the I-beam
   // because the WASM-side draw_cursor runs once per frame and the hover/drag
   // state isn't visible to it; relying on the VM kept losing the I-beam mid-
@@ -238,6 +281,12 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
   // `dirplayer-polyfill.js`, on every click, so mouse-look never engaged and
   // the relocking tripped Chrome's request rate limiter.
   const lockedElRef = useRef<Element | null>(null);
+  // The element THIS player put into fullscreen, or null — same ownership
+  // reasoning as `lockedElRef` above.
+  const fullscreenElRef = useRef<Element | null>(null);
+  // The zoom the stage was at before it went fullscreen, restored on the way
+  // back out so fullscreen does not quietly redefine the user's 100%.
+  const preFullscreenViewRef = useRef<{ scale: number; pan: Pt; userHasPanned: boolean } | null>(null);
   // text-edit drag state: which sprite the press started on, so subsequent
   // pointermoves extend the selection inside that field.
   const textDragRef = useRef<{ spriteId: number } | null>(null);
@@ -292,6 +341,38 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
     }
   }, [outerWidth, outerHeight]);
 
+  // Tell the VM how many physical pixels the display puts behind one CSS
+  // pixel, so the stage canvas is RENDERED at the size it is shown at instead
+  // of being drawn small and blown up by the compositor. A phone hands the page
+  // 873x393 CSS pixels over a 2400x1080 screen: without this a 760x520 movie is
+  // rasterised at 0.756 and magnified back nearly 3x, which is why text the
+  // movie bakes into a bitmap itself (the Coke Studios room list) came out
+  // unreadable while ordinary text sprites — re-rasterised per frame — did not.
+  //
+  // `devicePixelRatio` changes when the window moves between monitors or the
+  // page is zoomed; the matchMedia trick is the standard way to hear about it
+  // (the query has to be rebuilt each time because it is pinned to the value
+  // that was current when it was created).
+  useEffect(() => {
+    let media: MediaQueryList | null = null;
+    let cancelled = false;
+    const apply = () => {
+      if (cancelled) return;
+      const dpr = window.devicePixelRatio || 1;
+      set_stage_pixel_ratio(dpr);
+      media?.removeEventListener("change", apply);
+      media = window.matchMedia(`(resolution: ${dpr}dppx)`);
+      media.addEventListener("change", apply);
+    };
+    apply();
+    return () => {
+      cancelled = true;
+      media?.removeEventListener("change", apply);
+    };
+  }, []);
+
+  // CSS pixels — `set_stage_pixel_ratio` above is what turns these into the
+  // canvas' device-pixel size, and pointer coordinates stay in this same unit.
   useEffect(() => {
     if (!outerWidth || !outerHeight) return;
     set_stage_size(outerWidth, outerHeight);
@@ -363,6 +444,7 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
         if (!wants_pointer_lock()) {
           document.exitPointerLock();
           lockedElRef.current = null;
+          set_pointer_locked(false);
           return;
         }
         mouse_move_delta(e.movementX, e.movementY);
@@ -383,10 +465,22 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
         key_up(e.key, e.keyCode);
       }
     };
+    // Tell the VM whether the browser REALLY holds the lock. While it does, the
+    // cursor is frozen at the lock-engage point, so every click carries that stale
+    // position; the VM must keep its delta-managed `mouse_loc` instead of taking
+    // it, or the movie's mouselook read turns the jump into a one-frame view snap
+    // and the shot fired on that frame goes with it. The VM cannot infer this from
+    // `wants_pointer_lock` alone — that is movie intent, and a sprite cursor
+    // assignment clears it.
+    const handleLockChange = () => {
+      set_pointer_locked(ownsPointerLock());
+    };
+    document.addEventListener("pointerlockchange", handleLockChange);
     document.addEventListener("mousemove", handleLockedMouseMove);
     document.addEventListener("keydown", handleKeyDown);
     document.addEventListener("keyup", handleKeyUp);
     return () => {
+      document.removeEventListener("pointerlockchange", handleLockChange);
       document.removeEventListener("mousemove", handleLockedMouseMove);
       document.removeEventListener("keydown", handleKeyDown);
       document.removeEventListener("keyup", handleKeyUp);
@@ -396,6 +490,132 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
   useEffect(() => {
     player_set_picking_mode(pickingMode);
   }, [pickingMode]);
+
+  // Host-page fullscreen hook, for movies that have no idea what fullscreen is.
+  //
+  // The Enhancer route only serves a movie that ships Enhancer and drives it
+  // from its own Settings page. Filling the screen is not really a movie
+  // concern though, so the same flag is exposed to whatever chrome the host
+  // wraps the player in — a button, a keybinding, the extension's toolbar.
+  // Works for any movie, 2D or 3D.
+  //
+  // Applied SYNCHRONOUSLY here rather than waiting for the next canvas click:
+  // `requestFullscreen` is only granted from inside a user gesture, and a host
+  // button's own click handler is exactly that gesture. Deferring would spend
+  // it.
+  useEffect(() => {
+    const w = window as unknown as {
+      dirplayerSetFullscreen?: (enabled: boolean) => void;
+      dirplayerToggleFullscreen?: () => void;
+    };
+    w.dirplayerSetFullscreen = (enabled: boolean) => {
+      player_set_fullscreen(enabled);
+      syncFullscreen();
+    };
+    w.dirplayerToggleFullscreen = () => {
+      w.dirplayerSetFullscreen?.(!document.fullscreenElement);
+    };
+    return () => {
+      delete w.dirplayerSetFullscreen;
+      delete w.dirplayerToggleFullscreen;
+    };
+  }, []);
+
+  // Fit the stage to the outer container and centre it. Used by fullscreen;
+  // NOT wired to ordinary resizes, where the user's zoom is their own.
+  const fitStageToContainer = useCallback(() => {
+    const outer = outerRef.current;
+    const stage = stageEl.current;
+    if (!outer || !stage || stage.offsetWidth <= 0 || stage.offsetHeight <= 0) return;
+    const rect = outer.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const fit = Math.min(
+      rect.width / stage.offsetWidth,
+      rect.height / stage.offsetHeight
+    );
+    const clamped = Math.max(MIN_SCALE, Math.min(MAX_SCALE, fit));
+    const es = getEffectiveScale(clamped);
+    setScale(clamped);
+    setPan({
+      x: (rect.width - stage.offsetWidth * es) / 2,
+      y: (rect.height - stage.offsetHeight * es) / 2,
+    });
+  }, []);
+
+  // Re-fit while fullscreen whenever the container's measured size changes.
+  //
+  // `fullscreenchange` can fire before the browser has laid the element out at
+  // its new size, and the fit read straight off the DOM would then size to the
+  // OLD rect. This picks up the real size when the ResizeObserver reports it,
+  // and doubles as the handler for the display changing underneath us.
+  useEffect(() => {
+    if (!outerWidth || !outerHeight) return;
+    if (!fullscreenElRef.current) return;
+    if (document.fullscreenElement !== fullscreenElRef.current) return;
+    fitStageToContainer();
+  }, [outerWidth, outerHeight, stageWidth, stageHeight, fitStageToContainer]);
+
+  // Scale the stage to fill the screen on the way into fullscreen, and put the
+  // user's own zoom back on the way out.
+  //
+  // The resize effect above only re-CENTRES the stage; it never touches the
+  // scale, which is right for the studio (the zoom slider is the user's) but
+  // wrong here — going fullscreen and getting the same 800x600 stage marooned
+  // in the middle of a 1920x1080 screen is not what anyone means by fullscreen.
+  //
+  // Measured off the live DOM rather than the `useMeasure` state: this runs
+  // from `fullscreenchange`, and the ResizeObserver that feeds those state
+  // values has not necessarily ticked yet. `offsetWidth`/`offsetHeight` are the
+  // stage's LAYOUT size, unaffected by the scale transform on its wrapper, so
+  // they stay the movie's own pixel dimensions at any zoom.
+  //
+  // Centring is forced rather than left to the resize effect, which bails out
+  // once the user has panned or zoomed — by fullscreen time they usually have.
+  useEffect(() => {
+    const onChange = () => {
+      const nowFullscreen = !!document.fullscreenElement
+        && document.fullscreenElement === fullscreenElRef.current;
+      setIsFullscreen(nowFullscreen);
+      // Tell the VM the REAL state (not the movie's intent). While it is set the
+      // stage lays itself out to the container, so the canvas is resized to the
+      // screen and the movie is RENDERED at that size instead of the CSS
+      // transform below blowing a small canvas up — which is what made
+      // fullscreen soft. `fitStageToContainer` then measures a canvas that
+      // already fills the container and settles on scale 1.
+      set_fullscreen_active(nowFullscreen);
+
+      if (nowFullscreen) {
+        if (!preFullscreenViewRef.current) {
+          preFullscreenViewRef.current = {
+            scale: scaleRef.current,
+            pan: panRef.current,
+            userHasPanned: userHasPannedRef.current,
+          };
+        }
+        fitStageToContainer();
+        return;
+      }
+
+      // Left fullscreen — by our own exitFullscreen, or by Esc / F11 / the
+      // browser's own UI. Either way the movie has to be told, or
+      // `wants_fullscreen` stays raised and the next click drags it back in.
+      if (fullscreenElRef.current) {
+        fullscreenElRef.current = null;
+        player_set_fullscreen(false);
+      }
+      const prev = preFullscreenViewRef.current;
+      if (prev) {
+        preFullscreenViewRef.current = null;
+        setScale(prev.scale);
+        setPan(prev.pan);
+        userHasPannedRef.current = prev.userHasPanned;
+      }
+    };
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+    // `fitStageToContainer` is a useCallback with no deps, so it is stable and
+    // this listener is still installed exactly once.
+  }, [fitStageToContainer]);
 
   // OS-clipboard bridge for editable Field/Text members. Listeners only act
   // when an editable member holds focus so they don't steal copy/paste from
@@ -494,6 +714,51 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
     return !!lockedElRef.current && document.pointerLockElement === lockedElRef.current;
   }
 
+  // Bring the browser's fullscreen state in line with what the movie asked for
+  // through the Enhancer Xtra. Called from inside a user gesture because that
+  // is the only place `requestFullscreen` is allowed.
+  //
+  // The OUTER container is the element that goes fullscreen, not the canvas:
+  // it is what `useMeasure` reports and therefore what drives `set_stage_size`
+  // and the auto-fit scale, so the stage grows to fill the screen and stays
+  // centred with the existing letterbox around it. Fullscreening the canvas
+  // instead would hand it to the browser at its own pixel size and leave the
+  // fit logic measuring a container that never changed.
+  //
+  // Ownership, as with the pointer lock: only ever exit a fullscreen WE
+  // entered, so a player embedded in a page that is itself fullscreen does not
+  // drop the host out of it.
+  function syncFullscreen() {
+    const el = outerRef.current;
+    if (!el) return;
+    const wants = wants_fullscreen();
+    const ours = !!fullscreenElRef.current
+      && document.fullscreenElement === fullscreenElRef.current;
+    if (wants && !document.fullscreenElement) {
+      fullscreenElRef.current = el;
+      // The browser refuses unless this call is inside a live user gesture.
+      // Say so out loud rather than failing silently — the usual way to hit
+      // this is typing `dirplayerToggleFullscreen()` into the DevTools console,
+      // which carries no activation, and a silent no-op there looks exactly
+      // like a broken feature. The movie stays windowed and the next click on
+      // the canvas retries, so the intent is not lost either way.
+      el.requestFullscreen?.().catch((err: unknown) => {
+        fullscreenElRef.current = null;
+        console.warn(
+          "[DirPlayer] requestFullscreen was refused — it must be called from " +
+          "inside a user gesture (a click/keydown handler). Calling it from the " +
+          "DevTools console will not work; bind it to a button instead. " +
+          "The request is still pending and will be applied on the next click " +
+          "on the stage.",
+          err
+        );
+      });
+    } else if (!wants && ours) {
+      fullscreenElRef.current = null;
+      document.exitFullscreen?.().catch(() => { /* already exited */ });
+    }
+  }
+
   function dispatchVMMouse(name: "move" | "down" | "up", canvasX: number, canvasY: number, e: React.PointerEvent) {
     if (pickingMode) {
       if (name === "move") {
@@ -568,6 +833,14 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
             canvas.requestPointerLock();
           }
         }
+        // Fullscreen, like pointer lock, is only granted from inside a user
+        // gesture — so it is applied here on the movie's behalf rather than
+        // pushed from the VM. Rasterwerks PHOSPHOR's Enhancer Xtra raises the
+        // flag from Settings -> Display Mode; the request lands on the next
+        // click the player handles. Errors are swallowed: the browser rejects
+        // the promise when the gesture has already been consumed, and there is
+        // nothing useful to do but leave the movie windowed.
+        syncFullscreen();
         break;
       }
       case "up":
@@ -825,6 +1098,23 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
             <PanIcon />
           </button>
         )}
+        {showFullscreenButton && (
+          <button
+            type="button"
+            className={isFullscreen ? styles.panToggleActive : styles.panToggle}
+            // A click handler IS the user gesture `requestFullscreen` needs, so
+            // this route always works — unlike `dirplayerToggleFullscreen()`
+            // typed into the console, which the browser refuses.
+            onClick={() => {
+              player_set_fullscreen(!isFullscreen);
+              syncFullscreen();
+            }}
+            title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
+            aria-pressed={isFullscreen}
+          >
+            {isFullscreen ? <ExitFullscreenIcon /> : <EnterFullscreenIcon />}
+          </button>
+        )}
         {enableGestures && showMinimap && stageWidth && stageHeight && outerWidth && outerHeight && (
           <MiniMap
             stageWidth={stageWidth}
@@ -939,7 +1229,13 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
           }
         }}
       />
-      {showControls && (
+      {/* Hidden while fullscreen: the bar is absolutely positioned INSIDE the
+          element that goes fullscreen, so it would sit over the movie, and the
+          fit measures the container's full height — the stage would run under
+          it. Its two controls are meaningless there anyway: Pick is a debug
+          tool, and the zoom is forced to the fit. Both come back on exit, at
+          the zoom that was in use before. */}
+      {showControls && !isFullscreen && (
         <div 
           className={styles.controlBar} 
           onPointerDown={e => e.stopPropagation()}

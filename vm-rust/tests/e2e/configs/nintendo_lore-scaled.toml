@@ -1,0 +1,10 @@
+[movie]
+path = "dcr_nintendo/lore.dcr"
+
+[external_params]
+# The layout fullscreen uses — see `nintendo_mario7-scaled.toml`.
+swStretchStyle = "meet"
+
+[test]
+suite = "nintendo"
+tags = ["2d"]

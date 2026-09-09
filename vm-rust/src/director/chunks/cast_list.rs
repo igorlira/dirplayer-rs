@@ -72,15 +72,22 @@ impl CastListChunk {
                         Endian::Big,
                     );
                 }
-                if header.items_per_cast >= 4 {
-                    let mut item_reader = BinaryReader::from_vec(
-                        &item_bufs[(i * header.items_per_cast + 4) as usize],
-                    );
+                // The item table can be SHORTER than cast_count * items_per_cast
+                // — Burnin' Rubber's `Data/Garage.cct` carries an MCsL whose
+                // header advertises more entries than the list actually holds,
+                // and indexing straight into `item_bufs` panicked the whole
+                // player on load. The string/u16 readers above already return a
+                // default when the index is past the end; do the same here, and
+                // leave min/max/id at 0 when the entry's fourth item is absent
+                // or truncated.
+                let idx = (i * header.items_per_cast + 4) as usize;
+                if header.items_per_cast >= 4 && idx < item_bufs.len() {
+                    let mut item_reader = BinaryReader::from_vec(&item_bufs[idx]);
                     item_reader.set_endian(reader.endian);
 
-                    min_member = item_reader.read_u16().unwrap();
-                    max_member = item_reader.read_u16().unwrap();
-                    id = item_reader.read_u32().unwrap();
+                    min_member = item_reader.read_u16().unwrap_or(0);
+                    max_member = item_reader.read_u16().unwrap_or(0);
+                    id = item_reader.read_u32().unwrap_or(0);
                 }
 
                 return CastListEntry {

@@ -185,6 +185,270 @@ pub struct Bitmap {
     pub was_trimmed: bool,
     /// Version counter for cache invalidation (incremented when bitmap data changes)
     pub version: u32,
+    /// Higher-resolution twin of this bitmap, used only to keep
+    /// Lingo-COMPOSED artwork sharp on a scaled stage.
+    ///
+    /// `width`/`height`/`data` above stay exactly what Director sees, in movie
+    /// units — every script-visible number and every existing reader is
+    /// unaffected. See `HiResTwin`.
+    pub hi_res: HiResTwin,
+}
+
+/// The hi-res twin of a `Bitmap`, and the accounting that decides when keeping
+/// one stops being worth it.
+///
+/// A twin is a parallel buffer at `scale` times the bitmap's movie-unit size,
+/// carrying the same picture rendered (not magnified) at the stage scale. It is
+/// seeded by a text/field member's `.image` — which re-rasterises the text with
+/// `fontSize`, the box rect, `fixedLineSpace`, spacing and tab stops all
+/// multiplied by the stage scale — and carried forward by `copyPixels`, so a
+/// bitmap COMPOSED out of `.image` snapshots keeps it. The renderer uploads it
+/// in place of `data` when the sprite is magnified.
+///
+/// Purely an enhancement: any op that cannot maintain it drops it and the
+/// bitmap renders exactly as it did before twins existed.
+#[derive(Clone, Default)]
+pub struct HiResTwin {
+    /// The twin itself, about `width*scale` by `height*scale`. Its own
+    /// `hi_res` is always empty — twins do not nest.
+    pub image: Option<Box<Bitmap>>,
+    /// Scale of `image` relative to `width`/`height`. 1.0 when there is none.
+    pub scale: f64,
+    /// Destination pixels mirrored into the twin since it was created, used by
+    /// the budget in `banned` below.
+    pub written: u64,
+    /// Blits mirrored into the twin since it was created — the other half of
+    /// that budget, and the one that actually catches a framebuffer. Spectral
+    /// Wizard composes into a 640x480 offscreen with many SMALL blits, so a
+    /// pixel budget generous enough for one composed panel never fires there,
+    /// while a blit count separates the two cleanly: a composed panel takes a
+    /// few dozen blits in total, a framebuffer takes that many every second.
+    pub blits: u32,
+    /// A twin that has been PROMISED but not yet rendered: the text/field
+    /// member to re-rasterise from, and the scale to do it at.
+    ///
+    /// `.image` records this instead of rasterising a second time on the spot,
+    /// because most `.image` calls never compose their result into anything
+    /// displayed — Spectral Wizard bakes 250+ of them straight into the stage
+    /// framebuffer, which is banned from twins, so every one of those second
+    /// rasterisations was pure waste (measured: 23% of the movie's total run
+    /// time). It is materialised on demand by the paths that actually lead to
+    /// the screen: a `copyPixels` that reads this bitmap as its SOURCE, and
+    /// `member.image = ` assignment.
+    pub pending: Option<(CastMemberRef, f64)>,
+    /// Set once this bitmap has proved to be a FRAMEBUFFER rather than a
+    /// composed picture, after which it is never twinned again.
+    ///
+    /// The twin pays for itself on a picture composed once and then displayed
+    /// for many frames (a navigator's room list). It is a disaster on a buffer
+    /// recomposed every frame: an "imaging Lingo" title like Spectral Wizard
+    /// bakes its speech bubbles into `(the stage).image`, so one text `.image`
+    /// landing there would make every subsequent per-frame blit run twice —
+    /// once at 1:1 and once at scale² the pixels. That measured 4x slower over
+    /// the whole movie.
+    ///
+    /// The discriminator is FREQUENCY, not size or content: see
+    /// `HiResTwin::WRITE_BUDGET`.
+    pub banned: bool,
+}
+
+impl HiResTwin {
+    /// How many times over the twin may be rewritten before this bitmap is
+    /// treated as a framebuffer and banned. A composed panel rewrites its twin
+    /// a couple of times in total; a per-frame framebuffer passes this within
+    /// a second or two and then costs exactly what it did before twins.
+    const WRITE_BUDGET: u64 = 8;
+    /// Mirrored blits allowed before this bitmap is treated as a framebuffer.
+    /// The Coke Studios room list needs about ten (the text, seven rows of
+    /// dotted leaders, then one per refresh).
+    const BLIT_BUDGET: u32 = 250;
+
+    #[inline]
+    pub fn is_some(&self) -> bool {
+        self.image.is_some()
+    }
+
+    /// The scale this bitmap's twin has, or would have once materialised.
+    /// 1.0 when there is neither.
+    #[inline]
+    pub fn effective_scale(&self) -> f64 {
+        if self.image.is_some() {
+            self.scale
+        } else {
+            self.pending.map(|(_, s)| s).unwrap_or(1.0)
+        }
+    }
+}
+
+impl Bitmap {
+    /// Movie-unit size scaled into this bitmap's hi-res space.
+    #[inline]
+    pub fn hi_res_dims(width: u16, height: u16, scale: f64) -> (u16, u16) {
+        (
+            ((width as f64 * scale).round() as i64).clamp(1, u16::MAX as i64) as u16,
+            ((height as f64 * scale).round() as i64).clamp(1, u16::MAX as i64) as u16,
+        )
+    }
+
+    /// Promise a hi-res twin without rendering it yet — see `HiResTwin::pending`.
+    #[inline]
+    pub fn promise_hi_res(&mut self, member: CastMemberRef, scale: f64) {
+        if self.hi_res.banned || scale <= 1.0 || !scale.is_finite() {
+            return;
+        }
+        self.hi_res.pending = Some((member, scale));
+    }
+
+    /// Attach a hi-res twin at `scale`.
+    ///
+    /// The twin MUST be exactly `width*scale` by `height*scale`, because every
+    /// rect that later reaches it is the movie-unit rect multiplied by that one
+    /// number. A re-run text layout does not land there on its own — rounding
+    /// each line's height independently accumulates, so a 616px box at 2.077
+    /// comes back 1276 tall rather than 1279 — so the twin is FITTED into a
+    /// buffer of the exact size, top-left aligned: a couple of rows of padding
+    /// (or of crop) at the far edge, where a text box has its slack anyway.
+    ///
+    /// A twin that is nowhere near the right size is refused outright rather
+    /// than stretched — that would mean the two runs laid the text out
+    /// differently, and a plausible-looking wrong picture is worse than the
+    /// magnified one.
+    pub fn set_hi_res(&mut self, hi: Bitmap, scale: f64) {
+        if self.hi_res.banned || scale <= 1.0 || !scale.is_finite() || self.width == 0 || self.height == 0 {
+            return;
+        }
+        let (want_w, want_h) = Self::hi_res_dims(self.width, self.height, scale);
+        let off_w = hi.width.abs_diff(want_w) as f64 / want_w as f64;
+        let off_h = hi.height.abs_diff(want_h) as f64 / want_h as f64;
+        if off_w > 0.05 || off_h > 0.05 {
+            return;
+        }
+        let bpp = hi.bit_depth as usize / 8;
+        if bpp == 0 {
+            return;
+        }
+        let fitted = if hi.width == want_w && hi.height == want_h {
+            hi
+        } else {
+            let mut fitted = Bitmap::new(
+                want_w,
+                want_h,
+                hi.bit_depth,
+                hi.original_bit_depth,
+                if hi.matte.is_some() { 8 } else { 0 },
+                hi.palette_ref.clone(),
+            );
+            fitted.use_alpha = hi.use_alpha;
+            // Text renders on a transparent ground, so the padding rows must be
+            // transparent too; `Bitmap::new` fills 32-bit buffers with 0xFF
+            // (opaque white), which would paint a bar across the bottom of the
+            // twin. Only the copied region below is meaningful.
+            if hi.bit_depth == 32 {
+                fitted.data.fill(0);
+            }
+            let copy_w = hi.width.min(want_w) as usize;
+            let copy_h = hi.height.min(want_h) as usize;
+            for y in 0..copy_h {
+                let src = y * hi.width as usize * bpp;
+                let dst = y * want_w as usize * bpp;
+                let n = copy_w * bpp;
+                if src + n <= hi.data.len() && dst + n <= fitted.data.len() {
+                    fitted.data[dst..dst + n].copy_from_slice(&hi.data[src..src + n]);
+                }
+            }
+            fitted
+        };
+        self.hi_res.image = Some(Box::new(fitted));
+        self.hi_res.scale = scale;
+        self.hi_res.written = 0;
+        self.hi_res.blits = 0;
+        self.hi_res.pending = None;
+    }
+
+    /// Forget the hi-res twin. Called by every mutation that cannot keep it in
+    /// step with `data` — the bitmap then simply renders magnified, as before.
+    #[inline]
+    pub fn invalidate_hi_res(&mut self) {
+        self.hi_res.image = None;
+        self.hi_res.scale = 1.0;
+        self.hi_res.written = 0;
+        self.hi_res.blits = 0;
+        self.hi_res.blits = 0;
+        self.hi_res.pending = None;
+    }
+
+    /// Drop the twin AND refuse to ever build another for this bitmap.
+    ///
+    /// For bitmaps known up front to be framebuffers — `(the stage).image`
+    /// above all — rather than waiting for `note_hi_res_written`'s budget to
+    /// discover it frame by frame.
+    #[inline]
+    pub fn ban_hi_res(&mut self) {
+        self.invalidate_hi_res();
+        self.hi_res.banned = true;
+    }
+
+    /// Charge `pixels` against the twin's write budget, and drop (and ban) the
+    /// twin once this bitmap has behaved like a framebuffer for long enough.
+    /// Returns true while the twin is still worth maintaining.
+    pub fn note_hi_res_written(&mut self, pixels: u64) -> bool {
+        let Some(hi) = self.hi_res.image.as_deref() else { return false };
+        let budget = (hi.width as u64 * hi.height as u64).max(1) * HiResTwin::WRITE_BUDGET;
+        self.hi_res.written = self.hi_res.written.saturating_add(pixels);
+        self.hi_res.blits = self.hi_res.blits.saturating_add(1);
+        if self.hi_res.written > budget || self.hi_res.blits > HiResTwin::BLIT_BUDGET {
+            self.ban_hi_res();
+            return false;
+        }
+        true
+    }
+
+    /// Give this bitmap a hi-res twin at `scale` if it has none, by magnifying
+    /// its current contents. Used when a hi-res source is copied into a plain
+    /// destination: the parts already there stay as sharp as they were (i.e.
+    /// not at all), and the incoming text lands sharp.
+    pub fn ensure_hi_res(&mut self, scale: f64) {
+        if self.hi_res.is_some() || self.hi_res.banned || scale <= 1.0 || !scale.is_finite() {
+            return;
+        }
+        // Sub-byte depths (1/2/4) are packed; magnifying them here would need
+        // the bit arithmetic every other path already has, for members that in
+        // practice never carry composed text. Leave them on the magnify path.
+        let bpp = self.bit_depth as usize / 8;
+        if bpp == 0 || self.width == 0 || self.height == 0 {
+            return;
+        }
+        let (w, h) = Self::hi_res_dims(self.width, self.height, scale);
+        let mut hi = Bitmap::new(
+            w,
+            h,
+            self.bit_depth,
+            self.original_bit_depth,
+            if self.matte.is_some() { 8 } else { 0 },
+            self.palette_ref.clone(),
+        );
+        hi.use_alpha = self.use_alpha;
+        // Nearest-neighbour magnify: this is the fallback content, and the
+        // whole point of the hi-res path is that it is never resampled twice.
+        if hi.data.len() < w as usize * h as usize * bpp
+            || self.data.len() < self.width as usize * self.height as usize * bpp
+        {
+            return;
+        }
+        for y in 0..h as usize {
+            let sy = (((y as f64 + 0.5) / scale).floor() as usize).min(self.height as usize - 1);
+            for x in 0..w as usize {
+                let sx = (((x as f64 + 0.5) / scale).floor() as usize).min(self.width as usize - 1);
+                let src = (sy * self.width as usize + sx) * bpp;
+                let dst = (y * w as usize + x) * bpp;
+                hi.data[dst..dst + bpp].copy_from_slice(&self.data[src..src + bpp]);
+            }
+        }
+        self.hi_res.image = Some(Box::new(hi));
+        self.hi_res.scale = scale;
+        self.hi_res.written = 0;
+        self.hi_res.blits = 0;
+    }
 }
 
 impl Bitmap {
@@ -276,6 +540,7 @@ impl Bitmap {
             trim_white_space: false,
             was_trimmed: false,
             version: 0,
+            hi_res: HiResTwin::default(),
         }
     }
 
@@ -359,6 +624,7 @@ fn decode_bitmap_1bit(
         trim_white_space: false,
         was_trimmed: false,
         version: 0,
+        hi_res: HiResTwin::default(),
     })
 }
 
@@ -418,6 +684,7 @@ fn decode_bitmap_2bit(
         trim_white_space: false,
         was_trimmed: false,
         version: 0,
+        hi_res: HiResTwin::default(),
     })
 }
 
@@ -476,6 +743,7 @@ fn decode_bitmap_4bit(
         trim_white_space: false,
         was_trimmed: false,
         version: 0,
+        hi_res: HiResTwin::default(),
     })
 }
 
@@ -543,6 +811,7 @@ fn decode_bitmap_16bit(
         trim_white_space: false,
         was_trimmed: false,
         version: 0,
+        hi_res: HiResTwin::default(),
     })
 }
 
@@ -644,6 +913,7 @@ fn decode_generic_bitmap(
             trim_white_space: false,
             was_trimmed: false,
             version: 0,
+            hi_res: HiResTwin::default(),
         });
     }
 }
@@ -887,6 +1157,7 @@ pub fn decompress_bitmap(
                     trim_white_space: info.trim_white_space,
                     was_trimmed: false,
                     version: 0,
+                    hi_res: HiResTwin::default(),
                 })
             } else {
                 // D4+ format: each scanline has channels laid out as A R G B sequentially
@@ -937,6 +1208,7 @@ pub fn decompress_bitmap(
                     trim_white_space: info.trim_white_space,
                     was_trimmed: false,
                     version: 0,
+                    hi_res: HiResTwin::default(),
                 })
             }
         }
@@ -1606,6 +1878,7 @@ fn decode_jpeg_bitd(data: &[u8], info: &BitmapInfo, cast_lib: u32) -> Result<Bit
         trim_white_space: info.trim_white_space,
         was_trimmed: false,
         version: 0,
+        hi_res: HiResTwin::default(),
     })
 }
 
@@ -1688,6 +1961,7 @@ pub fn decode_jpeg_bitmap(data: &[u8], info: &BitmapInfo, alfa_data: Option<&Vec
         trim_white_space: info.trim_white_space,
         was_trimmed: false,
         version: 0,
+        hi_res: HiResTwin::default(),
     })
 }
 

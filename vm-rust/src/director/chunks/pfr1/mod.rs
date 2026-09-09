@@ -33,6 +33,18 @@ pub fn parse_pfr1_font(data: &[u8]) -> Result<Pfr1ParsedFont, String> {
 
 /// Parse a PFR1 font with a target em size (in pixels) for header parser scaling.
 pub fn parse_pfr1_font_with_target(data: &[u8], target_em_px: i32) -> Result<Pfr1ParsedFont, String> {
+    parse_pfr1_font_internal(data, target_em_px, false)
+}
+
+/// Parse a PFR1 font grid-fitted (hinted) at a target pixel size. Glyph
+/// coordinates come out in PIXEL space with stem widths and blue-zone
+/// positions snapped the way Director does.
+/// Used behind `GlyphPreference::Hinted`; the default path is unchanged.
+pub fn parse_pfr1_font_hinted(data: &[u8], target_em_px: i32) -> Result<Pfr1ParsedFont, String> {
+    parse_pfr1_font_internal(data, target_em_px, true)
+}
+
+fn parse_pfr1_font_internal(data: &[u8], target_em_px: i32, grid_fit: bool) -> Result<Pfr1ParsedFont, String> {
     log(&format!("PFR1 parser: parsing {} bytes", data.len()));
 
     let mut font = Pfr1ParsedFont::new();
@@ -74,7 +86,13 @@ pub fn parse_pfr1_font_with_target(data: &[u8], target_em_px: i32) -> Result<Pfr
         phys_end = phys_end.min(gps_offset);
     }
 
-    font.physical_font = physical::parse_physical_font(data, phys_offset, phys_end, pfr_header.max_chars)?;
+    font.physical_font = physical::parse_physical_font(
+        data,
+        phys_offset,
+        phys_end,
+        pfr_header.max_chars,
+        pfr_header.max_blue_values,
+    )?;
     // Header carries max orus values used by PFR1 glyph parsing
     font.physical_font.max_x_orus = pfr_header.max_x_orus;
     font.physical_font.max_y_orus = pfr_header.max_y_orus;
@@ -295,6 +313,7 @@ pub fn parse_pfr1_font_with_target(data: &[u8], target_em_px: i32) -> Result<Pfr
                 gps_size,
                 &known_gps_offsets,
                 Some(&font.physical_font),
+                grid_fit,
             ) {
                 if !outline_glyph.contours.is_empty() {
                     with_contours += 1;

@@ -48,6 +48,9 @@ pub struct Movie {
     /// `the timeoutLapsed` is derived from this.
     pub timeout_last_reset_ms: f64,
     pub allow_custom_caching: bool,
+    /// `_movie.scriptExecutionStyle` — 9 (Director 8/9 semantics) or 10 (D10+).
+    /// `None` = never written, so the getter reports the movie's own default.
+    pub script_execution_style: Option<i32>,
     pub trace_script: bool,
     pub trace_log_file: String,
     pub debug_playback_enabled: bool,
@@ -90,6 +93,11 @@ pub struct Movie {
     /// inherits the intro span's stale `pType`.
     pub frame_script_span_start: Option<u32>,
     pub sound_device: String,
+    /// `the soundLevel` — master speaker volume, 0..7, default 7.
+    pub sound_level: i32,
+    /// `the soundEnabled` — TRUE by default. Gates the output WITHOUT changing
+    /// `sound_level`, per the Scripting Dictionary.
+    pub sound_enabled: bool,
 }
 
 impl Movie {
@@ -126,6 +134,7 @@ impl Movie {
             timeout_keydown: true,
             timeout_last_reset_ms: 0.0,
             allow_custom_caching: false,
+            script_execution_style: None,
             trace_script: false,
             trace_log_file: String::new(),
             debug_playback_enabled: false,
@@ -139,6 +148,8 @@ impl Movie {
             frame_script_member: None,
             frame_script_span_start: None,
             sound_device: String::new(),
+            sound_level: 7,
+            sound_enabled: true,
         }
     }
 
@@ -371,7 +382,24 @@ impl Movie {
             // additive material with THREE stacked copies of the same texture
             // instead of the two-layer OpenGL form.
             BuiltInSymbol::Active3dRenderer => Ok(Datum::Symbol(Symbol::from_str("openGL"))),
-            BuiltInSymbol::ScriptExecutionStyle => Ok(Datum::Int(9)),
+            // Read/write (Director 11.5 Scripting Dictionary): 9 = Director 8/9
+            // execution semantics, 10 = D10+. Burnin' Rubber's `prepareMovie`
+            // opens with `_movie.scriptExecutionStyle = 10`, which used to raise
+            // "Cannot set movie prop" and killed the movie before it started — so
+            // it has to be SETTABLE.
+            //
+            // The default deliberately stays 9, NOT the authoring version's 10.
+            // dirplayer does not implement the behavioural differences between the
+            // two styles (timeout handlers dispatched as factory calls, the VOID vs
+            // sprite(1) answer for a missed named sprite, …), and movies BRANCH on
+            // this property: PHOSPHOR's `M_Util.FindXtra` reads `.name` under 9 and
+            // `.fileName` under 10. Reporting 10 by default would send every such
+            // movie down a path whose semantics we don't yet honour. A movie that
+            // asks for 10 gets 10 and takes its chances; one that never mentions it
+            // keeps the behaviour the rest of the suite was tested against.
+            BuiltInSymbol::ScriptExecutionStyle => {
+                Ok(Datum::Int(self.script_execution_style.unwrap_or(9)))
+            }
             BuiltInSymbol::XtraList => {
                 // Return a list of prop lists, each with #name and #fileName
                 use crate::player::xtra::manager::get_registered_xtra_names;
@@ -395,6 +423,8 @@ impl Movie {
                     ))
                 })
             },
+            BuiltInSymbol::SoundLevel => Ok(Datum::Int(self.sound_level)),
+            BuiltInSymbol::SoundEnabled => Ok(datum_bool(self.sound_enabled)),
             BuiltInSymbol::SoundDevice => Ok(Datum::String(if self.sound_device.is_empty() { "DirectSound".to_string() } else { self.sound_device.clone() })),
             BuiltInSymbol::SoundDeviceList => {
                 reserve_player_mut(|player| {
@@ -560,6 +590,10 @@ impl Movie {
                     )),
                 }
             },
+            BuiltInSymbol::ScriptExecutionStyle => {
+                self.script_execution_style = Some(value.int_value()?);
+                Ok(())
+            },
             BuiltInSymbol::AllowCustomCaching => {
                 self.allow_custom_caching = value.int_value()? != 0;
                 Ok(())
@@ -609,7 +643,6 @@ impl Movie {
                 Ok(())
             },
             BuiltInSymbol::TimeoutPlay
-            | BuiltInSymbol::SoundEnabled | BuiltInSymbol::SoundLevel
             | BuiltInSymbol::BeepOn | BuiltInSymbol::CenterStage | BuiltInSymbol::ExitLock | BuiltInSymbol::FixStageSize
             // soundMixMedia (Director 11.5 Scripting Dictionary: Sound property,
             // read/write) toggles whether Flash cast members mix their audio into the

@@ -387,6 +387,21 @@ impl PropListDatumHandlers {
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         match handler_name.into_builtin() {
+            // `getRendererServices()` answers a prop list, and Director exposes
+            // its hardware block both as the `hardwareInfo` property and as a
+            // getHardwareInfo() call. Rasterwerks PHOSPHOR's Video page uses the
+            // call form (`rs = getRendererServices().getHardwareInfo()`), which
+            // left every driver/depthbuffer/texture line on the page blank.
+            Some(BuiltInSymbol::GetHardwareInfo) if args.is_empty() => {
+                reserve_player_mut(|player| {
+                    let (prop_list, is_sorted) = {
+                        let (l, s) = player.get_datum(datum).to_map_tuple()?;
+                        (l.clone(), s)
+                    };
+                    let key = player.alloc_datum(Datum::Symbol(Symbol::from_str("hardwareInfo")));
+                    PropListUtils::get_by_key(&prop_list, &key, &player.allocator, is_sorted)
+                })
+            }
             Some(BuiltInSymbol::GetAt) => Self::get_at(datum, args),
             Some(BuiltInSymbol::SetAt) => Self::set_at(datum, args),
             Some(BuiltInSymbol::Sort) => Self::sort(datum, args),

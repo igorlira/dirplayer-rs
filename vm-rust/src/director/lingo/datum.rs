@@ -61,6 +61,7 @@ pub enum DatumType {
     PhysXObjectRef,
     VectorVertexRef,
     JsObjectRef,
+    MixerSoundObjectRef,
 }
 
 #[derive(Clone, PartialEq, FromPrimitive)]
@@ -69,6 +70,27 @@ pub enum StringChunkType {
     Word,
     Char,
     Line,
+}
+
+impl StringChunkType {
+    /// The fallible form of the `From<Symbol>` impl below.
+    ///
+    /// That one panics on anything that is not #item/#word/#char/#line, which is
+    /// fine where the caller got the symbol from the bytecode (a chunk opcode
+    /// cannot carry anything else) but NOT where it comes from a movie. A
+    /// `setProp` objcall on a cast member is the second kind: `member.char[a..b]
+    /// = v` compiles to one, but so does every other setProp a movie makes, and
+    /// a panic on wasm is a trap that takes the whole player down rather than
+    /// something a handler can report.
+    pub fn from_symbol_opt(s: Symbol) -> Option<Self> {
+        match s.into_builtin() {
+            Some(BuiltInSymbol::Item) | Some(BuiltInSymbol::Items) => Some(StringChunkType::Item),
+            Some(BuiltInSymbol::Word) | Some(BuiltInSymbol::Words) => Some(StringChunkType::Word),
+            Some(BuiltInSymbol::Char) | Some(BuiltInSymbol::Chars) => Some(StringChunkType::Char),
+            Some(BuiltInSymbol::Line) | Some(BuiltInSymbol::Lines) => Some(StringChunkType::Line),
+            _ => None,
+        }
+    }
 }
 
 impl From<Symbol> for StringChunkType {
@@ -299,6 +321,11 @@ pub enum Datum {
     JavaScript(Vec<u8>),
     FlashObjectRef(FlashObjectRef),
     Shockwave3dObjectRef(Shockwave3dObjectRef),
+    /// One named sound object inside a Sound Mixer member: the owning mixer
+    /// member plus the object's name. Director hands scripts a live handle
+    /// (`so = mixer.createSoundObject(...)`; `so.volume = 128`), so this is a
+    /// REFERENCE — the state lives on the member, not in the datum.
+    MixerSoundObjectRef(CastMemberRef, String),
     /// 4x4 row-major transform matrix for Shockwave 3D.
     /// Boxed (128B array) to keep `Datum` small — 3D transforms are rare.
     Transform3d(Box<[f64; 16]>),
@@ -360,6 +387,7 @@ impl DatumType {
             DatumType::JavaScript => "javascript",
             DatumType::FlashObjectRef => "flash_object_ref",
             DatumType::Shockwave3dObjectRef => "shockwave3d_object_ref",
+            DatumType::MixerSoundObjectRef => "sound_object",
             DatumType::MouseRef => "mouse_ref",
             DatumType::Transform3d => "transform",
             DatumType::HavokObjectRef => "havok_object_ref",
@@ -414,6 +442,7 @@ impl Datum {
             Datum::JavaScript(_) => DatumType::JavaScript,
             Datum::FlashObjectRef(_) => DatumType::FlashObjectRef,
             Datum::Shockwave3dObjectRef(_) => DatumType::Shockwave3dObjectRef,
+            Datum::MixerSoundObjectRef(..) => DatumType::MixerSoundObjectRef,
             Datum::Transform3d(_) => DatumType::Transform3d,
             Datum::HavokObjectRef(_) => DatumType::HavokObjectRef,
             Datum::PhysXObjectRef(_) => DatumType::PhysXObjectRef,

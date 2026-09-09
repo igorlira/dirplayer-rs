@@ -760,6 +760,30 @@ pub async fn tick_w3d_animations() {
                     };
                     for bp in w3d.runtime_state.bones_players.values_mut() {
                         if !bp.animation_playing || bp.motion_ended { continue; }
+                        // A playing player with nothing loaded takes the head of its
+                        // playlist. Director (`queue() (3D)`): a queued motion "is
+                        // executed by the model when all the motions ahead of it in the
+                        // playlist are finished playing" — with an empty playlist there
+                        // is nothing ahead of it, so it starts at once.
+                        //
+                        // Deliberately here and NOT in the `queue` handler: the
+                        // `queue(x); playNext()` idiom (Rasterwerks' C_BonesControl)
+                        // runs both calls inside one handler, so the tick never sees the
+                        // intermediate state and playNext() still gets the motion it was
+                        // meant to start. Promoting inside `queue()` discards it.
+                        if bp.current_motion.is_none() {
+                            if bp.motion_queue.is_empty() { continue; }
+                            let q = bp.motion_queue.remove(0);
+                            bp.current_motion = Some(Symbol::from_str(&q.name.to_string()));
+                            bp.animation_loop = q.looped;
+                            bp.animation_start_time = q.start_time;
+                            bp.animation_end_time = q.end_time;
+                            bp.animation_scale = q.scale;
+                            bp.animation_time = if q.offset >= 0.0 { q.offset } else { q.start_time };
+                            bp.motion_ended = false;
+                            bp.previous_motion = None;
+                            bp.blend_weight = 1.0;
+                        }
                         bp.animation_time += dt_seconds * bp.play_rate * bp.animation_scale;
                         if bp.blend_weight < 1.0 && bp.blend_duration > 0.0 {
                             bp.blend_elapsed += dt_seconds;
@@ -788,6 +812,78 @@ pub async fn tick_w3d_animations() {
                                         bp.animation_time = eff_end; // hold final frame
                                         bp.motion_ended = true;
                                     }
+                                }
+                            }
+                        }
+                    }
+
+                    // ── Root motion onto the model node ──
+                    // IFX never leaves the root bone's translation in the skin: it
+                    // extracts it and, unless `rootLock` is set, adds it to the model
+                    // NODE's transform, so a travelling clip walks the model through
+                    // the scene (docs/w3d-skeleton-motion-spec.md §1, "Root handling").
+                    // The renderer strips exactly the same translation from the bones
+                    // (`strips_root` in `setup_skinning_for_resource`), so this moves
+                    // the node WITHOUT moving the drawn mesh — what changes is that
+                    // `model.worldPosition` finally follows the animation.
+                    //
+                    // Agent Free Ride's end-of-level paraglider is why: `Snowboard
+                    // Camera`'s #EndScene re-aims the camera at `player_fake`'s
+                    // worldPosition every frame, and with the root motion trapped in
+                    // the skeleton that node never moved — the boarder flew ~16000
+                    // units out of frame while the camera stared at the launch point.
+                    if let Some(scene) = w3d.parsed_scene.as_ref() {
+                        use crate::director::chunks::w3d::skeleton as skel;
+                        let rs = &mut w3d.runtime_state;
+                        let model_names: Vec<Symbol> = rs.bones_players.keys().copied().collect();
+                        for model_name in model_names {
+                            let (motion_name, time, start, end, looping, root_lock, applied) = {
+                                let bp = match rs.bones_players.get(&model_name) { Some(b) => b, None => continue };
+                                match bp.current_motion {
+                                    Some(m) => (m, bp.animation_time, bp.animation_start_time,
+                                                bp.animation_end_time, bp.animation_loop,
+                                                bp.root_lock, bp.root_clearance),
+                                    None => continue,
+                                }
+                            };
+                            let skeleton = match skel::skeleton_for_model(scene, model_name) {
+                                Some(s) => s, None => continue,
+                            };
+                            let motion = match scene.motions.iter().find(|m| m.name == motion_name) {
+                                Some(m) => m, None => continue,
+                            };
+                            // rootLock keeps the model in place; leave whatever it has
+                            // already walked alone rather than snapping it back.
+                            let want = if root_lock || !skel::motion_has_root_translation(skeleton, motion) {
+                                [0.0f32; 3]
+                            } else {
+                                let t = skel::effective_motion_time(
+                                    time, start, end, looping, motion.duration());
+                                let p = match skel::root_motion_translation(skeleton, motion, t) {
+                                    Some(p) => p, None => [0.0; 3],
+                                };
+                                let node = scene.nodes.iter().find(|n| n.name == model_name);
+                                let resource_name = node.map(|n| n.resource_name).unwrap_or(model_name);
+                                let relinv = skel::root_strip_matrix(
+                                    scene, skeleton, model_name, resource_name,
+                                    rs.root_strip_state(model_name),
+                                );
+                                skel::root_clearance_node_offset(&relinv, p)
+                            };
+                            let delta = [want[0] - applied[0], want[1] - applied[1], want[2] - applied[2]];
+                            if delta[0] == 0.0 && delta[1] == 0.0 && delta[2] == 0.0 { continue; }
+                            // Seed from the authored local transform when Lingo has not
+                            // written one, then translate IN THE NODE'S OWN FRAME — the
+                            // bone matrices the delta compensates live in that same frame.
+                            let base = rs.node_transforms.get(&model_name).copied()
+                                .or_else(|| scene.nodes.iter().find(|n| n.name == model_name).map(|n| n.transform));
+                            if let Some(mut m) = base {
+                                m[12] += m[0] * delta[0] + m[4] * delta[1] + m[8] * delta[2];
+                                m[13] += m[1] * delta[0] + m[5] * delta[1] + m[9] * delta[2];
+                                m[14] += m[2] * delta[0] + m[6] * delta[1] + m[10] * delta[2];
+                                rs.node_transforms.insert(model_name, m);
+                                if let Some(bp) = rs.bones_players.get_mut(&model_name) {
+                                    bp.root_clearance = want;
                                 }
                             }
                         }
@@ -839,28 +935,96 @@ pub async fn tick_w3d_particles() {
                         // node that references this resource — gathered before the
                         // mutable particle borrow to avoid overlapping borrows.
                         let em = w3d.runtime_state.emitters.get(&name).cloned();
+                        // `node_transforms` holds each node's LOCAL transform, so a
+                        // particle model parented to a moving model (Bottle Rocket's
+                        // `RocketFlame.parent = rocket`) must be composed with its
+                        // ancestors — reading the local matrix alone left the exhaust
+                        // parked at its parent-relative offset near the world origin,
+                        // i.e. inside the cola can, and the rocket flew with no flame.
                         let world_pos = scene.as_ref().and_then(|sc| {
                             sc.nodes.iter()
                                 .find(|n| n.model_resource_name == name || n.resource_name == name)
                                 .map(|n| {
-                                    let t = w3d.runtime_state.node_transforms.get(&n.name)
-                                        .copied()
-                                        .unwrap_or(n.transform);
-                                    [t[12], t[13], t[14]]
+                                    let local = |nd: &crate::director::chunks::w3d::types::W3dNode| {
+                                        w3d.runtime_state.node_transforms.get(&nd.name)
+                                            .copied()
+                                            .unwrap_or(nd.transform)
+                                    };
+                                    let mut m = local(n);
+                                    let mut parent = n.parent_name;
+                                    for _ in 0..20 {
+                                        if parent.as_str().is_empty()
+                                            || parent.as_str().eq_ignore_ascii_case("world") {
+                                            break;
+                                        }
+                                        match sc.nodes.iter()
+                                            .find(|pn| pn.name.as_str().eq_ignore_ascii_case(parent.as_str()))
+                                        {
+                                            Some(pn) => {
+                                                m = w3d_col_mat_mul(&local(pn), &m);
+                                                parent = pn.parent_name;
+                                            }
+                                            None => break,
+                                        }
+                                    }
+                                    [m[12], m[13], m[14]]
                                 })
                         }).unwrap_or([0.0, 0.0, 0.0]);
 
                         if let Some(ps) = w3d.runtime_state.particles.get_mut(&name) {
-                            // Emit from emitter.region when a script set it (e.g. the car demos
-                            // track the exhaust pipe via `emitter.region = [exhaust.worldPosition]`),
-                            // otherwise from the model node's world position (the faucet translates
-                            // its ColdWater model). Without this the car smoke emitted at the origin
-                            // and whited out the camera, blanking the whole 3D scene.
-                            ps.emitter_position = match &em {
-                                Some(e) if e.has_region =>
-                                    [e.region[0] as f32, e.region[1] as f32, e.region[2] as f32],
-                                _ => world_pos,
+                            // `emitter.region` is expressed in the particle model
+                            // resource's OWN space; the model's transform then places
+                            // the whole system. So the emit point is the model node's
+                            // world position PLUS the region's centre, and the region's
+                            // extent becomes the emitter's shape.
+                            //
+                            // Both callers this has to serve fall out of that one rule:
+                            //   * the car demos track the tailpipe with a single-vector
+                            //     region (`[exhaust.worldPosition]`) on a smoke model
+                            //     parked at the origin — world_pos is (0,0,0), so the
+                            //     sum is still the tailpipe;
+                            //   * Rasterwerks' spawn burst is a 60x60 quad centred on
+                            //     the origin with the MODEL moved to the spawning
+                            //     player — the centre is (0,0,0), so the sum is the
+                            //     player.
+                            // Reading the region as world coordinates served the first
+                            // and broke the second: the burst fired at (-30, 0, -30),
+                            // the quad's first corner, and was never seen.
+                            let (region_centre, region_extent) = match &em {
+                                Some(e) if e.has_region && !e.region.is_empty() => {
+                                    let n = e.region.len() as f64;
+                                    let mut c = [0.0f64; 3];
+                                    let mut lo = [f64::MAX; 3];
+                                    let mut hi = [f64::MIN; 3];
+                                    for v in &e.region {
+                                        for k in 0..3 {
+                                            c[k] += v[k] / n;
+                                            lo[k] = lo[k].min(v[k]);
+                                            hi[k] = hi[k].max(v[k]);
+                                        }
+                                    }
+                                    (c, [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]])
+                                }
+                                _ => ([0.0; 3], [0.0; 3]),
                             };
+                            ps.emitter_position = [
+                                world_pos[0] + region_centre[0] as f32,
+                                world_pos[1] + region_centre[1] as f32,
+                                world_pos[2] + region_centre[2] as f32,
+                            ];
+                            // A region with no extent stays a point emitter; a line or
+                            // quad spreads births across it. `emitter_shape` 1 = line,
+                            // 2 = plane, and `update()` jitters by ±size/2, so pass the
+                            // full span.
+                            let region_count = em.as_ref().map_or(0, |e| if e.has_region { e.region.len() } else { 0 });
+                            if region_count >= 2 && region_extent.iter().any(|d| *d > 1e-6) {
+                                ps.emitter_shape = if region_count >= 4 { 2 } else { 1 };
+                                ps.emitter_size = [
+                                    region_extent[0] as f32,
+                                    region_extent[1] as f32,
+                                    region_extent[2] as f32,
+                                ];
+                            }
                             if let Some(em) = &em {
                                 let d = em.direction;
                                 let len = (d[0]*d[0] + d[1]*d[1] + d[2]*d[2]).sqrt();
@@ -870,7 +1034,15 @@ pub async fn tick_w3d_particles() {
                                 ps.initial_speed = em.min_speed as f32;
                                 ps.max_speed = em.max_speed.max(em.min_speed) as f32;
                                 ps.speed_range = (em.max_speed - em.min_speed).max(0.0) as f32;
-                                // emitter.angle is the cone half-angle in degrees.
+                                // "the direction of emission of a given particle will
+                                // deviate from that vector by a random angle between 0
+                                // and the value of the emitter's angle property. The
+                                // effective range of this property is 0.0 to 180.0"
+                                // (Director 11.5 Scripting Dictionary, "angle (3D)") —
+                                // so `angle` IS the maximum polar deviation, and 180
+                                // is a full sphere. See `respawn` for why the polar
+                                // angle is drawn uniformly in THETA, which is what
+                                // makes a 20-degree cone read as a narrow jet.
                                 ps.angle_range = (em.angle as f32).to_radians();
                                 ps.stream = em.mode.eq_ignore_ascii_case("stream");
                                 ps.loop_enabled = em.is_loop;
@@ -881,13 +1053,20 @@ pub async fn tick_w3d_particles() {
                                 // idle riders' powder jets sat at the world origin as
                                 // white blobs on the horizon.
                                 let n = (em.num_particles.max(0) as usize).min(10000);
-                                if ps.max_particles != n {
+                                // Re-initialise here, and ONLY here: this is the
+                                // first point at which the system is fully
+                                // described (mode, region, direction, speeds all
+                                // copied above). `needs_reinit` carries a pending
+                                // `lifetime` change over from the Lingo setter,
+                                // which fires while those are still defaults.
+                                if ps.max_particles != n || ps.needs_reinit {
                                     ps.initialize(n);
                                 }
                             }
                             if ps.positions.is_empty() && ps.max_particles > 0 {
                                 ps.initialize(ps.max_particles);
                             }
+                            ps.needs_reinit = false;
                             ps.update(dt);
                         }
                     }
@@ -2066,11 +2245,30 @@ pub async fn dispatch_system_event_to_timeouts(
     handler_name: BuiltInSymbol,
     args: &Vec<DatumRef>,
 ) {
-    // Get all timeout targets that are currently scheduled
+    // Get all timeout targets that are currently scheduled.
+    //
+    // Only a CHILD OBJECT target receives the relay. Director 11.5 Scripting
+    // Dictionary, "Relaying system events with Timeout objects": "When you
+    // create Timeout objects that target specific child objects, you enable
+    // those child objects to receive system events" — and, under "Associating
+    // custom properties with Timeout objects", a target that is anything other
+    // than a script instance is plain DATA handed to the timeout handler
+    // (`tTO = timeout("betaData").new(50, #targetHandler, tData)`), not a
+    // receiver. Relaying to those too meant Burnin' Rubber 2's
+    //     timeout().new("DelayEventTimeOut…", pDelay, #DelayEventTimeOut, pEvent)
+    // — whose target is the event NAME, a string — was sent prepareFrame and
+    // exitFrame every single frame, each one failing with "No handler
+    // prepareFrame for string datum".
     let timeout_targets = reserve_player_ref(|player| {
         let mut targets = Vec::new();
         for (_timeout_name, timeout) in player.timeout_manager.timeouts.iter() {
-            if timeout.is_scheduled {
+            if !timeout.is_scheduled {
+                continue;
+            }
+            if matches!(
+                player.get_datum(&timeout.target_ref),
+                crate::director::lingo::datum::Datum::ScriptInstanceRef(_)
+            ) {
                 targets.push(timeout.target_ref.clone());
             }
         }

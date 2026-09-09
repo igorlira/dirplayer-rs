@@ -1,0 +1,12 @@
+[movie]
+path = "dcr_misc/spectral_wizard/spectral-wizard.dcr"
+
+[external_params]
+_moviePath = "http://www.miniclip.com/spectral-wizard.dcr"
+# The layout fullscreen uses — see `nintendo_mario7-scaled.toml`.
+swStretchStyle = "meet"
+
+[test]
+suite = "misc"
+tags = ["2d"]
+default_timeout = 300.0

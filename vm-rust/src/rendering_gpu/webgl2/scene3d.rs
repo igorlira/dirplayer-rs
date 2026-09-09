@@ -25,6 +25,49 @@ use crate::{
 
 const SCENE3D_LOG: bool = false;
 
+/// Content signature of one resource's decoded meshes — everything that ends up
+/// in its GPU buffers, plus the parameters that transform it on the way there.
+///
+/// Replaces a vertex+face COUNT signature. Counts can only ever prove a resource
+/// is DIFFERENT, never that it is the same, so carry-over had to be gated on the
+/// scene's global `mesh_content_version`; that made ONE new mesh (AreaZero
+/// builds a fresh `newMesh` trail for every rocket fired) re-upload EVERY mesh
+/// in the member. Measured: the same class of frame costs 0.2ms when the global
+/// flag stays put and 133ms when it moves.
+///
+/// Hashing the real content lets each resource be judged on its own, so a new
+/// resource costs one upload. Only paid on frames that rebuild at all.
+fn mesh_content_signature(
+    meshes: &[crate::director::chunks::w3d::types::ClodDecodedMesh],
+    subdiv: Option<&(i32, f32)>,
+    uv_gen_mode: Option<u8>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    #[allow(deprecated)]
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    meshes.len().hash(&mut h);
+    for m in meshes {
+        m.positions.len().hash(&mut h);
+        m.faces.len().hash(&mut h);
+        for v in &m.positions { v[0].to_bits().hash(&mut h); v[1].to_bits().hash(&mut h); v[2].to_bits().hash(&mut h); }
+        for v in &m.normals { v[0].to_bits().hash(&mut h); v[1].to_bits().hash(&mut h); v[2].to_bits().hash(&mut h); }
+        for uvset in &m.tex_coords {
+            uvset.len().hash(&mut h);
+            for v in uvset { v[0].to_bits().hash(&mut h); v[1].to_bits().hash(&mut h); }
+        }
+        for f in &m.faces { f.hash(&mut h); }
+        for c in &m.diffuse_colors { for x in c { x.to_bits().hash(&mut h); } }
+        for c in &m.specular_colors { for x in c { x.to_bits().hash(&mut h); } }
+        for b in &m.bone_indices { b.len().hash(&mut h); for x in b { x.hash(&mut h); } }
+        for w in &m.bone_weights { w.len().hash(&mut h); for x in w { x.to_bits().hash(&mut h); } }
+    }
+    // `#sds` rewrites the geometry after decode, and the UV generator changes the
+    // uploaded texcoords, so both must be part of the identity.
+    if let Some((d, t)) = subdiv { d.hash(&mut h); t.to_bits().hash(&mut h); }
+    uv_gen_mode.hash(&mut h);
+    h.finish()
+}
+
 fn log(msg: &str) {
     if SCENE3D_LOG {
         debug!("[SCENE-3D] {}", msg);
@@ -46,7 +89,16 @@ struct MemberGpuData {
     /// Cached inverse bind matrices per skeleton name
     inverse_bind_cache: HashMap<Symbol, Vec<[f32; 16]>>,
     /// Snapshot of scene content counts when GPU data was built
-    scene_version: (usize, usize, usize, usize), // (nodes, clod_meshes, texture_images, shaders)
+    /// GEOMETRY signature: (nodes, clod+raw meshes, shaders). Deliberately does
+    /// NOT include the texture count — see `ensure_member_data`.
+    scene_version: (usize, usize, usize),
+    /// Per-resource mesh write counter each uploaded group was built from, so an
+    /// unchanged resource can be carried over without comparing its contents.
+    mesh_versions: HashMap<Symbol, u64>,
+    /// The scene's bulk-geometry counter at upload time. While it holds still,
+    /// `mesh_versions` accounts for every geometry change; once it moves, some
+    /// change was unattributed and contents must be compared instead.
+    mesh_bulk_version: u64,
     /// Scene's mesh_content_version at last upload
     mesh_content_version: u64,
     /// Signature of the `#sds` subdivision state (per-resource depth/tension/
@@ -64,6 +116,10 @@ struct MemberGpuData {
     texture_versions: HashMap<Symbol, u64>,
     /// Scene's texture_content_version at last check
     texture_content_version: u64,
+    /// Scene's texture_epoch at last build. A change means the per-texture write
+    /// counters were REWOUND (resetWorld / revertToWorldDefaults) and nothing
+    /// already on the GPU can be trusted.
+    texture_epoch: u64,
     /// Texture names (lowercase) that contain alpha < 250 (need alpha blending)
     alpha_textures: std::collections::HashSet<Symbol>,
     /// Subset of `alpha_textures` whose alpha is a smooth ramp rather than a
@@ -88,6 +144,7 @@ struct Shader3d {
     u_alpha_threshold: Option<WebGlUniformLocation>,
     u_diffuse_tex: Option<WebGlUniformLocation>,
     u_has_texture: Option<WebGlUniformLocation>,
+    u_flat_shading: Option<WebGlUniformLocation>,
     u_texture_unlit: Option<WebGlUniformLocation>,
     u_lightmap_tex: Option<WebGlUniformLocation>,
     u_has_lightmap: Option<WebGlUniformLocation>,
@@ -152,6 +209,20 @@ struct TextureBindResult<'a> {
     diffuse_tex_mode: u8,   // W3dTextureLayer.tex_mode (0=mesh UVs, 5=#wrapPlanar)
     extra_layers: Vec<TextureLayerBinding<'a>>, // up to 2 extra layers (layer1 + layer2)
     specular: Option<&'a WebGlTexture>,
+    /// Lower-cased name of the layer bound as diffuse, so a caller can look it
+    /// up in `alpha_textures` / `soft_alpha_textures` without re-walking layers.
+    diffuse_name: String,
+}
+
+/// What `bind_material_for_mesh` resolved for one mesh, so the caller can decide
+/// how that mesh composites without re-walking the shader/material tables.
+struct MeshMatInfo {
+    /// Material opacity (Director `shader.blend / 100`).
+    opacity: f32,
+    /// `effective_blend_func`: 1 = IFX_ADD (additive), anything else = normal.
+    blend_func: u8,
+    /// Lower-cased name of the texture bound as diffuse, "" when none.
+    diffuse_name: String,
 }
 
 /// Particle billboard shader
@@ -190,6 +261,9 @@ struct OutlineShader {
     u_view: Option<WebGlUniformLocation>,
     u_projection: Option<WebGlUniformLocation>,
     u_outline_width: Option<WebGlUniformLocation>,
+    u_outline_pixels: Option<WebGlUniformLocation>,
+    u_far_only: Option<WebGlUniformLocation>,
+    u_viewport: Option<WebGlUniformLocation>,
     u_outline_color: Option<WebGlUniformLocation>,
 }
 
@@ -207,6 +281,31 @@ pub struct Scene3dRenderer {
     fbo_depth: Option<web_sys::WebGlRenderbuffer>,
     fbo_width: u32,
     fbo_height: u32,
+    /// Stage scale in force for this frame, set by the compositor before it
+    /// renders a 3D sprite.
+    ///
+    /// Camera backdrops and overlays are positioned in the SPRITE's own
+    /// coordinate space — `addBackdrop(tex, point(x, y), rotation)` takes movie
+    /// pixels — but the viewport they are drawn into is the sprite's RENDER
+    /// rect, which a scaled stage has already enlarged. Without this the
+    /// backdrop keeps its authored size and origin inside a viewport several
+    /// times larger: estate's sky stayed a small band across the top with bare
+    /// clear colour under it. The 2D ortho below divides by this, so a
+    /// movie-space quad fills the same fraction of the viewport at any scale.
+    /// 1.0 for every unscaled movie.
+    pub stage_scale: f32,
+    /// The sprite compositing this scene uses background-transparent ink (36),
+    /// so the member's background must not be painted: clear the colour buffer
+    /// to alpha 0 and let the 2D compositor blend only what the models wrote.
+    /// Fly Like A Bird's WELCOME screen puts the bird's 3D sprite over a
+    /// half-blended cityscape bitmap and the title banner; an opaque clear
+    /// painted a black rectangle across both.
+    pub transparent_clear: bool,
+    /// Viewport for the pass about to render, in FBO pixels, or `None` to fill
+    /// the sprite. Set per pass by the 2D compositor from
+    /// `sprite(n).camera(i).rect`; only cameras AFTER the first can carry one.
+    /// Fly Like A Bird insets a 100x100 poo-cam at rect(530, 270, 630, 370).
+    pub pass_viewport: Option<(i32, i32, i32, i32)>,
     // Bloom post-processing FBOs (half resolution)
     bloom_fbo_a: Option<WebGlFramebuffer>,
     bloom_tex_a: Option<WebGlTexture>,
@@ -286,6 +385,9 @@ impl Scene3dRenderer {
             fullscreen_vao: None,
             fbo_width: 0,
             fbo_height: 0,
+            stage_scale: 1.0,
+            transparent_clear: false,
+            pass_viewport: None,
             logged_members: std::collections::HashSet::new(),
             animation_time: 0.0,
             motion_transforms: HashMap::new(),
@@ -338,7 +440,7 @@ uniform mat4 u_projection;
 
 // Skeletal skinning
 uniform int u_skinning_enabled;
-uniform mat4 u_bone_matrices[48];
+uniform mat4 u_bone_matrices[96];
 
 // Texture coordinate transform (post-projection UV-space tweak)
 uniform mat4 u_tex_transform;
@@ -392,7 +494,30 @@ void main() {
     } else {
         base_uv = vec2(a_texcoord.x + 0.5, 0.5 - a_texcoord.y);  // CLOD remap
     }
-    v_texcoord = (u_tex_transform * vec4(base_uv, 0.0, 1.0)).xy;
+    if (u_uv_proj_mode == 5 || u_skinning_enabled == -1) {
+        // #wrapPlanar projects in model space, overlays already carry [0, 1] UVs; for
+        // both the matrix is a tweak in that same space.
+        v_texcoord = (u_tex_transform * vec4(base_uv, 0.0, 1.0)).xy;
+    } else {
+        // The texture matrix belongs in DIRECTOR's UV space, and the V flip comes after.
+        //
+        // A CLOD mesh stores `director_uv - 0.5` in BOTH components — measured by
+        // dumping SweeTarts' exit-gate mesh through `meshDeform.textureCoordinateList`
+        // in Director and against the same mesh here: Director (-0.4114, -0.4046)
+        // where we store (-0.91138, -0.90457), and Director 0..1 on the other mesh
+        // where we store ±0.503. So `base_uv` above is (director_u, 1 - director_v):
+        // right for sampling, because GL's texture origin is the other corner, but the
+        // WRONG space to transform in. Director rotates about UV (0, 0) — that gate's
+        // swirl mesh is authored with its UVs centred on zero precisely so the rotation
+        // lands in the middle of the quad — while a flipped V puts our origin at
+        // director_v = 1, one whole texture away. The swirl orbited off its quad
+        // instead of spinning in place.
+        //
+        // Identity is a no-op either way, so untransformed meshes are unaffected.
+        vec2 director_uv = a_texcoord + 0.5;
+        vec2 t = (u_tex_transform * vec4(director_uv, 0.0, 1.0)).xy;
+        v_texcoord = vec2(t.x, 1.0 - t.y);
+    }
     if (u_skinning_enabled == -1) {
         v_texcoord2 = a_texcoord2;  // overlay: pass through as-is
     } else if (u_texcoord2_direct > 0) {
@@ -438,6 +563,9 @@ uniform float u_opacity;
 uniform float u_alpha_threshold;
 uniform sampler2D u_diffuse_tex;
 uniform int u_has_texture;
+// `shader.flat` — one normal per FACE instead of the interpolated per-vertex
+// normal (Director 11.5 Scripting Dictionary, #standard shader property).
+uniform int u_flat_shading;
 uniform int u_texture_unlit;   // 1 = #replace first layer: show texture as-is (unlit)
 uniform sampler2D u_lightmap_tex;
 uniform int u_has_lightmap;       // blend mode: 0=none, 1=multiply, 2=add, 3=replace, 4=decal
@@ -556,6 +684,20 @@ void main() {
     // opacity 0.5 is untouched.)
     if (u_opacity < 0.004) discard;
     vec3 N = normalize(v_normal);
+    // Flat shading: derive the face normal from the screen-space derivatives of
+    // the world position, which is constant across a triangle. Preferred over a
+    // `flat` varying qualifier because GL ES takes those from the PROVOKING
+    // vertex — the LAST one, and not selectable in WebGL2 — whereas Director
+    // documents flat shading as using the face's FIRST vertex. The geometric
+    // normal sidesteps the disagreement entirely. Sign is irrelevant here: the
+    // one-sided lighting below already flips the shading normal to face the
+    // viewer.
+    if (u_flat_shading > 0) {
+        vec3 fdx = dFdx(v_position);
+        vec3 fdy = dFdy(v_position);
+        vec3 fn = cross(fdx, fdy);
+        if (dot(fn, fn) > 1e-12) N = normalize(fn);
+    }
     vec3 V = normalize(u_camera_pos - v_position);
     // Director/IFX lighting is ONE-SIDED (max(0,N·L)) — surfaces facing away from a
     // light fall into shadow, which is what carves the directional shading. Flip the
@@ -569,7 +711,11 @@ void main() {
     // Alpha-test cutout: opaque models whose texture carries alpha (e.g. frog01's
     // Flash bark/leaf textures) are drawn in the opaque pass; discard transparent
     // texels so they don't write depth and aren't sorted as translucent.
-    if (u_alpha_threshold > 0.0 && tex_sample.a < u_alpha_threshold) discard;
+    // `u_has_texture > 0` guard: nothing unbinds texture unit 0 between draws, so
+    // on an untextured model `tex_sample` is whatever the PREVIOUS model left
+    // there. Only a model that actually has a diffuse texture may be alpha-tested
+    // against it.
+    if (u_has_texture > 0 && u_alpha_threshold > 0.0 && tex_sample.a < u_alpha_threshold) discard;
 
     // When textured: GL_MODULATE mode = texture * vertex_lighting
     // IFX default: UseDiffuse=OFF → material diffuse forced to white (1,1,1)
@@ -650,11 +796,21 @@ void main() {
         }
 
         // Apply third texture layer if present
-        if (u_layer2_blend == 5) {
-            // Reflection / environment map (#reflection): sphere-mapped sky blended
-            // over the textured surface at the #constant factor (u_layer2_intensity).
+        if (u_layer2_blend >= 5) {
+            // Reflection / environment map (#reflection): sphere-mapped, then
+            // composited by the layer's own blendFunctionList entry (Director 11.5
+            // Scripting Dictionary, `blendFunctionList`). 5 = #blend (ratio set by
+            // blendConstant), 6 = #add (clamped), 7 = #multiply, 8 = #replace.
             vec3 refl = texture(u_layer2_tex, sphere_map_uv(N, v_position)).rgb;
-            final_color = mix(final_color, refl, u_layer2_intensity);
+            if (u_layer2_blend == 6) {
+                final_color = min(final_color + refl, vec3(1.0));
+            } else if (u_layer2_blend == 7) {
+                final_color *= refl;
+            } else if (u_layer2_blend == 8) {
+                final_color = refl;
+            } else {
+                final_color = mix(final_color, refl, u_layer2_intensity);
+            }
         } else if (u_layer2_blend > 0) {
             vec2 l2_uv = (u_has_texcoord2 > 0) ? v_texcoord2 : v_texcoord;
             vec4 l2_sample = texture(u_layer2_tex, l2_uv);
@@ -746,15 +902,44 @@ void main() {
     // Reflection / environment map on an untextured surface — e.g. tinted glass:
     // material diffuse colour with a sphere-mapped sky reflection mixed in at the
     // #constant blend factor (reflectionMap helper, u_layer2_blend == 5).
-    if (u_layer2_blend == 5) {
-        vec3 refl = texture(u_layer2_tex, sphere_map_uv(N, v_position)).rgb;
-        result = mix(result, refl, u_layer2_intensity);
+    float refl_alpha = 1.0;
+    if (u_layer2_blend >= 5) {
+        vec4 refl4 = texture(u_layer2_tex, sphere_map_uv(N, v_position));
+        vec3 refl = refl4.rgb;
+        if (u_layer2_blend == 6) {
+            result = min(result + refl, vec3(1.0));
+        } else if (u_layer2_blend == 7) {
+            result *= refl;
+            // A #multiply layer multiplies the surface's ALPHA as well as its colour:
+            // where the layer's texel is transparent it contributes nothing and leaves
+            // the surface transparent there. SweeTarts' level-3 mascot is a sphere with
+            // NO diffuse texture whose only layer is a "transcrome" reflection map at
+            // #multiply — in Director you see the level straight through it with just a
+            // few bright chrome highlights, which is what makes it read as a bubble.
+            // Ignoring the layer's alpha rendered it as a flat opaque cyan disc.
+            // Deliberately limited to #multiply: #add and #blend composite colour at a
+            // ratio and say nothing about coverage (Agent Free Ride's #add coins would
+            // start punching holes in themselves).
+            refl_alpha = refl4.a;
+        } else if (u_layer2_blend == 8) {
+            result = refl;
+        } else {
+            result = mix(result, refl, u_layer2_intensity);
+        }
     }
 
     // Apply fog (shared with the textured path via apply_fog).
     result = apply_fog(result);
 
-    float alpha = u_opacity * tex_sample.a * u_diffuse_color.a;
+    // Untextured path only — the textured branch returned above with its own
+    // `u_opacity * tex_sample.a`. There is no diffuse texture bound for THIS draw,
+    // so `tex_sample` still holds a sample of the previously drawn model's texture
+    // and its alpha must not modulate this surface. Folding it in made every
+    // material-only translucent model as transparent as whatever happened to be
+    // drawn before it — AreaZero's enemy health bar (shader.blend 90, a flat red
+    // quad with no texture layers) came out as a washed-out pink smear that faded
+    // in and out with the draw order instead of a solid red bar.
+    float alpha = u_opacity * u_diffuse_color.a * refl_alpha;
     frag_color = vec4(result, alpha);
 }
 "#;
@@ -780,6 +965,7 @@ void main() {
             u_alpha_threshold: u("u_alpha_threshold"),
             u_diffuse_tex: u("u_diffuse_tex"),
             u_has_texture: u("u_has_texture"),
+            u_flat_shading: u("u_flat_shading"),
             u_texture_unlit: u("u_texture_unlit"),
             u_lightmap_tex: u("u_lightmap_tex"),
             u_has_lightmap: u("u_has_lightmap"),
@@ -846,12 +1032,10 @@ void main() {
     v_age_ratio = clamp(a_age / u_lifetime, 0.0, 1.0);
     v_uv = a_corner * 0.5 + 0.5;
 
-    // sizeRange is the world-unit sprite size (IFX builds a `size`-wide quad per
-    // particle); a_corner spans -1..1 so 0.5 == `size` wide. We use 0.25 (half
-    // that) so the stream is a thin jet matching Shockwave's water output, rather
-    // than a thick column — the visible blob of the particle texture is narrower
-    // than the full quad.
-    float size_factor = mix(u_size_start, u_size_end, v_age_ratio) * 0.25;
+    // sizeRange is the sprite size in WORLD UNITS ("Particles are measured in
+    // world units" — Director 11.5 Scripting Dictionary, "sizeRange"), so the quad
+    // is `size` across. a_corner spans -1..1, hence the 0.5 half-extent.
+    float size_factor = mix(u_size_start, u_size_end, v_age_ratio) * 0.5;
 
     // Cull particles that are behind the eye OR so close that the billboard balloons
     // across the screen. A chase camera following a car repeatedly passes through the
@@ -1189,7 +1373,20 @@ void main() {
         scene: &W3dScene,
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
     ) -> Result<(), JsValue> {
-        let current_version = (scene.nodes.len(), scene.clod_meshes.len() + scene.raw_meshes.len(), scene.texture_images.len(), scene.shaders.len());
+        // GEOMETRY signature only. `texture_images.len()` used to be part of
+        // this, so simply ADDING a texture tore down and rebuilt every mesh and
+        // re-decoded every image in the member — for a movie that bakes each
+        // in-world string into a `newTexture` (AreaZero's `[M] Text Director`)
+        // that fired the first time each caption appeared, which is exactly the
+        // "sometimes it freezes" report: measured 96.4ms of a 100.6ms frame,
+        // 65 textures re-uploaded, for one small text texture arriving.
+        //
+        // Textures are already handled without a rebuild: `texture_content_version`
+        // below routes to `update_textures_incremental`, which uploads any
+        // texture whose per-texture write counter moved — including one that was
+        // not there before (absent counter != present counter). So a texture
+        // appearing needs no geometry work at all.
+        let current_version = (scene.nodes.len(), scene.clod_meshes.len() + scene.raw_meshes.len(), scene.shaders.len());
         // Map each model resource to the active `#sds` subdivision applied to a
         // model node using it: resource_name (lowercase) → (depth, tension).
         // Only enabled modifiers with depth ≥ 1 subdivide.
@@ -1228,21 +1425,36 @@ void main() {
 
         let mut mesh_groups: HashMap<Symbol, Vec<Mesh3dBuffers>> = HashMap::new();
         let mut mesh_signatures: HashMap<Symbol, u64> = HashMap::new();
+        let mut mesh_versions: HashMap<Symbol, u64> = HashMap::new();
         let mut all_meshes = Vec::new();
-        // Meshes may only be carried over when NOTHING about the geometry has
-        // changed: `#sds` rewrites it, and `mesh_content_version` is the scene's
-        // own "geometry was mutated" signal.
-        //
-        // Gating on `sds_version` alone was wrong and caused visible regressions
-        // (Intel 3dText lost its tunnelling, a Havok camera view came out from
-        // the wrong angle). The per-resource signature is vertex + face COUNTS,
-        // so a mesh regenerated with identical topology but moved vertices
-        // compares equal — exactly what geometry animation does. Counts alone
-        // can only prove a resource is different, never that it is the same, so
-        // they must not override the scene's explicit change flag.
+        // Was ANY mesh rewritten since this GPU entry was built? When nothing
+        // was, every resource still present is identical by definition and can
+        // be carried over WITHOUT hashing it — which matters, because hashing
+        // the whole scene's geometry costs 10-30ms on a big member. Measured:
+        // making every rebuild hash unconditionally turned a 0.2ms rebuild into
+        // a 30.7ms one. The hash is only worth paying when the scene says some
+        // mesh actually moved and we need to find out which.
         let content_unchanged = old_gpu.as_ref().map_or(false, |o| {
             o.sds_version == sds_version && o.mesh_content_version == scene.mesh_content_version
         });
+        // Every geometry change since this entry was built named its resource,
+        // so `mesh_write_versions` is a complete account of what moved. `#sds`
+        // rewrites geometry outside that bookkeeping, so it disqualifies too.
+        let attributed = old_gpu.as_ref().map_or(false, |o| {
+            o.sds_version == sds_version && o.mesh_bulk_version == scene.mesh_bulk_version
+        });
+
+        // Mesh carry-over is decided PER RESOURCE, in three tiers below:
+        // the scene's own record of what changed when that is complete
+        // (`attributed`), a whole-member shortcut when nothing changed at all
+        // (`content_unchanged`), and a content hash otherwise.
+        //
+        // The original signature was vertex + face COUNTS, which can only prove
+        // a resource is different and never that it is the same — geometry
+        // animation moves vertices without changing counts — so it had to be
+        // backed by the global `mesh_content_version`, and gating on
+        // `sds_version` alone caused real regressions (Intel 3dText lost its
+        // tunnelling, a Havok camera view came out from the wrong angle).
 
         // Collect resource names used by LIGHT nodes (to skip their geometry)
         let light_resources: std::collections::HashSet<Symbol> = scene.nodes.iter()
@@ -1260,21 +1472,51 @@ void main() {
             if light_resources.contains(name) {
                 continue; // Skip light cone/sphere meshes
             }
-            // Signature: vertex + face counts across this resource's meshes.
-            // Same idea as the texture byte-length check — cheap, and it moves
-            // whenever the geometry is rebuilt.
-            let sig: u64 = decoded_meshes
-                .iter()
-                .map(|m| (m.positions.len() as u64) << 20 ^ (m.faces.len() as u64))
-                .fold(0u64, |a, b| a.wrapping_mul(31).wrapping_add(b));
-            if content_unchanged {
+            // Fast path 2: some mesh was rewritten, but every rewrite since this
+            // entry was built named its resource, and THIS resource was not one
+            // of them. Carry it over without hashing — this is what keeps the
+            // cost of one new mesh proportional to that mesh rather than to the
+            // whole member.
+            if attributed && !content_unchanged {
                 if let Some(old) = old_gpu.as_mut() {
-                    if old.mesh_signatures.get(name) == Some(&sig) {
+                    if old.mesh_versions.get(name).copied().unwrap_or(0)
+                        == scene.mesh_write_version(name)
+                    {
                         if let Some(group) = old.mesh_groups.remove(name) {
-                            mesh_signatures.insert(*name, sig);
+                            let old_sig = old.mesh_signatures.get(name).copied().unwrap_or(0);
+                            mesh_signatures.insert(*name, old_sig);
+                            mesh_versions.insert(*name, scene.mesh_write_version(name));
                             mesh_groups.insert(name.clone(), group);
                             continue;
                         }
+                    }
+                }
+            }
+            // Fast path 1: no mesh was rewritten at all, so carry this resource
+            // over as-is and keep its stored signature, which is still true of it.
+            if content_unchanged {
+                if let Some(old) = old_gpu.as_mut() {
+                    if let Some(group) = old.mesh_groups.remove(name) {
+                        let old_sig = old.mesh_signatures.get(name).copied().unwrap_or(0);
+                        mesh_signatures.insert(*name, old_sig);
+                        mesh_versions.insert(*name, scene.mesh_write_version(name));
+                        mesh_groups.insert(name.clone(), group);
+                        continue;
+                    }
+                }
+            }
+            let sig: u64 = mesh_content_signature(
+                decoded_meshes,
+                subdiv_map.get(&name.to_lowercase()),
+                scene.model_resources.get(name).and_then(|r| r.uv_gen_mode),
+            );
+            if let Some(old) = old_gpu.as_mut() {
+                if old.mesh_signatures.get(name) == Some(&sig) {
+                    if let Some(group) = old.mesh_groups.remove(name) {
+                        mesh_signatures.insert(*name, sig);
+                        mesh_versions.insert(*name, scene.mesh_write_version(name));
+                        mesh_groups.insert(name.clone(), group);
+                        continue;
                     }
                 }
             }
@@ -1321,6 +1563,14 @@ void main() {
                     if all_same && !mesh.positions.is_empty() {
                         tc_data = generate_uvs_by_mode(&mesh.positions, uv_gen_mode);
                         Some(tc_data.as_slice())
+                    } else if tcs.len() < mesh.positions.len() {
+                        // Same rule as the 2nd set below: a short attribute buffer
+                        // kills the whole draw call in WebGL, so pad it out.
+                        let mut v = tcs.clone();
+                        let fill = *tcs.last().unwrap_or(&[0.0, 0.0]);
+                        v.resize(mesh.positions.len(), fill);
+                        tc_data = v;
+                        Some(tc_data.as_slice())
                     } else {
                         Some(tcs.as_slice())
                     }
@@ -1330,9 +1580,32 @@ void main() {
                 } else {
                     None
                 };
-                // Get 2nd UV set if available (for lightmap/shadow textures)
+                // Get 2nd UV set if available (for lightmap/shadow textures).
+                //
+                // It must cover EVERY vertex. A short attribute buffer makes WebGL
+                // reject the draw outright ("attempt to access out of range vertices
+                // in attribute N") and the mesh silently disappears — the whole draw
+                // call, not just the missing vertices.
+                //
+                // Runtime-supplied UV sets routinely come up short: Burnin' Rubber's
+                // garage feeds its lightmap channel from a baked table in a TEXT
+                // member (`CopyTextureCoordinates` reading "GarageLightmap"), and that
+                // table carries 4152 coordinates against the 4164 vertices our CLOD
+                // decode produces — so the entire showroom vanished while the cars,
+                // which have no second UV set, kept rendering. Pad instead: Director
+                // simply leaves the uncovered vertices unlit by the lightmap.
+                let tc2_padded;
                 let tc2 = if mesh.tex_coords.len() >= 2 && !mesh.tex_coords[1].is_empty() {
-                    Some(mesh.tex_coords[1].as_slice())
+                    let uv2 = &mesh.tex_coords[1];
+                    if uv2.len() < mesh.positions.len() {
+                        let mut v = uv2.clone();
+                        let fill = *uv2.last().unwrap_or(&[0.0, 0.0]);
+                        v.resize(mesh.positions.len(), fill);
+                        tc2_padded = v;
+                        Some(tc2_padded.as_slice())
+                    } else {
+                        Some(&uv2[..mesh.positions.len().min(uv2.len())])
+                    }
                 } else {
                     None
                 };
@@ -1389,16 +1662,28 @@ void main() {
                     bw_opt,
                     vc_opt,
                 )?;
-                // A file-provided 2nd UV set is a lightmap/shadowmap atlas coord in
-                // [0,1], NOT pre-centered like the base set, so it must bypass the CLOD
-                // (u+0.5, 0.5-v) remap. Without this it shifts to ~[0.5,1.5] and the
-                // forced CLAMP smears the lightmap's edge across the whole surface.
-                if tc2.is_some() {
-                    buffers.texcoord2_direct = true;
+                // Which UV space is the file's 2nd set in? The CLOD decoder stores
+                // coordinates PRE-CENTERED (-0.5..0.5) and the vertex shader undoes
+                // that with (u+0.5, 0.5-v); a set already in [0,1] must bypass it or
+                // it shifts to ~[0.5,1.5], where the forced CLAMP smears the atlas
+                // edge across the whole surface.
+                //
+                // Both layouts occur, so read it off the DATA instead of assuming:
+                // a negative coordinate can only come from the pre-centered space.
+                // AreaZero's Hangar/HangarFloor/RoadBlock lightmap sets measure
+                // u,v in -0.50..0.50 — pre-centered, exactly like their base set —
+                // and forcing them direct sampled the atlas at negative u, which
+                // clamped to a black edge. That is why the baked light contributed
+                // nothing recognisable and had to be composited as ADD to look like
+                // anything at all (docs/areazero/README.md §3.3, "scene too bright").
+                if let Some(uv2) = tc2 {
+                    let pre_centered = uv2.iter().any(|c| c[0] < -0.001 || c[1] < -0.001);
+                    buffers.texcoord2_direct = !pre_centered;
                 }
                 group.push(buffers);
             }
             mesh_signatures.insert(*name, sig);
+            mesh_versions.insert(*name, scene.mesh_write_version(name));
             mesh_groups.insert(name.clone(), group);
         }
 
@@ -1446,26 +1731,42 @@ void main() {
         let mut alpha_textures = std::collections::HashSet::new();
         let mut soft_alpha_textures = std::collections::HashSet::new();
         for (tex_name, image_data) in &scene.texture_images {
+            // A texture declared by `newTexture(name)` with no source carries no
+            // pixels yet (Director's "Blank" texture). It exists as a name until a
+            // `.member` / `.image` assignment fills it in — nothing to upload.
+            if image_data.is_empty() { continue; }
             let lower = tex_name.as_lower_str();
             // The SkyLine* textures in this game are authored vertically inverted in
             // the W3D (the JPEGs are stored upside-down, while houses/buildings/icons
             // are stored right-side-up). The skyline mesh UVs use the same convention
             // as everything else, and the texture declarations carry no orientation
             // flag, so flip these on upload to render the horizon the right way up.
-            // Same signature `update_textures_incremental` uses: the image's
-            // byte length. Unchanged => hand the existing GPU texture straight
-            // over and skip decode + upload entirely.
-            // Byte length can only prove an image is DIFFERENT, never that it is
-            // the same — a recolour that re-encodes to the same size compares
-            // equal (Heatwave Daytona's selected car rendered black off a stale
-            // texture). So require the scene's own texture_content_version to be
-            // unchanged as well.
-            let data_len = image_data.len() as u64;
-            let tex_content_same = old_gpu
+            // Same signature `update_textures_incremental` uses: the scene's
+            // per-texture WRITE counter. Unchanged => hand the existing GPU
+            // texture straight over and skip decode + upload entirely.
+            // Byte length used to stand in for this and could only prove an
+            // image DIFFERENT, never the same — a recolour that re-encodes to
+            // the same size compared equal (Heatwave Daytona's selected car
+            // rendered black off a stale texture), and a fixed-size HUD readout
+            // never compared unequal at all (Rifleman's frozen clock).
+            // Reuse is decided PER TEXTURE, by its own write counter. It used to be
+            // gated on the scene-wide `texture_content_version` as well, which meant
+            // touching ONE texture re-decoded every JPEG in the member: Agent Free
+            // Ride's track build clones ~40 models, each copying a few textures in,
+            // so the whole texture set was decoded over and over and the level took
+            // ~50 s to load with `decode_and_upload_texture_impl` dominating the
+            // profile. The scene-wide counter is still what triggers the incremental
+            // pass in `ensure_member_data`; it just no longer vetoes carry-over.
+            //
+            // Safe because every write to `texture_images` now goes through
+            // `put_texture_image`, which bumps this per-texture counter — including
+            // `merge` (loadFile), which previously extended the map behind its back.
+            let write_version = scene.texture_write_versions.get(tex_name).copied().unwrap_or(0);
+            let epoch_same = old_gpu
                 .as_ref()
-                .map_or(false, |o| o.texture_content_version == scene.texture_content_version);
-            if let Some(old) = old_gpu.as_mut().filter(|_| tex_content_same) {
-                if old.texture_versions.get(tex_name) == Some(&data_len) {
+                .map_or(false, |o| o.texture_epoch == scene.texture_epoch);
+            if let Some(old) = old_gpu.as_mut().filter(|_| epoch_same) {
+                if old.texture_versions.get(tex_name) == Some(&write_version) {
                     if let Some(tex) = old.textures.remove(tex_name) {
                         if let Some(sz) = old.texture_sizes.get(tex_name) {
                             texture_sizes.insert(*tex_name, *sz);
@@ -1482,7 +1783,7 @@ void main() {
                 }
             }
             let flip_v = lower.contains("skyline");
-            if let Some((tex, w, h, has_alpha, soft_alpha)) = self.decode_and_upload_texture(context, image_data, flip_v) {
+            if let Some((tex, w, h, has_alpha, soft_alpha)) = self.decode_and_upload_texture(context, image_data, flip_v, scene.texture_near_filtering(tex_name), scene.texture_quality.get(tex_name).map(|q| q.as_str()).as_deref()) {
                 texture_sizes.insert(*tex_name, (w, h));
                 if has_alpha {
                     alpha_textures.insert(tex_name.clone());
@@ -1527,16 +1828,22 @@ void main() {
         let cube_maps = self.detect_and_create_cubemaps(context, scene);
 
         let mut texture_versions = HashMap::new();
-        for (tex_name, image_data) in &scene.texture_images {
-            texture_versions.insert(*tex_name, image_data.len() as u64);
+        for tex_name in scene.texture_images.keys() {
+            texture_versions.insert(
+                *tex_name,
+                scene.texture_write_versions.get(tex_name).copied().unwrap_or(0),
+            );
         }
         self.member_data.insert(key, MemberGpuData {
             mesh_groups, mesh_signatures, all_meshes, textures, texture_sizes, cube_maps, inverse_bind_cache,
             scene_version: current_version,
+            mesh_versions,
+            mesh_bulk_version: scene.mesh_bulk_version,
             mesh_content_version: scene.mesh_content_version,
             sds_version,
             texture_versions,
             texture_content_version: scene.texture_content_version,
+            texture_epoch: scene.texture_epoch,
             alpha_textures,
             soft_alpha_textures,
         });
@@ -1590,8 +1897,8 @@ void main() {
     }
 
     /// Decode JPEG/PNG image data and upload as WebGL texture (delegates to free function)
-    fn decode_and_upload_texture(&self, context: &WebGL2Context, data: &[u8], flip_v: bool) -> Option<(WebGlTexture, u32, u32, bool, bool)> {
-        decode_and_upload_texture_impl(context, data, flip_v)
+    fn decode_and_upload_texture(&self, context: &WebGL2Context, data: &[u8], flip_v: bool, near_filtering: bool, quality: Option<&str>) -> Option<(WebGlTexture, u32, u32, bool, bool)> {
+        decode_and_upload_texture_impl(context, data, flip_v, near_filtering, quality)
     }
 
     /// Incrementally re-upload only changed/new textures to GPU
@@ -1600,14 +1907,19 @@ void main() {
 
         for (tex_name, image_data) in &scene.texture_images {
             let lower = tex_name.as_lower_str();
-            let data_len = image_data.len() as u64;
-            let needs_upload = match gpu_data.texture_versions.get(tex_name) {
-                None => true,
-                Some(&old_len) => old_len != data_len,
-            };
+            // The scene's per-texture write counter, NOT the byte length.
+            // Length can only prove an image is different, never that it is the
+            // same — and this function runs precisely when some texture DID
+            // change. Rifleman's HUD clock regenerates a fixed 64x64 RGBA image
+            // every second, so its length never moves and a length check froze
+            // the on-screen clock until an unrelated scene change forced a full
+            // rebuild (shooting something), which is what "the timer only
+            // updates when I shoot" was.
+            let write_version = scene.texture_write_versions.get(tex_name).copied().unwrap_or(0);
+            let needs_upload = gpu_data.texture_versions.get(tex_name) != Some(&write_version);
             if needs_upload {
                 let flip_v = lower.contains("skyline");
-                if let Some((tex, w, h, has_alpha, soft_alpha)) = decode_and_upload_texture_impl(context, image_data, flip_v) {
+                if let Some((tex, w, h, has_alpha, soft_alpha)) = decode_and_upload_texture_impl(context, image_data, flip_v, scene.texture_near_filtering(tex_name), scene.texture_quality.get(tex_name).map(|q| q.as_str()).as_deref()) {
                     gpu_data.texture_sizes.insert(*tex_name, (w, h));
                     if has_alpha {
                         gpu_data.alpha_textures.insert(*tex_name);
@@ -1620,7 +1932,7 @@ void main() {
                         gpu_data.soft_alpha_textures.remove(tex_name);
                     }
                     gpu_data.textures.insert(*tex_name, tex);
-                    gpu_data.texture_versions.insert(*tex_name, data_len);
+                    gpu_data.texture_versions.insert(*tex_name, write_version);
                 }
             }
         }
@@ -1840,7 +2152,13 @@ void main() {
                         if mesh_buf.meshdeform_uv_synced { continue; }
                         if let Some(mesh) = clod_meshes.get(mesh_idx) {
                             if mesh.tex_coords.len() >= 2 && !mesh.tex_coords[1].is_empty() {
-                                mesh_buf.update_texcoord2(context.gl(), &mesh.tex_coords[1]);
+                                // Same space test as the loader: a negative
+                                // coordinate can only come from the pre-centered
+                                // CLOD space. Passing this through is what keeps
+                                // the re-upload from flipping the flag.
+                                let uv2 = &mesh.tex_coords[1];
+                                let direct = !uv2.iter().any(|c| c[0] < -0.001 || c[1] < -0.001);
+                                mesh_buf.update_texcoord2(context.gl(), uv2, direct);
                                 mesh_buf.meshdeform_uv_synced = true;
                                 let resource_name = resource_name.as_str();
                                 // Log UV2 sync for MAP and Main models
@@ -1858,6 +2176,16 @@ void main() {
                 }
             }
         }
+
+        // The viewport this pass draws into: `sprite(n).camera(i).rect`, already
+        // resolved and scaled by the caller. `None` means "fill the sprite",
+        // which is always the case for camera(1) — Director resets its rect to
+        // the full sprite every time it renders (11.5 Scripting Dictionary,
+        // "rect (camera)").
+        let cam_viewport = self.pass_viewport.filter(|(l, t, r, b)| {
+            *r > *l && *b > *t
+                && !(*l <= 0 && *t <= 0 && *r >= width as i32 && *b >= height as i32)
+        });
 
         let gl = context.gl();
         let shader = self.shader.as_ref().unwrap();
@@ -1881,6 +2209,19 @@ void main() {
         gl.disable(WebGl2RenderingContext::SCISSOR_TEST);
         gl.disable(WebGl2RenderingContext::STENCIL_TEST);
         gl.color_mask(true, true, true, true);
+
+        // Narrow this pass to the camera's own rect. Scissor as well as
+        // viewport, so a clearing camera clears only its own inset.
+        if let Some((l, t, r, b)) = cam_viewport {
+            let vw = r - l;
+            let vh = b - t;
+            // The FBO is sampled V-flipped by the 2D compositor, so its GL row 0
+            // is the TOP of the composited sprite — `rect.top` is already the
+            // right GL y, with no bottom-left conversion.
+            gl.viewport(l, t, vw, vh);
+            gl.scissor(l, t, vw, vh);
+            gl.enable(WebGl2RenderingContext::SCISSOR_TEST);
+        }
         gl.depth_mask(true);
         gl.enable(WebGl2RenderingContext::DEPTH_TEST);
         gl.depth_func(WebGl2RenderingContext::LEQUAL);
@@ -1903,7 +2244,13 @@ void main() {
 
         // Set up camera
         let (view_matrix, camera_pos) = self.build_view_matrix(scene, runtime_state);
-        let projection_matrix = self.build_projection_matrix(scene, width as f32 / height as f32, runtime_state);
+        // The projection aspect follows the viewport this pass actually draws
+        // into, not the whole sprite — an inset camera is otherwise stretched.
+        let pass_aspect = match cam_viewport {
+            Some((l, t, r, b)) if b > t => (r - l) as f32 / (b - t) as f32,
+            _ => width as f32 / height as f32,
+        };
+        let projection_matrix = self.build_projection_matrix(scene, pass_aspect, runtime_state);
 
         gl.uniform_matrix4fv_with_f32_array(shader.u_view.as_ref(), false, &view_matrix);
         gl.uniform_matrix4fv_with_f32_array(shader.u_projection.as_ref(), false, &projection_matrix);
@@ -1931,14 +2278,28 @@ void main() {
         gl.uniform1i(shader.u_shader_mode.as_ref(), 0);     // default: phong
         gl.uniform1f(shader.u_toon_steps.as_ref(), 3.0);    // default toon steps
 
-        // Apply fog from runtime state or default off
+        // Apply fog from runtime state or default off. Fog belongs to the CAMERA
+        // this pass renders through, not to the member: Burnin' Rubber's menu
+        // fogs `CameraFire` (the tunnel) to white and draws the whole UI over it
+        // through an unfogged orthographic `CameraMenu`, so a member-wide fog
+        // whited out the menu as well. `camera_fog` falls back to the member's
+        // fog_* fields for any camera the movie never fogged.
         if let Some(rs) = runtime_state {
-            if rs.fog_enabled {
+            let fog = self.active_camera.as_ref()
+                .and_then(|c| rs.camera_fog.get(c).copied())
+                .unwrap_or(crate::player::cast_member::CameraFog {
+                    enabled: rs.fog_enabled,
+                    near: rs.fog_near,
+                    far: rs.fog_far,
+                    color: rs.fog_color,
+                    mode: rs.fog_mode,
+                });
+            if fog.enabled {
                 gl.uniform1i(shader.u_fog_enabled.as_ref(), 1);
-                gl.uniform1f(shader.u_fog_near.as_ref(), rs.fog_near);
-                gl.uniform1f(shader.u_fog_far.as_ref(), rs.fog_far);
-                gl.uniform3f(shader.u_fog_color.as_ref(), rs.fog_color.0, rs.fog_color.1, rs.fog_color.2);
-                gl.uniform1i(shader.u_fog_mode.as_ref(), rs.fog_mode as i32);
+                gl.uniform1f(shader.u_fog_near.as_ref(), fog.near);
+                gl.uniform1f(shader.u_fog_far.as_ref(), fog.far);
+                gl.uniform3f(shader.u_fog_color.as_ref(), fog.color.0, fog.color.1, fog.color.2);
+                gl.uniform1i(shader.u_fog_mode.as_ref(), fog.mode as i32);
             } else {
                 gl.uniform1i(shader.u_fog_enabled.as_ref(), 0);
             }
@@ -1958,8 +2319,22 @@ void main() {
             // background set it via Lingo (`member.bgColor = ...`) which feeds
             // back into runtime_state.background_color.
             if clear_fbo {
-                let (r, g, b) = rs.background_color.unwrap_or((0, 0, 0));
-                gl.clear_color(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0);
+                // `camera.colorBuffer.clearValue` overrides the member's bgColor for
+                // the camera this pass renders (Director 11.5 Scripting Dictionary,
+                // "clearValue").
+                // The camera THIS pass renders through — not merely the first
+                // View node in the scene, which is a different camera as soon as
+                // a sprite carries more than one.
+                let cam_clear = self.active_camera.as_ref()
+                    .and_then(|c| rs.camera_clear_values.get(c).copied())
+                    .or_else(|| scene.nodes.iter()
+                        .find(|n| n.node_type == W3dNodeType::View)
+                        .and_then(|n| rs.camera_clear_values.get(&n.name).copied()));
+                let (r, g, b) = cam_clear
+                    .or(rs.background_color)
+                    .unwrap_or((0, 0, 0));
+                let clear_a = if self.transparent_clear { 0.0 } else { 1.0 };
+                gl.clear_color(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, clear_a);
                 gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT | WebGl2RenderingContext::DEPTH_BUFFER_BIT);
             }
         } else {
@@ -1972,12 +2347,23 @@ void main() {
 
         // Draw camera backdrops (Director `addBackdrop`) BEHIND the scene: after the
         // colour clear, before any models, with depth test off so all geometry
-        // occludes them. Only on the clearing (primary) pass — extra-camera passes
-        // (clear_fbo=false) must not redraw them. The FBO is already bound, cleared,
-        // and feedback-safe here, which avoids the stale/uninitialised-white that a
-        // separate pre-pass produced. After drawing, the 3D camera matrices and GL
-        // state are restored for the model loop.
-        if clear_fbo {
+        // occludes them. The FBO is already bound, cleared, and feedback-safe here,
+        // which avoids the stale/uninitialised-white that a separate pre-pass
+        // produced. After drawing, the 3D camera matrices and GL state are restored
+        // for the model loop.
+        //
+        // This runs on EVERY pass, not only the clearing one. A backdrop belongs to
+        // its camera and is part of what that camera draws; `clearAtRender` governs
+        // only the colour buffer (Director 11.5, `clearAtRender`: "indicates whether
+        // the color buffer is cleared after each frame"; `clearValue`: "the color
+        // used to clear out the color buffer IF colorBuffer.clearAtRender is set to
+        // TRUE"), and `addCamera` says each camera's view "is displayed on top of the
+        // view from cameras with lower index positions". TRECH 2's radar is exactly
+        // that shape — a second, orthographic camera inset at rect(10,10,150,150)
+        // with `clearAtRender = 0` so the world shows through, whose only chrome is
+        // an `addBackdrop` of the radarBG texture. Gating backdrops on the clear left
+        // the blips floating over the city with no radar dial under them.
+        {
             if let Some(rs) = runtime_state {
                 let cam_key = self.active_camera
                     .unwrap_or_else(|| Symbol::from_str("defaultview"));
@@ -1989,15 +2375,41 @@ void main() {
                         // like the estate explore), active_camera is None and the
                         // renderer defaults to DefaultView — fall back to whichever
                         // single camera owns backdrops. With an explicit camera, match
-                        // strictly so a multi-camera movie doesn't cross backdrops.
-                        if self.active_camera.is_none() {
+                        // strictly so a multi-camera movie doesn't cross backdrops,
+                        // and never guess on a non-clearing pass: an extra camera pass
+                        // draws a backdrop only if it owns one.
+                        if clear_fbo && self.active_camera.is_none() {
                             rs.camera_backdrops.values().find(|b| !b.is_empty())
                         } else {
                             None
                         }
                     });
                 if let Some(backdrops) = backdrops {
-                    self.draw_backdrops_inline(gl, shader, &member_key, backdrops, width, height);
+                    // A backdrop is drawn UNSCALED, one backdrop pixel to one sprite
+                    // pixel, from an origin at its own camera's view — i.e. the
+                    // camera's `rect`. For camera(1) that rect is the whole sprite
+                    // (Director resets it every render), which is why the dictionary
+                    // can describe `locWithinSprite` as "measured from the upper left
+                    // corner of the sprite"; for an inset camera the two differ.
+                    //
+                    // TRECH 2's radar pins this down exactly. radarBG is a 256x256
+                    // texture whose opaque dial occupies pixels 58..197 — 140x140,
+                    // the size of the radar rect(10,10,150,150) — and the movie
+                    // places it at `point(-58, -58)`. That offset cancels the dial's
+                    // inset precisely, so the dial lands on the rect's own origin and
+                    // fills it, which is what the game looks like in Director.
+                    //
+                    // So: keep the viewport at FULL FBO SIZE (no squeezing of the
+                    // ortho, which would shrink a 256px dial to ~45px) but move its
+                    // ORIGIN to the camera rect, and let the SCISSOR — still the rect
+                    // — clip. Then restore the pass viewport for the model loop.
+                    if let Some((l, t, r, b)) = cam_viewport {
+                        gl.viewport(l, t, width as i32, height as i32);
+                        self.draw_backdrops_inline(gl, shader, &member_key, backdrops, width, height);
+                        gl.viewport(l, t, r - l, b - t);
+                    } else {
+                        self.draw_backdrops_inline(gl, shader, &member_key, backdrops, width, height);
+                    }
                     // Restore camera matrices + render state for the model loop.
                     gl.uniform_matrix4fv_with_f32_array(shader.u_view.as_ref(), false, &view_matrix);
                     gl.uniform_matrix4fv_with_f32_array(shader.u_projection.as_ref(), false, &projection_matrix);
@@ -2112,7 +2524,14 @@ void main() {
                 // a multi-track skeletal motion applies each track to its named bone.
                 if let Some(rs) = runtime_state {
                     for (model_name, bp) in &rs.bones_players {
-                        if !bp.animation_playing { continue; }
+                        // A PAUSED player still holds its pose — that is what pause
+                        // means. The clock only advances while playing (see
+                        // events::tick_w3d_animations), so applying the motion here
+                        // unconditionally freezes the model on its current frame
+                        // rather than snapping it back to the authored node
+                        // transform. Bottle Rocket pauses its can and rocket at load
+                        // and expects them to stand in the clip's frame 0 until the
+                        // launch resumes them.
                         let motion_name = match &bp.current_motion { Some(m) => m, None => continue };
                         let motion = match scene.motions.iter().find(|m| m.name.eq_ignore_ascii_case(motion_name.as_str())) {
                             Some(m) => m, None => continue,
@@ -2389,16 +2808,20 @@ void main() {
             }
         }
 
-        // Render ShaderInker outlines (after geometry, before particles)
-        let _ = self.render_inker_outlines(context, scene, &member_key, &view_matrix, &projection_matrix, runtime_state);
+        // Render particles (after opaque geometry), alpha-blended.
+        let _ = self.render_particles(context, &member_key, runtime_state, &view_matrix, &projection_matrix);
 
-        // Re-activate main shader after outline pass (particles need it or their own shader)
+        // #inker outlines, LAST. The inverted hull needs the inked model's own depth to
+        // clip it, and a translucent model wrote none (the transparent pass runs
+        // depth_mask(false)), so the pass lays that depth down itself. Drawing it after the
+        // particles keeps those extra depth writes from occluding anything: nothing but
+        // post-processing follows.
+        let _ = self.render_inker_outlines(context, scene, &member_key, &view_matrix, &projection_matrix, (width, height), runtime_state);
+
+        // Re-activate main shader after the outline pass.
         if let Some(ref shader) = self.shader {
             gl.use_program(Some(&shader.program));
         }
-
-        // Render particles (after opaque geometry), alpha-blended.
-        let _ = self.render_particles(context, &member_key, runtime_state, &view_matrix, &projection_matrix);
 
         // Note: overlays are rendered AFTER all camera passes, not per-camera
 
@@ -2491,8 +2914,10 @@ void main() {
             WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA,
         );
 
-        let w = width as f32;
-        let h = height as f32;
+        // Movie-space viewport — see `stage_scale` and draw_backdrops_inline.
+        let s = if self.stage_scale > 0.0 { self.stage_scale } else { 1.0 };
+        let w = width as f32 / s;
+        let h = height as f32 / s;
         // Ortho projection: (0,0)=top-left in screen space
         // FBO is Y-flipped when composited, so use positive Y (no flip here)
         let ortho: [f32; 16] = [
@@ -2552,6 +2977,7 @@ void main() {
             gl.uniform1i(shader.u_diffuse_tex.as_ref(), 0);
             gl.uniform1i(shader.u_has_texture.as_ref(), 1);
             gl.uniform1f(shader.u_opacity.as_ref(), (overlay.blend / 100.0) as f32);
+            gl.uniform1i(shader.u_flat_shading.as_ref(), 0);
 
             let x = overlay.loc[0] as f32;
             let y = overlay.loc[1] as f32;
@@ -2574,12 +3000,40 @@ void main() {
             // tube vanished. translate = loc − R·regPoint.
             let sw = sx * tex_w;
             let sh = sy * tex_h;
+            // Rotation pivot. The dictionary says rotation is "about its
+            // regPoint" and that regPoint defaults to point(0,0) — the texture's
+            // UPPER-LEFT — but taken literally that spins an unrotated-regPoint
+            // overlay around its own top corner, which no movie wants and
+            // Director visibly does not do. Rifleman pins this down: its radar
+            // view-cone is a 64x64 texture placed at `playerCentre - (32,32)`,
+            // i.e. deliberately centred on the player dot, and then rotated to
+            // the aim direction every frame. That only tracks the player if the
+            // pivot is the quad's CENTRE; pivoting at the top-left swung the
+            // cone around a point 32px up-left of the dot, so it changed
+            // direction but never rotated about the player.
+            // So: pivot at regPoint when a script actually set one (that is the
+            // documented behaviour and what e.g. a scaled scope reticle asks
+            // for), and at the quad centre when regPoint is merely sitting at
+            // its default.
+            //
+            // translate = loc + anchor − R·pivot, where `pivot` is the point held
+            // fixed by the rotation and `anchor` is where that point sits
+            // relative to loc. With an explicit regPoint the two coincide
+            // (anchor 0: loc IS the regPoint's screen position, the documented
+            // meaning of loc); with the default they do not, because loc still
+            // places the upper-left while the quad turns about its middle.
+            let (ax, ay, px, py) = if overlay.reg_point_explicit {
+                (0.0, 0.0, rx, ry)
+            } else {
+                let (cx, cy) = (sw * 0.5, sh * 0.5);
+                (cx, cy, cx, cy)
+            };
             let model: [f32; 16] = [
                 cos_r * sw, sin_r * sw, 0.0, 0.0,
                -sin_r * sh, cos_r * sh, 0.0, 0.0,
                 0.0,        0.0,        1.0, 0.0,
-                x - rx * cos_r + ry * sin_r,
-                y - rx * sin_r - ry * cos_r,
+                x + ax - px * cos_r + py * sin_r,
+                y + ay - px * sin_r - py * cos_r,
                 0.0, 1.0,
             ];
             gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &model);
@@ -2662,8 +3116,12 @@ void main() {
             WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA,
         );
 
-        let w = width as f32;
-        let h = height as f32;
+        // Movie-space viewport: backdrops are authored in movie pixels, so the
+        // ortho works in that space and the (already enlarged) GL viewport does
+        // the scaling. See `stage_scale`.
+        let s = if self.stage_scale > 0.0 { self.stage_scale } else { 1.0 };
+        let w = width as f32 / s;
+        let h = height as f32 / s;
         // Ortho: (0,0)=top-left in sprite space. FBO is Y-flipped when composited, so
         // use positive Y here (matches render_overlays_to_fbo).
         let ortho: [f32; 16] = [
@@ -2722,6 +3180,7 @@ void main() {
             gl.uniform1i(shader.u_diffuse_tex.as_ref(), 0);
             gl.uniform1i(shader.u_has_texture.as_ref(), 1);
             gl.uniform1f(shader.u_opacity.as_ref(), (backdrop.blend / 100.0) as f32);
+            gl.uniform1i(shader.u_flat_shading.as_ref(), 0);
 
             let x = backdrop.loc[0] as f32;
             let y = backdrop.loc[1] as f32;
@@ -2833,7 +3292,19 @@ void main() {
                 // node names aren't).
                 match runtime_override {
                     Some(rt) => mat4_multiply_col_major(&rt, km),
-                    None => mat4_multiply_col_major(km, &node.transform),
+                    // Base FIRST, keyframe applied in the node's own frame — the same
+                    // order as the runtime-override branch above, and the order the
+                    // clips are authored in: an object keyframe starts at IDENTITY
+                    // (pos 0, rot identity, scale 1) and is a delta from the node's
+                    // authored rest pose. Agent Free Ride's paraglider canopy is the
+                    // proof: `parachute`'s node is authored at ~1/100 scale and its
+                    // clip ramps scale ~100x as the canopy inflates, with translation
+                    // running to ~1e6 in that same 100x space. Composed the other way
+                    // round (`km * base`) the clip's raw translation is NOT divided by
+                    // the node's 1/100 scale, so the canopy was drawn ~1.4 MILLION
+                    // units away — off screen, which is why the end-of-level shot had
+                    // a boarder and no parachute.
+                    None => mat4_multiply_col_major(&node.transform, km),
                 }
             } else if let Some(motion_t) = self.motion_transforms.get(&node.name) {
                 match runtime_override {
@@ -2881,6 +3352,43 @@ void main() {
         result
     }
 
+    /// World-space bounding radius of a model whose resource is a RUNTIME PRIMITIVE
+    /// (`newModelResource(name, #box/#sphere/#cylinder/#plane/…)`), whose dimensions
+    /// the script set and we therefore know exactly. `None` for parsed CLOD meshes,
+    /// where the vertices live on the GPU and there is no cheap extent to read.
+    fn primitive_world_radius(res_info: Option<&ModelResourceInfo>, world: &[f32; 16]) -> Option<f32> {
+        let info = res_info?;
+        let kind = info.primitive_type.as_deref()?;
+        // Half-extents in the resource's own space, per Director's primitive
+        // dimension properties (width/length/height are FULL sizes; radius is not).
+        let (w, l, h) = (
+            0.5 * info.primitive_width.abs(),
+            0.5 * info.primitive_length.abs(),
+            0.5 * info.primitive_height.abs(),
+        );
+        let half = match kind {
+            "box" => w.max(l).max(h),
+            "plane" => w.max(l),
+            "sphere" => info.primitive_radius.abs(),
+            "cylinder" => info.primitive_radius.abs()
+                .max(info.primitive_top_radius.abs())
+                .max(h),
+            // #particle and anything else has no meaningful authored extent.
+            _ => return None,
+        };
+        // The largest axis scale in the world matrix — a sphere of this radius in
+        // model space cannot exceed one of `half * scale` in world space.
+        let axis = |c: usize| {
+            (world[c * 4] * world[c * 4]
+                + world[c * 4 + 1] * world[c * 4 + 1]
+                + world[c * 4 + 2] * world[c * 4 + 2])
+                .sqrt()
+        };
+        let scale = axis(0).max(axis(1)).max(axis(2));
+        let r = half * scale;
+        if r.is_finite() { Some(r) } else { None }
+    }
+
     /// Draw a single model node (extracted for opaque/transparent pass reuse).
     fn draw_model_node(
         &self,
@@ -2907,8 +3415,35 @@ void main() {
         // render inside-out (no cull), camera-centered, past the normal far plane —
         // otherwise the box's inner faces are culled/clipped and the starfield
         // background is missing (only the foreground galaxy plane shows).
-        let is_skybox = (model_node.name.starts_with("SB_") && model_node.parent_name.as_lower_str().contains("skybox"))
+        let named_skybox = (model_node.name.starts_with("SB_") && model_node.parent_name.as_lower_str().contains("skybox"))
             || model_node.name.as_lower_str().contains("skybox");
+        // …but the treatment is a RESCUE for geometry authored so far out that the
+        // camera's real far plane clips it away, not something the name alone earns.
+        // A movie is free to call an ordinary world object "skybox": SweeTarts 3D
+        // builds `newModelResource("skybox", #cylinder, #back)` with radius 6000 —
+        // well inside its camera's yon of 10000 — translates it to (0, -1000, 0),
+        // parents the ground and ceiling caps to it and then, in the "mrseasick"
+        // level, tilts the whole thing. Camera-centring that cylinder decoupled it
+        // from its own caps, and the depth-mask-off pass stopped it occluding them,
+        // so the 12000-unit ground plane's corners (which sit OUTSIDE the 6000 wall
+        // and are meant to be hidden by it) drew straight over the jungle backdrop.
+        // Only take over a model the camera's own far plane could not show.
+        let is_skybox = named_skybox && {
+            let world = self.accumulate_transform_with_state(scene, model_node, runtime_state);
+            match Self::primitive_world_radius(res_info, &world) {
+                // Deliberately compared against the model's own extent and NOT its
+                // distance from the eye: a camera-position-dependent test would flip
+                // the model between the two treatments as the camera roams, popping
+                // the backdrop mid-frame.
+                Some(radius) => {
+                    let far = projection_matrix[14] / (projection_matrix[10] + 1.0);
+                    !(far.is_finite() && far > 0.0 && radius < far)
+                }
+                // Parsed (non-primitive) geometry has no cheap extent here, so keep
+                // the historical behaviour — that is the Rasterwerks/unicraft case.
+                None => true,
+            }
+        };
         let mut vis_mode = 1u8; // default #front
 
         if let Some(gpu_data) = self.member_data.get(member_key) {
@@ -2929,17 +3464,27 @@ void main() {
                     // second time for scripted movies like the dinosaur test.
                     gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &world_matrix);
                 } else {
-                    // Passive W3D skinned content still needs the historical
-                    // Z-up -> render-basis correction.
-                    let mut m = world_matrix;
-                    for col in 0..3 {
-                        let o = col * 4;
-                        let r1 = m[o + 1];
-                        let r2 = m[o + 2];
-                        m[o + 1] = r2;
-                        m[o + 2] = -r1;
-                    }
-                    gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &m);
+                    // No basis rebase for passive skinned content. A historical
+                    // "Z-up -> render basis" column swap used to be applied here,
+                    // but IFX is right-handed with NO axis remap anywhere else in
+                    // this renderer (see the coordinate-conventions note: view =
+                    // plain camera inverse, never negate axes), and Intel's own
+                    // IFX sample DoNotPush.dcr is direct evidence against it: its
+                    // 82-bone "Barry_delib" rig parses and skins correctly and the
+                    // swap laid the character on its back, viewed from above.
+                    // Measured: with the swap restored, `intel_do_not_push`'s
+                    // start_game snapshot fails at 19.82% against its reference;
+                    // without it, it passes. A per-draw probe also showed this
+                    // branch is reached by only two things in the whole 3D suite
+                    // — `Barry_delib` and AreaZero's `RobotGunShadow` — because
+                    // every other skinned model is Lingo-driven and takes the
+                    // override branch above. In particular NOTHING in Rifleman
+                    // or Agent Free Ride reaches it, so this hunk cannot be
+                    // (and was not) the cause of their rider/soldier regression;
+                    // that was the clone tier below. Those two movies have no
+                    // committed reference snapshots at all, so do not read a
+                    // green run as rendering validation for them.
+                    gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &world_matrix);
                 }
             } else {
                 gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &world_matrix);
@@ -3003,14 +3548,53 @@ void main() {
                 mode
             };
 
+            // See the per-mesh depth note in the loop: only a model whose transparent
+            // classification came off a fully hidden mesh gets that treatment.
+            let model_has_hidden_mesh = force_blend
+                && self.get_model_opacity(scene, model_node, runtime_state) < 0.001;
             if let Some(mesh_group) = gpu_data.mesh_groups.get(&resource) {
                 for (mesh_idx, mesh_buf) in mesh_group.iter().enumerate() {
-                    let bound = self.bind_material_for_mesh(
+                    let mesh_mat = self.bind_material_for_mesh(
                         gl, shader, scene, model_node,
                         res_info, mesh_idx, member_key, runtime_state, force_blend,
                     );
-                    if !bound {
+                    if mesh_mat.is_none() {
                         self.bind_material(gl, shader, scene, model_node, member_key, runtime_state, force_blend);
+                    }
+                    // A model dragged into the transparent pass by a HIDDEN mesh still
+                    // has to resolve its own solid geometry against itself.
+                    //
+                    // Agent Free Ride's rider carries its four gadgets as meshes of the
+                    // one skinned model and hides the unused ones with `shader.blend = 0`.
+                    // `get_model_opacity` takes the minimum across the bound shaders, so
+                    // it reports 0.000 off a mesh that draws nothing and the whole rider —
+                    // body, board, jetpack — lands in PASS 2, which runs
+                    // `depth_mask(false)`. With no depth inside the model the 8 meshes
+                    // simply paint in index order and the torso (5..7) painted over the
+                    // jetpack (1) that sits on the back, leaving only the slivers of pack
+                    // falling outside the body silhouette.
+                    //
+                    // So for exactly that model shape — one whose classification came off
+                    // a fully hidden mesh — let a mesh that is genuinely opaque (full
+                    // material opacity, not additive, no alpha in its diffuse texture)
+                    // write depth for its own draw, the way Director resolves it per mesh.
+                    //
+                    // Models with no hidden mesh keep the pass's mask untouched. The
+                    // guard is deliberate scope control, not a fix for a known casualty:
+                    // it keeps this out of every ordinary multi-mesh model that reaches
+                    // PASS 2 for some other reason (a soft-alpha layer, an additive
+                    // surface), where painting order was already the behaviour in place.
+                    if force_blend && model_has_hidden_mesh {
+                        let opaque_mesh = mesh_mat.as_ref().map(|mm| {
+                            mm.opacity >= 0.999
+                                && mm.blend_func != 1
+                                && !mm.diffuse_name.is_empty()
+                                && self.member_data.get(member_key).map(|g| {
+                                    let n = Symbol::from_str(&mm.diffuse_name);
+                                    !g.alpha_textures.contains(&n)
+                                }).unwrap_or(false)
+                        }).unwrap_or(false);
+                        gl.depth_mask(opaque_mesh);
                     }
                     // Reflection map last so the per-mesh candidate search can't clobber it.
                     self.apply_reflection_map(gl, shader, scene, model_node, member_key, runtime_state);
@@ -3062,6 +3646,11 @@ void main() {
                     }
                 }
             }
+        }
+        // The per-mesh depth writes above are a within-model override; the
+        // transparent pass owns the mask, so hand it back the way it was set.
+        if force_blend {
+            gl.depth_mask(false);
         }
         // Restore culling/depth state if changed
         if is_skybox {
@@ -3189,17 +3778,36 @@ void main() {
         model_node: &W3dNode,
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
     ) -> f32 {
-        // 1. Check node-level shader override
+        // 1. Check node-level shader override.
+        //
+        // Only a TRANSLUCENT result may short-circuit here. The node's authored
+        // `shader_name` is `IFXModel::SetDefaultShaderID` — a FALLBACK for meshes
+        // that carry no binding of their own, not an override (see IFXModel.h, and
+        // the same note in docs/areazero/README.md §1). Every model node in
+        // AreaZero's Level1 carries `shader = "DefaultShader"` while the real
+        // material is bound PER MESH, so returning DefaultMaterial's opacity 1.0
+        // here made steps 2 and 3 dead code for the whole movie: the force fields
+        // in the three spawner gates, the god rays and every light glow are driven
+        // to `shader.blend = 0` by `[M] 3D Shaders.BlendShader` (Director's additive
+        // idiom — base contributes nothing, an `#add` layer 2 does the drawing), and
+        // with opacity stuck at 1.0 the `opacity < 0.999` gate on `is_additive`
+        // never opened. All of them fell into the OPAQUE pass and the gates showed
+        // the bare skybox instead of the dark, speckled force field.
+        //
+        // Taking the MINIMUM across the bound shaders is what steps 2 and 3 already
+        // do ("any transparent mesh -> whole model is transparent"); this only stops
+        // step 1 from pre-empting them with an opaque answer.
         let effective_shader_name = runtime_state
             .and_then(|rs| Self::node_shader_override(rs, model_node.name, None).copied())
             .unwrap_or(model_node.shader_name);
         if !effective_shader_name.as_str().is_empty() {
             if let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, effective_shader_name) {
-                if let Some(mat) = Self::find_material_ci(&scene.materials, w3d_shader.material_name) {
-                    return mat.opacity;
-                }
-                if let Some(mat) = Self::find_material_ci(&scene.materials, w3d_shader.name) {
-                    return mat.opacity;
+                let mat = Self::find_material_ci(&scene.materials, w3d_shader.material_name)
+                    .or_else(|| Self::find_material_ci(&scene.materials, w3d_shader.name));
+                if let Some(mat) = mat {
+                    if mat.opacity < 0.999 {
+                        return mat.opacity;
+                    }
                 }
             }
         }
@@ -3818,18 +4426,56 @@ uniform mat4 u_model;
 uniform mat4 u_view;
 uniform mat4 u_projection;
 uniform float u_outline_width;
+uniform float u_outline_pixels;
+uniform vec2 u_viewport;
+
+out float v_facing;
 
 void main() {
-    // Expand vertex along normal for outline thickness
+    // Model-space expansion — what the #inker SHADER TYPE's `outline_width` means.
     vec3 expanded = a_position + a_normal * u_outline_width;
-    gl_Position = u_projection * u_view * u_model * vec4(expanded, 1.0);
+    vec4 clip = u_projection * u_view * u_model * vec4(expanded, 1.0);
+
+    // Which side of the surface this vertex is on, geometrically. The classic inverted
+    // hull wants the model's FAR side, and selects it by winding (cull_face). That breaks
+    // the moment a mesh is two-sided: a resource authored #both carries reverse-wound
+    // copies of every face, so the NEAR surface appears as a back face too and gets drawn
+    // — and because the hull is expanded OUTWARD, its fragment at a given pixel comes from
+    // a point nearer the silhouette centre and is therefore NEARER than the model, so no
+    // depth test can reject it. SweeTarts' bubble (#sphere, #both) filled solid white.
+    // dot(N, eye→fragment) > 0 means the surface faces away from the camera, which is the
+    // far side whatever the winding says.
+    vec3 nv = normalize(mat3(u_view * u_model) * a_normal);
+    vec3 pv = (u_view * u_model * vec4(expanded, 1.0)).xyz;
+    v_facing = dot(nv, normalize(pv));
+
+    // Screen-space expansion — what the #inker MODIFIER needs. Director's inker draws a
+    // thin line of CONSTANT width; a model-space offset would instead scale with the
+    // model and shrink with distance. Push the clip-space position along the projected
+    // normal by a fixed number of pixels: multiplying by clip.w undoes the perspective
+    // divide, so the offset survives it as an exact pixel count.
+    if (u_outline_pixels > 0.0) {
+        vec2 n_clip = (u_projection * vec4(nv, 0.0)).xy;
+        if (dot(n_clip, n_clip) > 1e-12) {
+            clip.xy += normalize(n_clip) * (u_outline_pixels * 2.0 / u_viewport) * clip.w;
+        }
+    }
+    gl_Position = clip;
 }
 "#;
         let fs = r#"#version 300 es
 precision mediump float;
 uniform vec4 u_outline_color;
+in float v_facing;
+uniform float u_far_only;
 out vec4 frag_color;
 void main() {
+    // Keep only the far side (see the note in the vertex shader) — but ONLY for the hull
+    // itself. The DEPTH PREPASS runs through this same program and must record the
+    // NEAREST surface; discarding the near side there left it holding the far side's
+    // depth, so the hull was no longer clipped by the model and the sphere's far pole
+    // showed as a white triangle at the centre of the bubble.
+    if (u_far_only > 0.5 && v_facing <= 0.0) { discard; }
     frag_color = u_outline_color;
 }
 "#;
@@ -3844,14 +4490,32 @@ void main() {
             u_view: u("u_view"),
             u_projection: u("u_projection"),
             u_outline_width: u("u_outline_width"),
+            u_outline_pixels: u("u_outline_pixels"),
+            u_far_only: u("u_far_only"),
+            u_viewport: u("u_viewport"),
             u_outline_color: u("u_outline_color"),
             program,
         });
         Ok(())
     }
 
-    /// Render outlines for models using ShaderInker.
-    /// Called after the main geometry pass, draws back-faces expanded along normals.
+    /// Director's #inker draws a thin line of CONSTANT width - see the reference capture
+    /// of SweeTarts' level-3 bubble: a ~1px white circle around a ~130px sphere. The
+    /// modifier exposes no width property at all, so this is a fixed pixel count.
+    const INKER_LINE_PIXELS: f32 = 1.5;
+
+    /// Render outlines for models carrying the #inker modifier, or wearing a shader whose
+    /// TYPE is #inker.
+    ///
+    /// Classic inverted hull: draw the model's FAR faces expanded outward and let the
+    /// model's own near surface occlude them, so only the rim survives.
+    ///
+    /// Two ways in: a shader whose TYPE is #inker, or a model carrying the #inker
+    /// MODIFIER (`model.addModifier(#inker)`), which keeps its ordinary shader and holds
+    /// its own lineColor/silhouettes/lineOffset. Only the first was ever handled - and it
+    /// never fired either, since no corpus movie uses that shader type, which is how the
+    /// culling bug below survived unnoticed. SweeTarts 3D's level-3 bubble is a plain
+    /// #sphere whose white rim comes entirely from the modifier.
     fn render_inker_outlines(
         &mut self,
         context: &WebGL2Context,
@@ -3859,21 +4523,47 @@ void main() {
         member_key: &(i32, i32),
         view_matrix: &[f32; 16],
         projection_matrix: &[f32; 16],
+        viewport: (u32, u32),
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
     ) -> Result<(), JsValue> {
         use crate::director::chunks::w3d::types::W3dShaderType;
 
-        // Check if any model uses ShaderInker
-        let has_inker = scene.nodes.iter().any(|n| {
-            if n.node_type != W3dNodeType::Model { return false; }
+        // (node, model-space width, screen-space width in px, colour, depth bias)
+        let mut inked: Vec<(&W3dNode, f32, f32, [f32; 4], Option<f32>)> = Vec::new();
+        for model_node in scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Model) {
+            let ink = runtime_state.and_then(|rs| rs.inker_state.get(&model_node.name));
             let shader_name = runtime_state
-                .and_then(|rs| Self::node_shader_override(rs, n.name, None).copied())
-                .unwrap_or(n.shader_name);
-            Self::find_shader_ci(&scene.shaders, shader_name)
-                .map(|s| s.shader_type == W3dShaderType::Inker)
-                .unwrap_or(false)
-        });
-        if !has_inker { return Ok(()); }
+                .and_then(|rs| Self::node_shader_override(rs, model_node.name, None).copied())
+                .unwrap_or(model_node.shader_name);
+            let inker_shader = match Self::find_shader_ci(&scene.shaders, shader_name) {
+                Some(s) if s.shader_type == W3dShaderType::Inker => Some(s),
+                _ => None,
+            };
+            // `silhouettes` outlines the model's border and `boundary` the edge of an open
+            // surface; both are what this hull approximates. `creases` needs per-edge
+            // dihedral-angle detection and has no implementation - a model with ONLY
+            // creases on draws nothing rather than a wrong silhouette.
+            let modifier_draws = ink.map(|i| i.silhouettes || i.boundary).unwrap_or(false);
+            match (ink, inker_shader) {
+                (Some(i), _) if modifier_draws => {
+                    let color = [i.line_color.0 as f32 / 255.0, i.line_color.1 as f32 / 255.0,
+                                 i.line_color.2 as f32 / 255.0, 1.0];
+                    // `lineOffset` is documented as "where lines are drawn relative to the
+                    // surface being shaded and the camera" - a depth bias, NOT a width, and
+                    // one that applies only while `useLineOffset` is TRUE. Reading it as a
+                    // hull thickness scaled the line by an arbitrary movie value (this
+                    // movie's -10 on a radius-25 sphere came out a 0.4% hairline).
+                    let bias = if i.use_line_offset { Some(i.line_offset) } else { None };
+                    inked.push((model_node, 0.0, Self::INKER_LINE_PIXELS, color, bias));
+                }
+                (_, Some(s)) => {
+                    let w = if s.outline_width > 0.0 { s.outline_width } else { 0.02 };
+                    inked.push((model_node, w, 0.0, s.outline_color, None));
+                }
+                _ => {}
+            }
+        }
+        if inked.is_empty() { return Ok(()); }
 
         self.ensure_outline_shader(context)?;
         let gl = context.gl();
@@ -3882,50 +4572,116 @@ void main() {
         gl.use_program(Some(&outline.program));
         gl.uniform_matrix4fv_with_f32_array(outline.u_view.as_ref(), false, view_matrix);
         gl.uniform_matrix4fv_with_f32_array(outline.u_projection.as_ref(), false, projection_matrix);
+        gl.uniform2f(outline.u_viewport.as_ref(), viewport.0.max(1) as f32, viewport.1.max(1) as f32);
 
-        // Render back-faces only (front-face culling gives outline effect)
+        gl.disable(WebGl2RenderingContext::BLEND);
+        gl.enable(WebGl2RenderingContext::DEPTH_TEST);
+        gl.depth_func(WebGl2RenderingContext::LEQUAL);
         gl.enable(WebGl2RenderingContext::CULL_FACE);
-        gl.cull_face(WebGl2RenderingContext::BACK); // Cull back = draw front → flip for outline
-        // Actually for outline: cull FRONT faces, draw BACK faces expanded outward
-        gl.cull_face(WebGl2RenderingContext::FRONT);
 
-        for model_node in scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Model) {
-            let shader_name = runtime_state
-                .and_then(|rs| Self::node_shader_override(rs, model_node.name, None).copied())
-                .unwrap_or(model_node.shader_name);
-            let w3d_shader = match Self::find_shader_ci(&scene.shaders, shader_name) {
-                Some(s) if s.shader_type == W3dShaderType::Inker => s,
-                _ => continue,
-            };
-
-            let width = if w3d_shader.outline_width > 0.0 { w3d_shader.outline_width } else { 0.02 };
-            let color = w3d_shader.outline_color;
-            gl.uniform1f(outline.u_outline_width.as_ref(), width);
-            gl.uniform4f(outline.u_outline_color.as_ref(), color[0], color[1], color[2], color[3]);
-
+        for (model_node, model_w, px, color, bias) in inked {
             let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state);
             gl.uniform_matrix4fv_with_f32_array(outline.u_model.as_ref(), false, &world_matrix);
+            gl.uniform4f(outline.u_outline_color.as_ref(), color[0], color[1], color[2], color[3]);
 
             let resource = if !model_node.model_resource_name.is_empty() {
                 &model_node.model_resource_name
             } else {
                 &model_node.resource_name
             };
+            let has_group = self.member_data.get(member_key)
+                .map(|d| d.mesh_groups.contains_key(resource)).unwrap_or(false);
+            if !has_group { continue }
 
-            if let Some(gpu_data) = self.member_data.get(member_key) {
-                if let Some(mesh_group) = gpu_data.mesh_groups.get(resource) {
-                    for mesh_buf in mesh_group {
-                        mesh_buf.bind(gl);
-                        mesh_buf.draw(gl);
-                        mesh_buf.unbind(gl);
-                    }
-                }
+
+            // PASS A - depth only. The hull is clipped by the model itself, and a
+            // TRANSLUCENT model never wrote any depth: the transparent pass draws with
+            // `depth_mask(false)`, so the far hull passed the depth test everywhere and
+            // painted the bubble as a solid white disc. Lay the model's near surface into
+            // the depth buffer first, writing no colour. This whole pass runs after the
+            // particles for exactly this reason - the extra depth must not occlude
+            // anything still to be drawn.
+            gl.color_mask(false, false, false, false);
+            gl.depth_mask(true);
+            // Culling OFF, not cull_face(FRONT): a resource authored #both (SweeTarts'
+            // bubble) carries reverse-wound inner faces, so front-culling no longer
+            // isolates the near surface and the prepass laid down the FAR depth - the
+            // hull stopped being clipped and the bubble went back to a solid white disc.
+            // Depth-only with the depth test does the right thing for one- and two-sided
+            // meshes alike: whatever the winding, the buffer keeps the nearest fragment.
+            gl.disable(WebGl2RenderingContext::CULL_FACE);
+            gl.uniform1f(outline.u_outline_width.as_ref(), 0.0);
+            gl.uniform1f(outline.u_outline_pixels.as_ref(), 0.0);
+            gl.uniform1f(outline.u_far_only.as_ref(), 0.0);
+            self.draw_mesh_group(gl, member_key, resource);
+
+            // PASS B - the expanded hull's FAR faces.
+            //
+            // This pass used to `cull_face(FRONT)` "to draw back faces expanded". But this
+            // renderer's projection is Y-flipped, so cull_face(FRONT)/front_face(CCW) is
+            // already its global default for ORDINARY geometry (see the camera setup, and
+            // `visibility = #back` - draw only far faces - implemented as cull_face(BACK)).
+            // The pass was therefore drawing the model's NEAR faces expanded outward: in
+            // front of the model at every pixel, a solid disc no matter what the depth
+            // buffer held, which is why a depth prepass and an explicit DEPTH_TEST both
+            // changed nothing on their own. The far side is BACK here.
+            gl.color_mask(true, true, true, true);
+            gl.depth_mask(false);
+            // No culling: the shader's N.V discard selects the far side, which is correct
+            // whether or not the mesh carries reverse-wound duplicates.
+            gl.disable(WebGl2RenderingContext::CULL_FACE);
+            // LESS, not LEQUAL. The hull is expanded in SCREEN space, which does not
+            // change its depth, so a face coincident with the one the prepass recorded
+            // must be REJECTED - otherwise a two-sided mesh's reverse-wound near faces
+            // (which cull_face(BACK) also selects) pass at exactly the prepass depth and
+            // fill the silhouette solid. Only geometry genuinely in front of what the
+            // depth buffer holds - i.e. the rim, outside the model - should draw.
+            gl.depth_func(WebGl2RenderingContext::LESS);
+            gl.uniform1f(outline.u_outline_width.as_ref(), model_w);
+            gl.uniform1f(outline.u_outline_pixels.as_ref(), px);
+            gl.uniform1f(outline.u_far_only.as_ref(), 1.0);
+            if let Some(units) = bias {
+                gl.enable(WebGl2RenderingContext::POLYGON_OFFSET_FILL);
+                gl.polygon_offset(0.0, units);
+            }
+            self.draw_mesh_group(gl, member_key, resource);
+            if bias.is_some() {
+                gl.disable(WebGl2RenderingContext::POLYGON_OFFSET_FILL);
+                gl.polygon_offset(0.0, 0.0);
             }
         }
 
-        // Restore culling for main shader
-        gl.cull_face(WebGl2RenderingContext::FRONT); // Back to Y-flipped culling
+        gl.depth_mask(true);
+        gl.depth_func(WebGl2RenderingContext::LEQUAL); // the renderer's default
+        gl.cull_face(WebGl2RenderingContext::FRONT); // back to the Y-flipped default
         Ok(())
+    }
+
+    /// Draw every mesh of a model resource with whatever program/state is already bound.
+    fn draw_mesh_group(&self, gl: &WebGl2RenderingContext, member_key: &(i32, i32), resource: &Symbol) {
+        if let Some(mesh_group) = self.member_data.get(member_key)
+            .and_then(|d| d.mesh_groups.get(resource))
+        {
+            for mesh_buf in mesh_group {
+                mesh_buf.bind(gl);
+                mesh_buf.draw(gl);
+                mesh_buf.unbind(gl);
+            }
+        }
+    }
+
+    /// Director's red/white checkerboard is the placeholder for a shader that has NO
+    /// texture on it AT ALL — it is what a freshly created primitive shows until something
+    /// is put on it. A shader carrying ANY texture layer is textured, even when that layer
+    /// is not the diffuse one.
+    ///
+    /// SweeTarts 3D's level-3 mascot is the case that exposed this: a `#sphere` shader with
+    /// `texture = VOID` and a "transcrome" REFLECTION MAP on layer 3. The reflection map is
+    /// applied by a separate pass, so the diffuse scan found nothing, the primitive fallback
+    /// fired, and the bubble rendered as an opaque red/white checker sphere instead of a
+    /// translucent bubble.
+    fn shader_has_any_texture(shader: &W3dShader) -> bool {
+        shader.texture_layers.iter().any(|l| !l.name.is_empty())
     }
 
     /// Case-insensitive shader lookup (W3D files have inconsistent casing).
@@ -3975,6 +4731,7 @@ void main() {
             diffuse_tex_mode: 0,
             extra_layers: Vec::new(),
             specular: None,
+            diffuse_name: String::new(),
         };
 
         let mut diffuse_name = String::new();
@@ -4059,20 +4816,31 @@ void main() {
                 // IFX blend func (IFXEnums.h): 0 = IFX_SELECT_ARG0, 1 = IFX_ADD,
                 // 2 = IFX_MODULATE (out = tex * incoming), 3 = IFX_INTERPOLATE.
                 // Mapped to our extra-layer modes below (1 = multiply, 2 = add).
-                let blend = if lower.contains("lightmap") && !lower.contains("shadow") {
-                    // Lightmap-only meshes (empty textureList[1], lightmap in textureList[2])
-                    // should shade as material color multiplied by light intensity.
-                    let lightmap_only = layer_idx > 0
-                        && layers[..layer_idx].iter().all(|prev| prev.name.is_empty());
-                    if lightmap_only { 1 } else { 2 }
+                // Lightmap-only meshes (empty textureList[1], lightmap in
+                // textureList[2]) shade as material colour multiplied by light
+                // intensity, and have no diffuse layer to read a blend function
+                // against, so they are pinned to multiply.
+                let lightmap_only = lower.contains("lightmap") && !lower.contains("shadow")
+                    && layer_idx > 0
+                    && layers[..layer_idx].iter().all(|prev| prev.name.is_empty());
+                let blend = if lightmap_only {
+                    1
                 } else {
+                    // Otherwise honour the AUTHORED blend function. A name-based
+                    // "lightmaps composite additively" override used to sit here and
+                    // is backwards for the ordinary diffuse+lightmap pair: baked
+                    // light MULTIPLIES the diffuse (IFX blend func 2 = IFX_MODULATE,
+                    // and AreaZero's four Hangar* shaders all report #multiply on
+                    // every layer). Adding it blew out lit surfaces and, worse, left
+                    // UNLIT geometry at full diffuse brightness — the pale metalwork
+                    // in the spawner-gate shafts where the reference frame has a
+                    // dark, blue-speckled void.
                     match layer.blend_func {
-                        1 => 2,  // #add / GL_ADD → our add mode
-                        2 => 1,  // #replace / GL_MODULATE → our multiply mode
-                        _ => 1,  // #multiply → multiply
+                        1 => 2,  // IFX_ADD → our add mode
+                        2 => 1,  // IFX_MODULATE → our multiply mode
+                        _ => 1,  // default multiply
                     }
                 };
-
                 result.extra_layers.push(TextureLayerBinding {
                     tex,
                     blend,
@@ -4086,6 +4854,7 @@ void main() {
         // Director uses that layout for lightmap-only meshes, which should render via
         // the non-textured material path plus the extra lightmap layer.
 
+        result.diffuse_name = diffuse_name;
         result
     }
 
@@ -4239,8 +5008,20 @@ void main() {
         let refl = Self::find_shader_ci(&scene.shaders, shader_name)
             .and_then(|sh| sh.texture_layers.iter()
                 .find(|l| l.tex_mode == 4 && !l.name.is_empty())
-                .map(|l| (l.name.clone(), l.blend_const)));
-        let (tex_name, blend_const) = match refl { Some(x) => x, None => return };
+                .map(|l| (l.name.clone(), l.blend_const, l.blend_func)));
+        let (tex_name, blend_const, blend_func) = match refl { Some(x) => x, None => return };
+        // The layer's blendFunctionList entry decides how the reflection composites
+        // (Director 11.5 Scripting Dictionary, `blendFunctionList`). Treating every
+        // reflection as #blend put Agent Free Ride's coins — an #add gold env map
+        // over a lettered ring — at a 50/50 mix with the env map, which read as a
+        // featureless white blob instead of a coin.
+        // File encoding: 0 = #replace, 1 = #add, 2 = #multiply, 3 = #blend.
+        let blend_mode = match blend_func {
+            0 => 8, // #replace
+            1 => 6, // #add
+            2 => 7, // #multiply
+            _ => 5, // #blend — ratio from blendConstant
+        };
         let gpu_data = match self.member_data.get(member_key) { Some(d) => d, None => return };
         let tex = match gpu_data.textures.get(&Symbol::from_str(&tex_name.to_lowercase())) {
             Some(t) => t,
@@ -4250,7 +5031,7 @@ void main() {
         gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(tex));
         gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_S, WebGl2RenderingContext::CLAMP_TO_EDGE as i32);
         gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_T, WebGl2RenderingContext::CLAMP_TO_EDGE as i32);
-        gl.uniform1i(shader.u_layer2_blend.as_ref(), 5);
+        gl.uniform1i(shader.u_layer2_blend.as_ref(), blend_mode);
         gl.uniform1f(shader.u_layer2_intensity.as_ref(), blend_const.clamp(0.0, 1.0));
     }
 
@@ -4443,7 +5224,9 @@ void main() {
         let mut seen = false;
         for n in names.iter().filter(|n| !n.is_empty()) {
             if let Some(sh) = Self::find_shader_ci(&scene.shaders, *n) {
-                let bf = Self::effective_blend_func(sh);
+                // Classifier path: opacity is applied by the caller's own
+                // `is_additive` gate, so leave the promotion unconditional here.
+                let bf = Self::effective_blend_func(sh, 0.0);
                 if bf == 1 {
                     return 1;
                 }
@@ -4474,11 +5257,59 @@ void main() {
     /// AreaZero's muzzle flash, bullet streaks, sparks and smoke never appeared
     /// (defect 3.2). If ANY layer is `#add` (IFX blend func 1) the surface is
     /// additive.
-    fn effective_blend_func(shader: &crate::director::chunks::w3d::types::W3dShader) -> u8 {
-        if shader.texture_layers.iter().any(|l| l.blend_func == 1) {
+    /// The blend function the SURFACE composites with. `opacity` is the material
+    /// opacity for this draw; pass 0.0 where it isn't known and the additive
+    /// promotion should stay unconditional.
+    fn effective_blend_func(
+        shader: &crate::director::chunks::w3d::types::W3dShader,
+        opacity: f32,
+    ) -> u8 {
+        // An `#add` layer only makes the whole SURFACE additive in Director's
+        // additive-FX idiom, where the layers UNDERNEATH contribute nothing: the
+        // base layer is `#blend` at constant 0 (AreaZero's MenuCharacter FX) or
+        // the material is driven to zero opacity. When the base layer is a real
+        // diffuse — `#replace` or `#multiply` over an actual texture — the `#add`
+        // layer is a light-ADD MAP that combines with the layers below it INSIDE
+        // the material, exactly as `apply_fog`'s siblings do per fragment.
+        //
+        // Burnin' Rubber's garage is the case that separates the two: its
+        // `AssignTexture` builds `[1] #replace` (the concrete diffuse),
+        // `[2] #add` (GarageLightmapAdd) and `[3] #multiply` (the lightmap) at
+        // full opacity. Promoting that to a framebuffer-additive surface drew the
+        // whole showroom — and every car — as a washed-out white haze over the
+        // camera clear.
+        if shader.texture_layers.iter().any(Self::layer_forces_additive)
+            && (opacity < 0.999 || !Self::base_layer_contributes(shader))
+        {
             return 1;
         }
         shader.texture_layers.first().map(|l| l.blend_func).unwrap_or(0)
+    }
+
+    /// Whether the shader's FIRST texture layer puts any colour on the surface.
+    /// `#blend` (3) at a blend constant of 0 is Director's "base contributes
+    /// nothing" spelling — the additive idiom's marker.
+    fn base_layer_contributes(shader: &crate::director::chunks::w3d::types::W3dShader) -> bool {
+        match shader.texture_layers.first() {
+            None => false,
+            Some(l) => !(l.blend_func == 3 && l.blend_const.abs() <= 0.001),
+        }
+    }
+
+    /// Whether a texture layer makes the whole SURFACE composite additively
+    /// against the frame buffer.
+    ///
+    /// An `#add` layer normally does — that is Director's additive-FX idiom, where
+    /// `shader.blend` is left at 0 and the `#add` sits on a later layer. But a
+    /// `#reflection` layer (tex_mode 4) is different: its blend function says how
+    /// the ENVIRONMENT MAP combines with the surface underneath it, not how the
+    /// surface combines with what is already on screen. Agent Free Ride's coins are
+    /// exactly that shape — an opaque lettered ring plus an `#add` gold env map —
+    /// and treating the model as additive drew each coin as a saturated white blob
+    /// over the bright sky instead of a coin. The reflection's own contribution is
+    /// applied per-fragment in `apply_reflection_map`.
+    fn layer_forces_additive(l: &crate::director::chunks::w3d::types::W3dTextureLayer) -> bool {
+        l.blend_func == 1 && l.tex_mode != 4
     }
 
     /// True when a model composites additively — its shader carries an `#add`
@@ -4511,7 +5342,7 @@ void main() {
         }
         names.iter().any(|n| {
             Self::find_shader_ci(&scene.shaders, *n)
-                .map(|s| s.texture_layers.iter().any(|l| l.blend_func == 1))
+                .map(|s| s.texture_layers.iter().any(Self::layer_forces_additive))
                 .unwrap_or(false)
         })
     }
@@ -4528,7 +5359,7 @@ void main() {
         member_key: &(i32, i32),
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
         force_blend: bool,
-    ) -> bool {
+    ) -> Option<MeshMatInfo> {
         // Check per-mesh shader override first (from Lingo shaderList[I] = shaderRef)
         if let Some(override_name) = runtime_state
             .and_then(|rs| Self::node_shader_override(rs, model_node.name, Some(mesh_idx)))
@@ -4550,13 +5381,15 @@ void main() {
                 }
                 let mut tex_bound = false;
                 let mut has_lightmap_layer = false;
+                let mut diffuse_name = String::new();
                 if let Some(gpu_data) = self.member_data.get(member_key) {
                     let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data, w3d_shader.shader_type);
                     has_lightmap_layer = !layers.extra_layers.is_empty();
+                    diffuse_name = layers.diffuse_name.clone();
                     tex_bound = Self::bind_texture_layers(gl, shader, &layers);
                 }
                 let is_prim = res_info.and_then(|r| r.primitive_type.as_ref()).is_some();
-                if !tex_bound && is_prim {
+                if !tex_bound && is_prim && !Self::shader_has_any_texture(w3d_shader) {
                     // Fall back to Director's default checkerboard for primitives only
                     if let Some(tex) = &self.default_checker_texture {
                         gl.active_texture(WebGl2RenderingContext::TEXTURE0);
@@ -4567,6 +5400,15 @@ void main() {
                     } else {
                         gl.uniform1i(shader.u_has_texture.as_ref(), 0);
                     }
+                } else if !tex_bound {
+                    // An untextured, non-primitive mesh on the OVERRIDE path left
+                    // `u_has_texture` at whatever the previous draw set, so it
+                    // sampled a stale texture belonging to another model. The
+                    // non-override path below already writes the 0 explicitly;
+                    // this branch simply did not exist. A uniform set only on some
+                    // paths is the same stale-uniform trap `u_flat_shading` and
+                    // `u_projection` hit before in this renderer.
+                    gl.uniform1i(shader.u_has_texture.as_ref(), 0);
                 }
                 // IFX default: white diffuse for textured models unless useDiffuseWithTexture
                 if tex_bound && !w3d_shader.use_diffuse_with_texture {
@@ -4574,16 +5416,16 @@ void main() {
                 }
                 // effective_blend_func, not layer 0: Director's additive idiom puts
                 // the #add on a LATER layer (layer 0 is #blend at constant 0).
-                let first_bf = Self::effective_blend_func(w3d_shader);
                 let opacity = mat.map(|m| m.opacity).unwrap_or(1.0);
+                let first_bf = Self::effective_blend_func(w3d_shader, opacity);
                 Self::apply_blend_mode(gl, shader, opacity, first_bf, force_blend);
-                return true;
+                return Some(MeshMatInfo { opacity, blend_func: first_bf, diffuse_name });
             }
         }
 
         let res_info = match res_info {
             Some(r) => r,
-            None => return false,
+            None => return None,
         };
 
         // Per-mesh shader candidates, SPECIFIC ONES FIRST.
@@ -4698,13 +5540,15 @@ void main() {
                 // See effective_blend_func: an #add layer anywhere makes the
                 // surface additive, and it is never layer 0 in Director's idiom.
                 best_blend_func = w3d_shader
-                    .map(|s| Self::effective_blend_func(s))
+                    .map(|s| Self::effective_blend_func(s, mat.map(|m| m.opacity).unwrap_or(1.0)))
                     .unwrap_or(0);
             }
 
             let mut tex_bound = false;
+            let mut diffuse_name = String::new();
             if let (Some(gpu_data), Some(w3d_shader)) = (self.member_data.get(member_key), w3d_shader) {
                 let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data, w3d_shader.shader_type);
+                diffuse_name = layers.diffuse_name.clone();
                 tex_bound = Self::bind_texture_layers(gl, shader, &layers);
             }
 
@@ -4712,6 +5556,13 @@ void main() {
                 if let Some(m) = mat {
                     self.set_material_uniforms(gl, shader, m);
                 }
+                // `shader.flat`. Written on EVERY mesh draw, never only when
+                // true: this program is shared, and a uniform left set by the
+                // previous draw is exactly how a stale-uniform bug starts.
+                gl.uniform1i(
+                    shader.u_flat_shading.as_ref(),
+                    if w3d_shader.map(|s| s.flat).unwrap_or(false) { 1 } else { 0 },
+                );
                 // IFX default: white diffuse for textured models unless useDiffuseWithTexture
                 let use_diffuse = w3d_shader.map(|s| s.use_diffuse_with_texture).unwrap_or(false);
                 if !use_diffuse {
@@ -4723,12 +5574,12 @@ void main() {
                 // `#blend` at constant 0 with the `#add` on layer 1. Reading layer 0
                 // gave 3, so the additive branch never ran and the muzzle flash,
                 // bullet streaks and sparks drew nothing.
-                let first_bf = w3d_shader
-                    .map(|s| Self::effective_blend_func(s))
-                    .unwrap_or(0);
                 let opacity = mat.map(|m| m.opacity).unwrap_or(1.0);
+                let first_bf = w3d_shader
+                    .map(|s| Self::effective_blend_func(s, opacity))
+                    .unwrap_or(0);
                 Self::apply_blend_mode(gl, shader, opacity, first_bf, force_blend);
-                return true;
+                return Some(MeshMatInfo { opacity, blend_func: first_bf, diffuse_name });
             }
         }
 
@@ -4752,7 +5603,14 @@ void main() {
 
         // No textured binding found — use best material.  Apply Director's
         // default checker only for newModelResource primitives (box/sphere/etc).
-        let is_primitive = res_info.primitive_type.is_some();
+        // Same rule as the override path: a shader that carries any texture layer — a
+        // reflection map included — is textured, and must not get the placeholder.
+        let inked_by_any_layer = candidate_names.iter().any(|n| {
+            Self::resolve_shader_candidate_ci(scene, *n)
+                .map(Self::shader_has_any_texture)
+                .unwrap_or(false)
+        });
+        let is_primitive = res_info.primitive_type.is_some() && !inked_by_any_layer;
         if let Some(mat) = best_material {
             self.set_material_uniforms(gl, shader, mat);
             if is_primitive {
@@ -4767,19 +5625,52 @@ void main() {
                 gl.uniform1i(shader.u_has_texture.as_ref(), 0);
             }
             Self::apply_blend_mode(gl, shader, mat.opacity, best_blend_func, force_blend);
-            return true;
+            return Some(MeshMatInfo {
+                opacity: mat.opacity,
+                blend_func: best_blend_func,
+                diffuse_name: String::new(),
+            });
         }
 
-        false
+        None
     }
 
     fn set_material_uniforms(&self, gl: &WebGl2RenderingContext, shader: &Shader3d, mat: &W3dMaterial) {
         gl.uniform4f(shader.u_diffuse_color.as_ref(), mat.diffuse[0], mat.diffuse[1], mat.diffuse[2], mat.diffuse[3]);
         gl.uniform4f(shader.u_ambient_color.as_ref(), mat.ambient[0], mat.ambient[1], mat.ambient[2], mat.ambient[3]);
-        gl.uniform4f(shader.u_specular_color.as_ref(), mat.specular[0], mat.specular[1], mat.specular[2], mat.specular[3]);
         gl.uniform4f(shader.u_emissive_color.as_ref(), mat.emissive[0], mat.emissive[1], mat.emissive[2], mat.emissive[3]);
-        // IFX maps material reflectivity to shader shininess (scaled by 100)
-        let shininess = if mat.shininess > 0.0 { mat.shininess } else { mat.reflectivity * 100.0 };
+        // `reflectivity` is a REFLECTANCE, not a Phong exponent.
+        //
+        // 11.5 dictionary: `reflectivity` is "the percentage of light to be
+        // reflected off the surface of a model", 0.0-100.0, default 0.0 — while
+        // `shininess` is a separate property, "the percentage of shader surface
+        // devoted to highlights", 0-100, default 30. The two are not the same
+        // quantity, and neither of them is the exponent `pow(N·H, e)` wants.
+        //
+        // Feeding reflectivity in as that exponent inverted its meaning: the LESS
+        // reflective the material, the SMALLER the exponent and so the BROADER the
+        // highlight. Burnin' Rubber 3's menu bars are the visible case —
+        // "Orange_Material" is diffuse/emissive orange with WHITE specular and
+        // reflectivity 0.03, i.e. essentially matte. That became `pow(N·H, 3.0)`,
+        // which is ~1 across the whole quad, so a full-strength white highlight was
+        // added over every pixel and the solid orange "WORLD DOMINATION" bar (and
+        // the challenge/cash panels behind it) rendered pale cream.
+        //
+        // So: a material that states a real `shininess` keeps using it as before;
+        // otherwise reflectivity scales the specular CONTRIBUTION and the exponent
+        // falls back to Director's documented default of 30.
+        let (spec_scale, shininess) = if mat.shininess > 0.0 {
+            (1.0, mat.shininess)
+        } else {
+            (mat.reflectivity.clamp(0.0, 1.0), 30.0)
+        };
+        gl.uniform4f(
+            shader.u_specular_color.as_ref(),
+            mat.specular[0] * spec_scale,
+            mat.specular[1] * spec_scale,
+            mat.specular[2] * spec_scale,
+            mat.specular[3],
+        );
         gl.uniform1f(shader.u_shininess.as_ref(), shininess);
         gl.uniform1f(shader.u_opacity.as_ref(), mat.opacity);
     }
@@ -4794,6 +5685,12 @@ void main() {
         // not by mislabelling IFX_MODULATE as "#replace". Treating blend_func==2 as
         // unlit flattened every ordinary textured model (e.g. the Dummy character,
         // whose whole face is IFX_MODULATE), so `u_texture_unlit` stays off here.
+        //
+        // Deriving "unlit" from SELECT_ARG0 (0) alone is not the answer either:
+        // Burnin' Rubber authors its cars `#replace` and then has [PS] LightManager
+        // set them back to `#multiply` at race start, precisely so they take the
+        // dynamic light it paints. A movie that wants full-bright says so with
+        // emissive / ambient.
         let _ = first_layer_blend_func;
         gl.uniform1i(shader.u_texture_unlit.as_ref(), 0);
         // Director's additive idiom sets `shader.blend = 0` so the BASE layer
@@ -4931,7 +5828,17 @@ void main() {
         {
             return false;
         }
-        let time = bp.map(|b| b.animation_time).unwrap_or(self.animation_time);
+        // Sample clock: a per-model bonesPlayer owns its own clock. Without one,
+        // the ADVANCING legacy clock is only right when the legacy member fields
+        // hold an explicitly played motion; a rig that never had play() called
+        // stands in its seeded clip's FRAME 0 (Director pre-loads the playlist
+        // but does not run it — the Agent Free Ride note on `current_motion_name`
+        // above). Advancing the seeded clip animated Intel's DoNotPush "Barry"
+        // rig from the moment its skeleton first parsed, drifting it off the
+        // authored pose.
+        let time = bp.map(|b| b.animation_time)
+            .or_else(|| runtime_state.and_then(|rs| rs.current_motion.map(|_| self.animation_time)))
+            .unwrap_or(0.0);
         let duration = motion.map(|m| m.duration()).unwrap_or(0.0);
         let end_time = bp.map(|b| b.animation_end_time)
             .or_else(|| runtime_state.map(|rs| rs.animation_end_time)).unwrap_or(-1.0);
@@ -4946,61 +5853,133 @@ void main() {
             } else {
                 time.clamp(eff_start, eff_end)
             }
-        } else { 0.0 };
+        } else {
+            // Zero-length range = "hold exactly this frame", so hold it — do NOT
+            // rewind to 0, which is frame 0 of the clip and, on a combined clip
+            // authored from a T-pose, is literally the bind pose.
+            //
+            // Games freeze a pose this way: Rifleman ends every animation with
+            // `queue(motion, 1, endTime, endTime, 0.0)` to hold the last frame,
+            // and that entry LOOPS, so the soldier snapped to a T-pose and stayed
+            // there until the next state change. Agent Free Ride 2's rider shows
+            // the same flash on landing. `eff_start` is the frame the caller asked
+            // for; when no range was ever set it is 0 anyway, so the old behaviour
+            // is preserved for everything that was not asking for a hold.
+            eff_start
+        };
+        // Root motion goes to the model NODE, not into the skin — see
+        // `skeleton::motion_has_root_translation`. When the clock this draw uses
+        // is a per-model bonesPlayer (the only case `tick_w3d_animations` pushes
+        // clearance for) and the clip travels, strip the root translation here
+        // and let the tick carry it on the node. The two are exactly
+        // compensating, so the drawn mesh does not move.
+        let strips_root = !root_lock
+            && bp.is_some()
+            && motion.map(|m| crate::director::chunks::w3d::skeleton::motion_has_root_translation(skeleton, m))
+                .unwrap_or(false);
         let world_matrices = crate::director::chunks::w3d::skeleton::build_bone_matrices_ex(
-            skeleton, motion, t, root_lock,
+            skeleton, motion, t, root_lock || strips_root,
             if bone_overrides.is_empty() { None } else { Some(&bone_overrides) },
         );
 
-        // [root-relativize] Director keeps a 3ds-Max biped's ROOT at identity IN THE SKIN
-        // (the root COM drives the model node, not the deformation). dirplayer's posed
-        // skeleton is instead pre-rotated by the root COM — verified against Director:
-        // dirplayer's bone[i] world == Rz(-122°) × Director's, the SAME factor for every
-        // bone (the root's COM). Strip it by relativizing each posed bone to the posed
-        // ROOT: skin[b] = inverse(root) × world[b] × inv_bind[b]. Algebra cancels to
-        // (b-relative-to-root) × inv_bind[b], so the inv_bind (mesh-consistent dir/quat
-        // T-pose) is untouched — no distortion (changing the bind DOES distort). This is
-        // the bot "aims right, faces ~NW" fix; rigid bodies/non-skinned models are
-        // unaffected (only skinned models reach here).
-        let affine_inv = |m: &[f32; 16]| -> [f32; 16] {
-            let (r00, r01, r02) = (m[0], m[4], m[8]);
-            let (r10, r11, r12) = (m[1], m[5], m[9]);
-            let (r20, r21, r22) = (m[2], m[6], m[10]);
-            let (tx, ty, tz) = (m[12], m[13], m[14]);
-            let itx = -(r00 * tx + r10 * ty + r20 * tz);
-            let ity = -(r01 * tx + r11 * ty + r21 * tz);
-            let itz = -(r02 * tx + r12 * ty + r22 * tz);
-            [r00, r01, r02, 0.0, r10, r11, r12, 0.0, r20, r21, r22, 0.0, itx, ity, itz, 1.0]
-        };
-        // Relativize by a FIXED idle-pose root, NOT the per-frame posed root. The idle
-        // root strips the biped COM convention while KEEPING each frame's run deviation
-        // (the per-frame posed root removed the run's small turn too → bots looked
-        // "slightly off while moving"). The bot mesh is authored at "Idle_Rest", so use
-        // that motion's frame-0 root as the fixed reference; models with no idle motion
-        // (dino/frog) get no relativization at all.
+        // [root-relativize] `skin[b] = root_relinv × world[b] × inv_bind[b]`.
         //
-        // The idle MUST be one that drives THIS rig — `scene.motions` is a member-wide
-        // table and a game can clone several skeletons plus all their clips into one
-        // member. Keep this to an authored idle: it is a FALLBACK for models whose fold
-        // was not recorded, and widening it relativizes draws that never were.
-        let idle_root_mats = crate::director::chunks::w3d::skeleton::idle_reference_motion(scene, skeleton)
-            .map(|im| crate::director::chunks::w3d::skeleton::build_bone_matrices(skeleton, Some(im), 0.0));
-        // Only models with an idle-rest motion (the biped actors/bots) are relativized;
-        // everything else (dino, frog01, ClubMarian, …) keeps the original skin — no
-        // relativization — so this can't regress them.
-        // The parser folds the biped COM into the model NODE at import, the way
-        // Director does (see `apply_root_com_to_model_nodes`), and records the exact
-        // matrix it used. Strip that same matrix here so the drawn mesh does not
-        // move: (node * R0) * inv(R0) * world * inv_bind == node * world * inv_bind.
-        // Taking R0 from the recorded value rather than recomputing it is what keeps
-        // the two sides from drifting apart.
-        let folded_com = scene.model_root_com.get(&model_name.to_ascii_lowercase())
-            .or_else(|| scene.model_root_com.get(&resource_name.to_ascii_lowercase()));
-        let root_relinv = match (folded_com, &idle_root_mats) {
-            (Some(r0), _) => affine_inv(r0),
-            (None, Some(m)) if !m.is_empty() => affine_inv(&m[0]),
-            _ => IDENTITY_4X4,
-        };
+        // IFX skins with `posed[b] × inv(rest[b])` and hands the root bone's posed
+        // TRS to the MODEL NODE as a "root clearance" (U3D `IFXBonesManagerImpl::
+        // UpdateMesh`); Director composes that clearance onto the node. dirplayer's
+        // node does not absorb it (except the parse-time fold), so the draw is
+        // relativized by whatever Director's node would still be carrying. The
+        // rule, its Director measurements and its history live on
+        // `skeleton::root_strip_matrix`; the runtime inputs come from
+        // `Shockwave3dRuntimeState::root_strip_state`. Kept here only the two
+        // pieces of history that gate the clone tier:
+        //
+        //  * Street Sesh clones its skater out of "player_mike" — a member holding
+        //    the rig and no clips — and only afterwards clones `player_idle` & co
+        //    into the world member. Relativizing by that idle's frame-0 root, which
+        //    sits at the pelvis, buried the skater to the waist; the clone tier
+        //    strips the carried r0 instead.
+        //  * A script that replaces the node's matrix outright destroys the fold
+        //    a clone carried (`broken_root_com_fold`): AreaZero's
+        //    `[M] FPS Weapon.setup_Elite` hardcodes `transform.rotation =
+        //    vector(-90, 90, 0)`, and stripping the carried r0 (root at the biped
+        //    COM, z = 104.5, against the idle clip's z = 2.8) threw the first-person
+        //    weapon out of frame. Such a clone falls through to rule 3.
+        //
+        // REFUTED (2026-08-18), do not retry: relativizing EVERY clone by its
+        // posed root. `clone_hop_count` holds every cloned skinned model, so it
+        // also fired on Agent Free Ride's riders and Rifleman's soldiers, whose
+        // nodes DO carry the clearance (folded lineage), and rotated them by
+        // inv(root). What separates the Punch blade from those is not clone-ness
+        // but that its script rewrites the node's rotation after `play()`.
+        let strip_state = runtime_state
+            .map(|rs| rs.root_strip_state(model_name))
+            .unwrap_or_default();
+        let root_relinv = crate::director::chunks::w3d::skeleton::root_strip_matrix(
+            scene, skeleton, model_name, resource_name, strip_state,
+        );
+
+        /*
+        // [TIER] probe — one line per (model, resource): the tier the OLD match
+        // would have picked vs the rule now applied, and every input.
+        {
+            use std::cell::RefCell;
+            use std::collections::HashSet;
+            use crate::director::chunks::w3d::skeleton as skel;
+            thread_local! { static SEEN: RefCell<HashSet<String>> = RefCell::new(HashSet::new()); }
+            let key = format!("{}|{}", model_name.as_str(), resource_name.as_str());
+            if SEEN.with(|c| c.borrow_mut().insert(key)) {
+                let rot = |m: &[f32; 16]| format!("[{:.2},{:.2},{:.2} | {:.1},{:.1},{:.1}]",
+                    m[0], m[1], m[2], m[12], m[13], m[14]);
+                let folded = [model_name.to_ascii_lowercase(), resource_name.to_ascii_lowercase()]
+                    .into_iter()
+                    .any(|k| scene.model_com_folded.contains(&k) && scene.model_root_com.contains_key(&k));
+                let idle = skel::idle_reference_motion(scene, skeleton);
+                let idle0 = idle.map(|im| skel::posed_root_matrix(skeleton, Some(im), 0.0));
+                let old_tier = if folded { "1_folded" }
+                    else if strip_state.clone_r0.is_some() && idle0.is_some() { "2_clone_r0" }
+                    else if idle0.is_some() { "3_idle" }
+                    else { "4_identity" };
+                let new_tier = if folded { "1_folded" }
+                    else if strip_state.clone_r0.is_some() && idle0.is_some() { "2_clone_r0" }
+                    else if strip_state.has_bones_player {
+                        if strip_state.rotation_replaced_at.is_some() { "3_bp_script_rot" } else { "3_bp_identity" }
+                    }
+                    else if idle0.is_some() { "4_idle" }
+                    else { "5_identity" };
+                let nodet = scene.nodes.iter().find(|n| n.name == model_name)
+                    .map(|n| rot(&n.transform)).unwrap_or_else(|| "-".to_string());
+                // The strip the OLD match would have produced, to flag REAL changes.
+                let inv = |m: &[f32; 16]| -> [f32; 16] {
+                    let (r00, r01, r02) = (m[0], m[4], m[8]);
+                    let (r10, r11, r12) = (m[1], m[5], m[9]);
+                    let (r20, r21, r22) = (m[2], m[6], m[10]);
+                    let (tx, ty, tz) = (m[12], m[13], m[14]);
+                    [r00, r01, r02, 0.0, r10, r11, r12, 0.0, r20, r21, r22, 0.0,
+                     -(r00 * tx + r10 * ty + r20 * tz), -(r01 * tx + r11 * ty + r21 * tz), -(r02 * tx + r12 * ty + r22 * tz), 1.0]
+                };
+                let old_strip = match old_tier {
+                    "3_idle" => idle0.map(|m| inv(&m)).unwrap_or(IDENTITY_4X4),
+                    "4_identity" => IDENTITY_4X4,
+                    _ => root_relinv,
+                };
+                let changed = old_strip.iter().zip(root_relinv.iter()).any(|(a, b)| (a - b).abs() > 1e-3);
+                crate::console_warn!(
+                    "[TIER] {} res={} old={} new={}{} bp={} broken={} clone_r0={} rot_at={} idle={} idle0={} node={} strip={}",
+                    model_name.as_str(), resource_name.as_str(), old_tier, new_tier,
+                    if changed { " CHANGED" } else { "" },
+                    strip_state.has_bones_player,
+                    runtime_state.map_or(false, |rs| rs.broken_root_com_fold.contains(&model_name)),
+                    strip_state.clone_r0.as_ref().map(|m| rot(m)).unwrap_or_else(|| "-".to_string()),
+                    strip_state.rotation_replaced_at.as_ref().map(|m| rot(m)).unwrap_or_else(|| "-".to_string()),
+                    idle.map(|m| m.name.as_str().to_string()).unwrap_or_else(|| "-".to_string()),
+                    idle0.as_ref().map(|m| rot(m)).unwrap_or_else(|| "-".to_string()),
+                    nodet,
+                    rot(&root_relinv),
+                );
+            }
+        }
+        */
 
         // Check for motion blending (crossfade) — per-model blend state.
         let blend_weight = bp.map(|b| b.blend_weight).unwrap_or(self.blend_weight);
@@ -5008,10 +5987,15 @@ void main() {
             .or_else(|| runtime_state.and_then(|rs| rs.previous_motion.map(|s| s.as_str())));
         let blending = blend_weight < 1.0 && prev_motion_name.is_some();
 
-        let bone_count = skeleton.bones.len().min(48);
-        // Initialize ALL 48 uniform slots to identity — bone indices can reference
-        // any slot 0-47, even beyond the skeleton's actual bone count.
-        let uniform_slots = 48;
+        // 96 slots: Intel's own IFX sample rigs exceed the old 48-bone cap
+        // (DoNotPush's "Barry_delib" skeleton is 82 bones) — with the cap, every
+        // vertex weighted to a bone >= the cap rode a clamped wrong matrix and
+        // the character drew as scrambled chunks. 96 mat4 = 384 vec4 uniforms,
+        // well inside desktop WebGL2 vertex-uniform budgets.
+        let bone_count = skeleton.bones.len().min(96);
+        // Initialize ALL uniform slots to identity — bone indices can reference
+        // any slot, even beyond the skeleton's actual bone count.
+        let uniform_slots = 96;
         let mut skinning_matrices = vec![0.0f32; uniform_slots * 16];
         for i in 0..uniform_slots {
             skinning_matrices[i * 16]      = 1.0; // m[0][0]
@@ -5023,7 +6007,7 @@ void main() {
         if blending {
             let prev_motion = prev_motion_name.and_then(|n| scene.motions.iter().find(|m| m.name == n));
             let prev_matrices = crate::director::chunks::w3d::skeleton::build_bone_matrices_ex(
-                skeleton, prev_motion, t, root_lock,
+                skeleton, prev_motion, t, root_lock || strips_root,
                 if bone_overrides.is_empty() { None } else { Some(&bone_overrides) },
             );
             for i in 0..bone_count {
@@ -5205,15 +6189,21 @@ void main() {
             (34.516f32.to_radians(), 1.0, 10000.0, fbo_aspect)
         };
 
-        // Check for orthographic projection mode
+        // Check for orthographic projection mode. A Lingo assignment wins;
+        // otherwise the view node carries what the .w3d was authored with
+        // (IFX view attributes bit 0), which Director reports through
+        // `camera.projection`. Fly Like A Bird's WELCOME screen orbits an
+        // ORTHOGRAPHIC camera around the bird; drawn in perspective the bird
+        // filled — and overflowed — the sprite.
         let is_ortho = runtime_state
             .and_then(|rs| rs.camera_projection_mode.get(&cam_name))
             .map(|&m| m == 1)
-            .unwrap_or(false);
+            .unwrap_or_else(|| view_node.map(|n| n.projection_ortho).unwrap_or(false));
 
         let stored_ortho_h = runtime_state
             .and_then(|rs| rs.camera_ortho_height.get(&cam_name))
-            .copied();
+            .copied()
+            .or_else(|| view_node.map(|n| n.ortho_height).filter(|h| *h > 0.0));
 
         let mut proj = if is_ortho {
             // Director's documented default orthoHeight is 200.0 world units.
@@ -5263,8 +6253,19 @@ void main() {
         // `has_movie_light` counted a fallback as a real movie light.
         let is_fallback_light = |name: &str| matches!(name,
             "defaultambient" | "defaultdirectional" | "uiambient" | "uidirectional");
+        // `uidirectional` is NOT suppressed. The parser injects it exactly where
+        // Director does — the member's parse-time default camera rotated -45 deg
+        // about world X (measured on two movies, see parser.rs) — and Director
+        // KEEPS it even once the movie adds directionals of its own: its
+        // ChickenChasin light list is UIAmbient, UIDirectional, omni01, omni02
+        // and three "default max light"s, all live. Suppressing it there dropped
+        // the only light with a meaningful +Y and left the runtime-generated
+        // terrain lit by ambient alone. `defaultdirectional` is a different
+        // thing — dirplayer's own empty-scene invention, which Director has no
+        // equivalent of — so that one is still suppressed when the movie lights
+        // itself.
         let is_fallback_directional = |name: &str| matches!(name,
-            "defaultdirectional" | "uidirectional");
+            "defaultdirectional");
         let has_movie_light = scene.lights.iter().any(|l|
             l.enabled && !is_fallback_light(l.name.as_lower_str())
             && matches!(l.light_type, W3dLightType::Directional | W3dLightType::Spot));
@@ -5440,7 +6441,73 @@ void main() {
 /// even for fine foliage — so the gap between the two populations is wide.
 const SOFT_ALPHA_FRACTION: f32 = 0.20;
 
-fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8], flip_v: bool) -> Option<(WebGlTexture, u32, u32, bool, bool)> {
+/// Second, independent translucency test, for a texture that is mostly EMPTY.
+/// `SOFT_ALPHA_FRACTION` is measured over EVERY texel, so a small effect on a
+/// large transparent field can never reach it however faint the effect is.
+/// Judge those by the texels that are visible at all: an alpha-keyed cutout
+/// keeps a solid alpha-255 interior and spends only its OUTLINE on partial
+/// alpha — a perimeter-to-area ratio that stays well under a third even for fine
+/// detail — while anything with a real ramp in it runs far above that.
+///
+/// The bar sits at a third rather than the 0.80 it started at because a mixed
+/// ATLAS lands between the two populations: alpha-keyed sprites and genuinely
+/// translucent art on one sheet, so the ramps are a minority of the visible
+/// texels and a much smaller minority of the sheet. Burnin' Rubber 3's HUD atlas
+/// `Interface_Texture` is measured at 1024x512 = 333230 clear, 76405 partial,
+/// 114653 opaque: 14.6% of the sheet and 40.0% of its visible texels, which
+/// missed both this test at 0.80 and `SOFT_ALPHA_FRACTION` at 0.20. Alpha-testing
+/// it binarised the scoreboard plates — black art with an alpha ramp — into hard
+/// black bars where the capture blends a gradient over the sky behind them.
+///
+/// Lowering this is strictly additive in the same way the test itself is: it can
+/// only move a texture from the alpha-tested pass to the blended one, which is
+/// the direction Director is always in.
+const TRANSLUCENT_OF_VISIBLE_FRACTION: f32 = 0.33;
+
+/// Floor on the partial-alpha texel COUNT for the test above, so a handful of
+/// stray anti-aliased texels in an otherwise binary mask cannot carry it.
+const TRANSLUCENT_MIN_SOFT_TEXELS: usize = 64;
+
+/// Classify a decoded RGBA buffer as `(has_alpha, soft_alpha)`.
+///
+/// * `has_alpha` — the texture carries alpha at all, so it must not be drawn as
+///   flat opaque geometry.
+/// * `soft_alpha` — the alpha is a genuine translucency RAMP rather than an
+///   alpha-keyed CUTOUT mask (foliage, decals, icon atlases, where only the
+///   anti-aliased outline sits between fully-on and fully-off). Director always
+///   alpha-blends; the alpha-tested cutout pass is our approximation and is only
+///   equivalent for a binary mask. Applied to a ramp it quantises every texel to
+///   fully-on/fully-off — AreaZero's MenuScanLines camera filter (55% mid-alpha)
+///   came out as solid black bars.
+///
+/// Two independent tests, because one measure cannot cover both shapes:
+///
+/// 1. Mid-alpha over the WHOLE texture (`SOFT_ALPHA_FRACTION`). Catches a filter
+///    or a haze that covers most of its own image.
+/// 2. Mid-alpha over just the VISIBLE texels (`TRANSLUCENT_OF_VISIBLE_FRACTION`).
+///    Catches a small, faint effect on a large empty field, which test 1 can
+///    never reach however translucent it is. Rasterwerks' pulse-gun muzzle flash
+///    (`Flarel~6`) is 77% fully transparent and only 6.7% mid-alpha overall, so
+///    it was alpha-tested — which discards the faint 95% of the flash and draws
+///    the rest as a hard, solid-white bar. Of the texels that are visible at
+///    all, 97% are partial alpha: it is translucent, not a mask.
+fn classify_texture_alpha(rgba_data: &[u8]) -> (bool, bool) {
+    let has_alpha = rgba_data.chunks(4).any(|p| p[3] < 250);
+
+    let total = rgba_data.len() / 4;
+    let soft = rgba_data.chunks(4).filter(|p| p[3] >= 16 && p[3] < 240).count();
+    let opaque = rgba_data.chunks(4).filter(|p| p[3] >= 240).count();
+    let visible = soft + opaque;
+    let mostly_translucent = soft >= TRANSLUCENT_MIN_SOFT_TEXELS
+        && visible > 0
+        && (soft as f32 / visible as f32) > TRANSLUCENT_OF_VISIBLE_FRACTION;
+    let soft_alpha = total > 0
+        && ((soft as f32 / total as f32) > SOFT_ALPHA_FRACTION || mostly_translucent);
+
+    (has_alpha, soft_alpha)
+}
+
+fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8], flip_v: bool, near_filtering: bool, quality: Option<&str>) -> Option<(WebGlTexture, u32, u32, bool, bool)> {
     if data.len() < 4 { return None; }
 
     // Detection priority: JPEG/PNG magic → DXT header → raw RGBA (our own format)
@@ -5560,8 +6627,35 @@ fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8], flip_v: 
     let texture = gl.create_texture()?;
     gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&texture));
 
-    gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MIN_FILTER, WebGl2RenderingContext::LINEAR_MIPMAP_LINEAR as i32);
-    gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MAG_FILTER, WebGl2RenderingContext::LINEAR as i32);
+    // `nearFiltering` FALSE means the movie asked for NO bilinear filtering on
+    // this texture (Director 11.5 Scripting Dictionary; default TRUE). Movies
+    // bake UI text into textures and turn it off precisely so the glyphs stay
+    // pixel-crisp — smoothing them spreads a one-pixel stem over two pixels at
+    // half intensity, which is exactly what made AreaZero's in-game controls
+    // list unreadable where it crossed bright geometry. Minification stays
+    // mipmapped either way, so distant geometry does not start aliasing.
+    //
+    // `quality` (same dictionary) chooses the MIPMAPPING level on top of that:
+    // `#low` none, `#medium` bilinear, `#high` trilinear. Its documented default
+    // is `#low`, but this engine has always mipmapped everything and a movie
+    // that never mentions `quality` keeps that — a DELIBERATE divergence, since
+    // switching every untouched texture to unmipmapped would make distant
+    // geometry alias across every movie at once. A movie that DOES set it gets
+    // what it asked for. The undocumented `#lowFiltered` family is treated as
+    // its base level.
+    let mip = match quality.map(|q| q.to_ascii_lowercase()) {
+        Some(ref q) if q.starts_with("low") => Some(false),
+        Some(ref q) if q.starts_with("medium") || q.starts_with("high") => Some(true),
+        _ => None,
+    };
+    let (min_filter, mag_filter) = match (near_filtering, mip) {
+        (true, Some(false)) => (WebGl2RenderingContext::LINEAR, WebGl2RenderingContext::LINEAR),
+        (true, _) => (WebGl2RenderingContext::LINEAR_MIPMAP_LINEAR, WebGl2RenderingContext::LINEAR),
+        (false, Some(false)) => (WebGl2RenderingContext::NEAREST, WebGl2RenderingContext::NEAREST),
+        (false, _) => (WebGl2RenderingContext::NEAREST_MIPMAP_NEAREST, WebGl2RenderingContext::NEAREST),
+    };
+    gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MIN_FILTER, min_filter as i32);
+    gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MAG_FILTER, mag_filter as i32);
     gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_S, WebGl2RenderingContext::REPEAT as i32);
     gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_T, WebGl2RenderingContext::REPEAT as i32);
 
@@ -5593,18 +6687,7 @@ fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8], flip_v: 
     }
     gl.generate_mipmap(WebGl2RenderingContext::TEXTURE_2D);
     gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
-    // Detect if texture has meaningful alpha (any pixel alpha < 250)
-    let has_alpha = rgba_data.chunks(4).any(|p| p[3] < 250);
-    // Distinguish a CUTOUT mask (alpha is essentially binary — foliage, decals,
-    // icon atlases; only anti-aliased edge texels sit in between) from a genuinely
-    // TRANSLUCENT texture (a broad spread of intermediate alpha). Director always
-    // alpha-blends; the alpha-tested cutout pass is our approximation and is only
-    // equivalent when the mask is binary. Applied to a soft texture it quantises
-    // every texel to fully-on/fully-off — AreaZero's MenuScanLines camera filter
-    // (55% of its texels are mid-alpha) came out as solid black bars.
-    let total = rgba_data.len() / 4;
-    let soft = rgba_data.chunks(4).filter(|p| p[3] >= 16 && p[3] < 240).count();
-    let soft_alpha = total > 0 && (soft as f32 / total as f32) > SOFT_ALPHA_FRACTION;
+    let (has_alpha, soft_alpha) = classify_texture_alpha(&rgba_data);
 
     Some((texture, width, height, has_alpha, soft_alpha))
 }
@@ -5709,11 +6792,12 @@ fn decode_dxt1_block(block: &[u8], rgba: &mut [u8], start_x: u32, start_y: u32, 
 
 /// Pack variable-length bone indices into fixed vec4 (as f32 for vertex attribute).
 /// Pack per-vertex bone influences into fixed vec4 index + weight arrays. IFX keeps up
-/// to 6 influences SORTED BY MAGNITUDE; the GPU path caps at 4. The W3D decoder stores
-/// influences UNSORTED (bone[0] is the residual `1-Σothers`), so a naive take(4) can
-/// drop the HEAVIEST bones and pull a >4-influence vertex (spine/shoulder/hip) toward
-/// the wrong joints. So sort each vertex's (index, weight) pairs by weight descending,
-/// keep the 4 largest, then renormalize the survivors to sum 1.
+/// to 6 influences per vertex; the GPU path caps at 4. The stream writes them sorted by
+/// descending weight with bone[0] carrying the residual `1-Σothers`, but nothing in the
+/// format guarantees that, so a naive take(4) could drop the HEAVIEST bones and pull a
+/// >4-influence vertex (spine/shoulder/hip) toward the wrong joints. Sort each vertex's
+/// (index, weight) pairs by weight descending, keep the 4 largest, then renormalize the
+/// survivors to sum 1.
 fn pack_bone_influences_sorted(indices: &[Vec<u32>], weights: &[Vec<f32>]) -> (Vec<[f32; 4]>, Vec<[f32; 4]>) {
     let mut idx_out = Vec::with_capacity(indices.len());
     let mut wgt_out = Vec::with_capacity(indices.len());
@@ -5727,7 +6811,7 @@ fn pack_bone_influences_sorted(indices: &[Vec<u32>], weights: &[Vec<f32>]) -> (V
         let mut idx4 = [0.0f32; 4];
         let mut wgt4 = [0.0f32; 4];
         for (k, &(b, w)) in pairs.iter().enumerate() {
-            idx4[k] = (b as f32).min(47.0); // clamp to bone uniform array size
+            idx4[k] = (b as f32).min(95.0); // clamp to bone uniform array size
             wgt4[k] = w;
         }
         let sum: f32 = wgt4.iter().sum();
@@ -5754,15 +6838,20 @@ fn keyframe_to_column_major_matrix(kf: &crate::director::chunks::w3d::types::W3d
 
 /// Case-insensitive lookup in node_transforms (Director is case-insensitive for node names).
 fn get_runtime_transform(rs: &crate::player::cast_member::Shockwave3dRuntimeState, name: Symbol) -> Option<[f32; 16]> {
-    if let Some(m) = rs.node_transforms.get(&name) {
-        return Some(*m);
-    }
-    for (key, val) in &rs.node_transforms {
-        if *key == name {
-            return Some(*val);
-        }
-    }
-    None
+    // No linear fallback. `Symbol` derives Hash/Eq over one interned `Spur`, so
+    // the hash lookup and `==` are the SAME comparison — a follow-up scan could
+    // never find anything `get` missed. (Symbol identity is already
+    // case-insensitive: `intern` lowercases.) The scan only ever ran to
+    // completion on a MISS, which is the common case since most nodes carry no
+    // runtime override, making every miss O(node_transforms).
+    //
+    // That is quadratic in the wrong place: this is called per node per parent-
+    // chain hop per frame, while `node_transforms` grows with everything the
+    // movie spawns. In an AreaZero profile at higher waves it was the single
+    // hottest pair in the whole frame — `get_runtime_transform` 14.7% self and
+    // `hashbrown::map::Iter::next` 13.3% self. `raycast.rs` had the same bug and
+    // the same fix; this copy was missed.
+    rs.node_transforms.get(&name).copied()
 }
 
 fn perspective(fov_y: f32, aspect: f32, near: f32, far: f32) -> [f32; 16] {
@@ -6038,3 +7127,114 @@ fn mat4_multiply_col_major(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     r
 }
 
+#[cfg(test)]
+mod alpha_classification_tests {
+    use super::classify_texture_alpha;
+
+    /// Build a 128x128 RGBA buffer from a per-texel alpha function.
+    fn tex(alpha_at: impl Fn(usize, usize) -> u8) -> Vec<u8> {
+        let mut out = Vec::with_capacity(128 * 128 * 4);
+        for y in 0..128 {
+            for x in 0..128 {
+                out.extend_from_slice(&[255, 255, 255, alpha_at(x, y)]);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn opaque_texture_has_no_alpha() {
+        let (has_alpha, soft) = classify_texture_alpha(&tex(|_, _| 255));
+        assert!(!has_alpha);
+        assert!(!soft);
+    }
+
+    /// A HUD atlas: alpha-keyed sprites sharing the sheet with genuinely
+    /// translucent art. Neither of the first two tests can see it — the ramps are
+    /// a minority of the sheet, and the keyed sprites keep solid interiors — but
+    /// alpha-testing it binarises the ramps.
+    ///
+    /// Proportioned from the measured Burnin' Rubber 3 `Interface_Texture`
+    /// (1024x512: 63.6% clear, 14.6% partial, 21.9% opaque — 40.0% of the visible
+    /// texels partial), which drew the scoreboard plates as hard black bars.
+    #[test]
+    fn mixed_atlas_with_translucent_art_is_soft() {
+        let atlas = tex(|_x, y| {
+            if y < 81 { 0 }                 // 63.3% clear
+            else if y < 100 { 96 }          // 14.8% partial-alpha ramp art
+            else { 255 }                    // 21.9% alpha-keyed sprite interiors
+        });
+        let (has_alpha, soft) = classify_texture_alpha(&atlas);
+        assert!(has_alpha);
+        assert!(
+            soft,
+            "an atlas whose visible texels are 40% partial alpha is not a binary mask"
+        );
+    }
+
+    /// ...but the same shape at a cutout's perimeter-to-area ratio must NOT trip
+    /// it, or every anti-aliased sprite sheet would move to the blended pass and
+    /// stop writing depth. Same clear/visible split, a quarter of the mid-alpha.
+    #[test]
+    fn atlas_of_antialiased_cutouts_is_not_soft() {
+        let atlas = tex(|_x, y| {
+            if y < 81 { 0 }
+            else if y < 86 { 96 }           // ~10% of visible: an AA outline
+            else { 255 }
+        });
+        let (has_alpha, soft) = classify_texture_alpha(&atlas);
+        assert!(has_alpha);
+        assert!(!soft, "an anti-aliased sprite sheet is still a cutout mask");
+    }
+
+    /// A binary cutout — a solid alpha-255 disc with a one-texel anti-aliased
+    /// rim — must stay in the alpha-TESTED pass so it keeps writing depth.
+    #[test]
+    fn binary_cutout_is_not_soft() {
+        let mask = tex(|x, y| {
+            let d = (((x as f32) - 64.0).powi(2) + ((y as f32) - 64.0).powi(2)).sqrt();
+            if d < 40.0 { 255 } else if d < 41.0 { 128 } else { 0 }
+        });
+        let (has_alpha, soft) = classify_texture_alpha(&mask);
+        assert!(has_alpha);
+        assert!(!soft, "an anti-aliased disc is a cutout mask, not a translucency ramp");
+    }
+
+    /// A faint effect on a large empty field — the shape of every muzzle flash,
+    /// spark and blood decal. Its mid-alpha texels are a small share of the
+    /// TEXTURE but almost all of what is visible, so it must be BLENDED.
+    /// Alpha-testing it at 0.5 is what drew Rasterwerks' pulse-gun flash as a
+    /// solid white bar.
+    #[test]
+    fn faint_flare_on_empty_field_is_soft() {
+        // A horizontal streak across the middle 8 rows, alpha 8..64 — well under
+        // the 0.5 alpha test, and only 6% of the texture.
+        let flare = tex(|x, _y2| (8 + (x % 56)) as u8);
+        let flare = {
+            let mut v = flare;
+            for y in 0..128 {
+                for x in 0..128 {
+                    if !(60..68).contains(&y) {
+                        v[(y * 128 + x) * 4 + 3] = 0;
+                    }
+                }
+            }
+            v
+        };
+        let (has_alpha, soft) = classify_texture_alpha(&flare);
+        assert!(has_alpha);
+        assert!(soft, "a faint streak on a transparent field is translucent, not a mask");
+    }
+
+    /// The floor guards the visible-texel test against noise: a handful of
+    /// stray anti-aliased texels must not make an otherwise binary mask soft.
+    #[test]
+    fn a_few_stray_soft_texels_do_not_make_a_mask_soft() {
+        let mut data = tex(|_, _| 0);
+        for i in 0..16 {
+            data[i * 4 + 3] = 100;
+        }
+        let (_has_alpha, soft) = classify_texture_alpha(&data);
+        assert!(!soft);
+    }
+}

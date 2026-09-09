@@ -3,3 +3,4 @@ path = "dcr_misc/PinBall106.dcr"
 
 [test]
 suite = "misc"
+tags = ["2d"]

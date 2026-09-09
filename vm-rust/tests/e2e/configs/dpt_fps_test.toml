@@ -1,0 +1,7 @@
+[movie]
+path = "dcr_dirplayer_test_movies/fps_test.dcr"
+
+[test]
+suite = "dirplayer_test_movies"
+tags = ["2d"]
+default_timeout = 180.0

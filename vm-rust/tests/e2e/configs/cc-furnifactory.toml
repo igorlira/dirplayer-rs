@@ -3,3 +3,9 @@ path = "dcr_coca-cola/furnifactory/FurniFactory.dcr"
 
 [test]
 suite = "coca_cola"
+# Live multiuser: this movie logs a REAL account into the Coke Studios server,
+# and every coca_cola test shares that one account. Pin them to a single shard
+# so they run one after another -- two of them side by side fight over the
+# login and the loser sits until it times out.
+shard_group = "cokestudios"
+tags = ["2d"]

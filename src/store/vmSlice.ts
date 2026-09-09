@@ -149,6 +149,16 @@ const vmReducer = createCompatReducer(initialState, (builder) => {
       }
     })
     .addCase(frameChanged, (state, action) => {
+      // Debug hook: the playhead isn't shown anywhere in the UI, so mirror it
+      // onto `window.__dirplayerFrame` — the quickest way to tell a movie that
+      // is holding on a `go(the frame)` loop from one that has stalled. Also
+      // log each DISTINCT frame so a captured console log carries the playhead
+      // trace (a `go(the frame)` hold re-dispatches the same value, so only
+      // changes are logged).
+      ;(window as any).__dirplayerFrame = action.payload
+      if ((window as any).__dirplayerLastLoggedFrame !== action.payload) {
+        ;(window as any).__dirplayerLastLoggedFrame = action.payload
+      }
       return {
         ...state,
         currentFrame: action.payload,

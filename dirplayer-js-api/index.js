@@ -138,6 +138,14 @@ export function onFlashMemberLoaded(spriteNum, castLib, castMember, swfData, wid
   }
 }
 
+export function onFlashMemberWarm(spriteNum, castLib, castMember, swfData, width, height, pausedAtStart) {
+  if (vmCallbacks?.onFlashMemberWarm) {
+    vmCallbacks.onFlashMemberWarm(spriteNum, castLib, castMember, swfData, width, height, pausedAtStart);
+  } else {
+    console.log('Flash member warm:', 'sprite#' + spriteNum, castLib, castMember, width, height, swfData.length, 'bytes', 'pausedAtStart=' + pausedAtStart);
+  }
+}
+
 export function onFlashMemberUnloaded(spriteNum) {
   if (vmCallbacks?.onFlashMemberUnloaded) {
     vmCallbacks.onFlashMemberUnloaded(spriteNum);
@@ -519,6 +527,27 @@ export function loadExternalXtras(urls) {
   return Promise.all(urls.map((u) => loadExternalXtra(u)));
 }
 
+/// Re-announce every already-loaded plugin to the CURRENT vm module.
+///
+/// The plugin instances themselves are host-agnostic — they reach the VM
+/// through `_getVmModule()` at dispatch time — but `register_external_xtra`
+/// was called on whichever module was live when the plugin loaded. A host that
+/// swaps in a fresh vm-rust instance (`setVmModule`) inherits an instance that
+/// has never heard of them, and `onRequestXtraLoad` short-circuits on
+/// `_plugins.has(key)` so a reload won't re-register them either. Call this
+/// right after `setVmModule()` to close that gap. No-op with no plugins loaded.
+export function reregisterExternalXtras() {
+  if (_plugins.size === 0) return [];
+  const mod = _getVmModule();
+  const names = [];
+  for (const slot of _plugins.values()) {
+    if (!slot.name) continue;
+    mod.register_external_xtra(slot.name);
+    names.push(slot.name);
+  }
+  return names;
+}
+
 /// Resolves once every loadExternalXtra/s call initiated so far has
 /// finished (either resolved or rejected — does not throw on failure).
 /// Movie-loading code can await this to ensure plugin-using scripts see
@@ -574,6 +603,10 @@ async function _loadExternalXtraInner(url) {
   const name = new TextDecoder().decode(nameBytes);
   if (!name) throw new Error(`loadExternalXtra(${url}): plugin returned empty xtra name`);
 
+  // Keep the original-cased name on the slot: `register_external_xtra` wants
+  // it as authored, and `reregisterExternalXtras()` replays these after a host
+  // module swap.
+  pluginSlot.name = name;
   _plugins.set(name.toLowerCase(), pluginSlot);
 
   // Tell vm-rust about the new xtra so manager.rs can route to it.

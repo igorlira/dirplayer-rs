@@ -1,0 +1,26 @@
+[movie]
+# Miniclip "Rifleman" (Silent Bay Studios) — Shockwave 3D + Havok, D11.5.
+# The ARCHIVE cut (`rifleman(1).dcr`) — what the DEV UI loads via Fetch & Load.
+#
+# Diffed against the other local `rifleman.dcr`: the two are the SAME game. The
+# only real script change (everything else is decompiler noise — identifier
+# casing, `delete(x)` vs `delete x`) is the domain gate in "Frame Initialize":
+#   rifleman.dcr     failure and success BOTH `go 6` — the check has no teeth
+#   rifleman(1).dcr  failure `go 85`, success `go 6` — the protected build
+# So frame 6 is the SUCCESS continuation in both; only THIS cut can actually be
+# diverted by a failed check, which is why the override below is required here.
+path = "dcr_misc/rifleman/rifleman_archive.dcr"
+
+[external_params]
+# `validDomain()` (MovieScript "Movie") demands that `the moviePath` contain one
+# of miniclip.com / miniclip.net / miniclip.co.uk / miniclips.com /
+# silentbaystudios.com, AND that externalParamValue("src") NOT start with
+# "http:" (checked FIRST, returns 0 outright). Failing it lands on frame 85,
+# "Frame Invalid Domain", an infinite `go(the frame)`. `src` is deliberately
+# unset here.
+_moviePath = "http://www.miniclip.com/rifleman.dcr"
+
+[test]
+suite = "misc"
+tags = ["3d", "havok"]
+default_timeout = 300.0

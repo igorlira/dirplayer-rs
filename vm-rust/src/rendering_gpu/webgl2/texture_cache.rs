@@ -42,6 +42,13 @@ pub struct TextureCacheKey {
     /// Only included when ink==8 and bitmap is indexed (depth <= 8)
     /// Using Option to avoid cache misses when not applicable
     pub sprite_bg_color: Option<(u8, u8, u8)>,
+    /// The hi-res twin's scale (see `Bitmap::hi_res`) in thousandths, or 0 when
+    /// the upload came from the movie-unit pixels. A bitmap can GAIN or LOSE a
+    /// twin without its `data` changing — the twin is seeded by a later
+    /// copyPixels, and dropped by any op that cannot maintain it — and the
+    /// version counter alone would then serve a stale texture at the wrong
+    /// resolution.
+    pub hi_res_milli: u32,
 }
 
 /// Cached texture information
@@ -393,6 +400,11 @@ impl RenderedTextCacheKey {
         font_style.hash(&mut settings_hasher);
         line_spacing.hash(&mut settings_hasher);
         top_spacing.hash(&mut settings_hasher);
+        // The glyph preference changes how PFR text rasterizes (atlas vs
+        // native vs grid-fit + aliasing rule). Without it in the key, textures
+        // rendered before a `set_glyph_preference` call keep serving the old
+        // look after the font cache is cleared.
+        (crate::player::font::get_glyph_preference() as u8).hash(&mut settings_hasher);
         let settings_hash = settings_hasher.finish();
 
         Self {

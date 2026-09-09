@@ -279,6 +279,12 @@ pub struct DirPlayer {
     /// how every Lingo handler executes, so it is opt-in until measured.
     pub ir_enabled: bool,
     pub stage_size: (u32, u32),
+    /// Physical pixels the browser puts behind one CSS pixel of the stage
+    /// container (`window.devicePixelRatio`). `stage_size` and every coordinate
+    /// that arrives from the DOM stay in CSS pixels; this is the one factor
+    /// that turns them into the DEVICE pixels the canvas is actually rendered
+    /// at. See `stage::stage_layout`.
+    pub stage_pixel_ratio: f64,
     pub bitmap_manager: bitmap::manager::BitmapManager,
     pub cursor: CursorRef,
     pub start_time: chrono::DateTime<chrono::Local>,
@@ -297,6 +303,21 @@ pub struct DirPlayer {
     /// this keeps read-only camera-capture movies (which never draw) on the
     /// old per-call snapshot behavior.
     pub stage_image_dirty: bool,
+    /// Union, in stage pixels, of the regions a script has actually drawn into
+    /// `(the stage).image` — `[l, t, r, b]`.
+    ///
+    /// The overlay composites the stage framebuffer OVER the sprite output, and
+    /// that bitmap is opaque, so compositing the whole thing pastes a frozen
+    /// snapshot over every 2D sprite underneath. Splat draws only a lives strip
+    /// and an ad banner into it, yet its live score field — a text sprite a few
+    /// pixels to the left — was covered by the stale copy and appeared stuck on
+    /// 000000 while the member's text was updating correctly.
+    ///
+    /// `None` together with `stage_image_dirty_full` means the whole stage.
+    pub stage_image_dirty_rect: Option<[i32; 4]>,
+    /// Set when a draw's region could not be determined, so the overlay must
+    /// composite the entire stage. Sticky — once unknown, always unknown.
+    pub stage_image_dirty_full: bool,
     pub center_stage: bool,
     pub keyboard_focus_sprite: i16,
     pub text_selection_start: u16,
@@ -314,11 +335,49 @@ pub struct DirPlayer {
     pub ime_composition: Option<(i32, i32)>,
     pub mouse_loc: (i32, i32),
     pub wants_pointer_lock: bool,
+    /// The movie asked for a fullscreen display mode through the Enhancer
+    /// Xtra (`set_resolution`), and has not asked for it back
+    /// (`reset_resolution`). Movie INTENT only, like `wants_pointer_lock`:
+    /// the browser grants fullscreen solely from a user gesture, so the
+    /// frontend polls this and requests it on the next input it handles.
+    pub wants_fullscreen: bool,
+    /// Whether the BROWSER is really showing this player fullscreen, as
+    /// reported by the frontend's `fullscreenchange` handler.
+    ///
+    /// `wants_fullscreen` is only the movie's intent and can be refused (the
+    /// request must come from a user gesture). This one is reality, and it is
+    /// what `stretch_style` keys off: while it is set the stage is laid out to
+    /// the container instead of the movie's own size, so the renderer draws at
+    /// screen resolution rather than the frontend CSS-upscaling a small canvas.
+    pub fullscreen_active: bool,
+    /// Snap the scaled stage's magnification to a whole number instead of the
+    /// exact aspect fit. A dev/debug preference, not movie state — see the
+    /// reasoning in `compute_stage_layout`.
+    pub stage_scale_snap_integer: bool,
+    /// Whether the BROWSER actually holds the pointer lock for this player's
+    /// canvas, as reported by the frontend's `pointerlockchange` handler.
+    ///
+    /// `wants_pointer_lock` is only the movie's INTENT, and it is cleared by any
+    /// sprite cursor assignment other than 200/Blank (see `score.rs`). While the
+    /// real lock is held the browser freezes the cursor, so every mouse event
+    /// carries the stale lock-engage position; letting one of those through
+    /// slams `mouse_loc` away from the movie's recentre point, and the movie's
+    /// next mouselook read turns that jump into a one-frame view snap. Measured
+    /// in Rasterwerks: a single click moved the view 8-19 degrees, which is
+    /// where the shot then went. Gate on the real lock, not the intent.
+    pub pointer_locked: bool,
     pub cursor_is_hidden: bool,
     /// Track parent DatumRef for chained property access (transform.position.z = value)
     /// (vector DatumRef, parent transform DatumRef, sub-property name)
     pub transform_sub_refs: Vec<(DatumRef, DatumRef, Symbol)>,
     pub last_mouse_down_time: i64,
+    /// Where the click `last_mouse_down_time` belongs to landed, in movie
+    /// coordinates. Director takes `the doubleClick` from the platform's own
+    /// double-click detection, which pairs two clicks only when the second one
+    /// falls inside the double-click RECTANGLE as well as inside the time
+    /// (Windows: `SM_CXDOUBLECLK`/`SM_CYDOUBLECLK`, 4 px by default), so the
+    /// position has to be remembered alongside the time.
+    pub last_mouse_down_loc: (i32, i32),
     pub is_double_click: bool,
     pub mouse_down_sprite: i16,
     pub drag_offset: (i32, i32),
@@ -415,6 +474,19 @@ pub struct DirPlayer {
     /// duplicate `createFlashInstance` calls every frame before the
     /// instance's first pixels arrive.
     pub flash_sprite_loaded: HashSet<(i16, i32, i32)>,
+    /// One-shot latch for the movie-load Flash warm-up: on the first
+    /// `pre_dispatch_flash_members` after a (re)load, the whole score is walked
+    /// and every distinct (channel, castLib, castMember) Flash triple gets an
+    /// unbound Ruffle instance pre-created (`warm_up_flash_instances`), so
+    /// playback never pays the Ruffle-creation + AS-init cost mid-game.
+    pub flash_warmup_done: bool,
+    /// Triples the render path has already dispatched a WARM create for while
+    /// the movie was NOT yet playing (load-time `begin_all_sprites` renders the
+    /// stage preview). Guards against re-cloning the SWF bytes across the wasm
+    /// boundary on every paused render frame. Distinct from
+    /// `flash_sprite_loaded`: a warmed triple must still get its LOAD dispatch
+    /// (the bind) once playback starts.
+    pub flash_sprite_warmed: HashSet<(i16, i32, i32)>,
     /// Sprites whose Ruffle instance has been confirmed loaded + AS-initialized
     /// at least once. Flash interop (getVariable/setVariable/callFunction/
     /// setCallback) takes the SYNC fast path for these; only the FIRST access to
@@ -469,11 +541,24 @@ pub struct DirPlayer {
     /// The first request finds no cached frame and falls through to the getter's
     /// offscreen `render_3d_to_rgba` path, so nothing is ever served stale.
     pub w3d_image_requested: std::collections::HashSet<(i32, i32)>,
-    /// Set once any 3D member has rendered. Previously `!w3d_frame_buffers
-    /// .is_empty()` stood in for "3D content is active" when deciding whether to
-    /// request pointer lock; with the readback now lazy that map can legitimately
-    /// stay empty, which would have silently broken FPS mouselook.
+    /// Did a 3D member render in the frame just drawn? Previously
+    /// `!w3d_frame_buffers.is_empty()` stood in for "3D content is active" when
+    /// deciding whether to request pointer lock; with the readback now lazy that
+    /// map can legitimately stay empty, which would have silently broken FPS
+    /// mouselook.
+    ///
+    /// Per-frame, NOT a latch. It used to be set once and never cleared, which
+    /// stranded the pointer lock: Rifleman and AreaZero both leave the 3D sprite
+    /// behind for a 2D menu, and with the flag stuck true the mouselook warp kept
+    /// re-requesting the lock, so the cursor stayed captured and the menu could
+    /// not be clicked. `draw_frame` latches it at the END of a frame so the value
+    /// Lingo sees between frames describes a completed frame — clearing it at
+    /// frame start would leave it false while the movie's own frame handlers run,
+    /// and those are exactly where the mouselook warp happens.
     pub w3d_any_rendered: bool,
+    /// Scratch for the above: raised by the 3D render pass, folded into
+    /// `w3d_any_rendered` when the frame finishes.
+    pub w3d_rendered_this_frame: bool,
     pub in_enter_frame: bool,
     pub in_prepare_frame: bool,
     pub in_step_frame: bool,
@@ -583,6 +668,14 @@ pub struct DirPlayer {
     /// A score transition detected on frame entry, awaiting playback start by the
     /// renderer (which snapshots the pre-transition stage). Set by advance_frame.
     pub pending_transition: Option<crate::player::cast_member::TransitionInfo>,
+    /// A `puppetTransition` has been registered but the playhead has not moved
+    /// yet. Director plays the effect ON the next frame change, so the playhead
+    /// hold has to start THERE — arming it at registration time froze the
+    /// playhead during the very handler that goes on to call `go`, and
+    /// `advance_frame`'s hold check then swallowed the frame change outright
+    /// (BrickOut's `startGame` does `puppetTransition(32, 1, 5)` then
+    /// `go("Jeux")`, and never left the title screen).
+    pub pending_transition_hold_ms: Option<u16>,
     /// True while a score/puppet transition holds the playhead (Director blocks
     /// during a transition). The renderer clears it when the animation completes
     /// (precise sync). A separate field from `is_in_transition` (which means a
@@ -620,6 +713,31 @@ pub struct DirPlayer {
     /// (e.g. cached scriptInstanceList). Callers should check this before
     /// allocating a new DatumRef, to ensure mutations share the same arena entry.
     pub last_sprite_prop_ref: Option<DatumRef>,
+    /// The pending `node.<vectorProp>.<component> = value` lvalue chain, as
+    /// `(vector datum, receiver, property)`.
+    ///
+    /// Director compiles `my.worldPosition.z = pFloor + 5` to
+    /// `getprop my / getchainedprop worldPosition / … / setobjprop z`, and the
+    /// component write reaches the node. dirplayer's 3D getters build a FRESH
+    /// `Datum::Vector` for each read (`worldPosition` is derived — it walks the
+    /// parent chain — so it cannot be a persistent datum the way
+    /// `transform` is), so without this the write landed on a temporary and was
+    /// dropped: Street Sesh's `checkGroundCollision` clamped the skater to the
+    /// floor every frame and the skater still fell through the world.
+    ///
+    /// Recorded only by the two bytecodes that read a property off a 3D node,
+    /// and cleared by any bytecode that STORES the value into a variable — so
+    /// it stays confined to the compiler's lvalue-chain shape and
+    /// `v = model.worldPosition` followed by `v.z = 5` still mutates only `v`.
+    /// Several may be live at once: the RHS of the assignment is evaluated
+    /// BETWEEN the receiver read and the component write, and it is free to
+    /// read another 3D vector of its own — `my.worldPosition.x = pStartPos.x`
+    /// compiles to `getchainedprop worldPosition / getprop pStartPos /
+    /// getobjprop x / setobjprop x`. A single slot was overwritten by whatever
+    /// the RHS read last, so Street Sesh 2's `_level.new` never moved the
+    /// skater onto the start line. Bounded so a handler that reads many such
+    /// vectors without ever storing one cannot grow it without limit.
+    pub vector_prop_lvalue: Vec<(DatumRef, DatumRef, Symbol)>,
     pub virtual_scripts: FxHashMap<CastMemberRef, Rc<dyn virtual_scripts::VirtualScriptHandler>>,
     /// Runtime overrides for `the scriptText of member`. Director exposes a
     /// member's Lingo source as a settable string on ANY member type; some
@@ -759,6 +877,7 @@ impl DirPlayer {
             // still toggles it at runtime for A/B measurement.
             ir_enabled: true,
             stage_size: (100, 100),
+            stage_pixel_ratio: 1.0,
             bitmap_manager: bitmap::manager::BitmapManager::new(),
             cursor: CursorRef::System(0),
             start_time: now, // supposed to be time at which computer started, but we don't have access from browser. this is sufficient for calculating elapsed time.
@@ -768,13 +887,20 @@ impl DirPlayer {
             stage_draw_rect: None,
             stage_image: None,
             stage_image_dirty: false,
+            stage_image_dirty_rect: None,
+            stage_image_dirty_full: false,
             center_stage: true,
             keyboard_focus_sprite: -1, // Setting keyboardFocusSprite to -1 returns keyboard focus control to the Score, and setting it to 0 disables keyboard entry into any editable sprite.
             mouse_loc: (0, 0),
             wants_pointer_lock: false,
+            wants_fullscreen: false,
+            fullscreen_active: false,
+            stage_scale_snap_integer: false,
+            pointer_locked: false,
             cursor_is_hidden: false,
             transform_sub_refs: Vec::new(),
             last_mouse_down_time: 0,
+            last_mouse_down_loc: (i32::MIN, i32::MIN),
             is_double_click: false,
             mouse_down_sprite: 0,
             drag_offset: (0, 0),
@@ -820,6 +946,8 @@ impl DirPlayer {
             in_frame_script: false,
             flash_frame_buffers: HashMap::new(),
             flash_sprite_loaded: HashSet::new(),
+            flash_warmup_done: false,
+            flash_sprite_warmed: HashSet::new(),
             flash_ready_sprites: HashSet::new(),
             flash_lc_connections: std::collections::HashMap::new(),
             flash_lc_callbacks: std::collections::HashMap::new(),
@@ -828,6 +956,7 @@ impl DirPlayer {
             w3d_frame_buffers: HashMap::new(),
             w3d_image_requested: std::collections::HashSet::new(),
             w3d_any_rendered: false,
+            w3d_rendered_this_frame: false,
             in_enter_frame: false,
             in_prepare_frame: false,
             in_step_frame: false,
@@ -864,6 +993,7 @@ impl DirPlayer {
             movie_reload_data: None,
             is_in_transition: false,
             pending_transition: None,
+            pending_transition_hold_ms: None,
             score_transition_active: false,
             transition_hold_until_ms: None,
             actor_list_generation: 0,
@@ -879,6 +1009,7 @@ impl DirPlayer {
             active_stage_message_channels_cache: None,
             active_stage_filmloop_members_cache: None,
             last_sprite_prop_ref: None,
+            vector_prop_lvalue: Vec::new(),
             virtual_scripts: FxHashMap::default(),
             movie_path_override: None,
             movie_path_label: None,
@@ -910,6 +1041,17 @@ impl DirPlayer {
                 nested_flash_key(active, ch)
             }
         };
+        // Movie-load WARM-UP (docs/flash-instance-warmup-handoff.md §5): once
+        // per movie load, pre-create an unbound Ruffle instance for every
+        // distinct Flash triple the score will ever show, so playback never
+        // pays Ruffle creation + AS-init mid-game. Host player only — a nested
+        // `#movie` sub-player's Flash set is small and its lifecycle is owned
+        // by its own pre-dispatch.
+        if active == 0 && !self.flash_warmup_done {
+            self.flash_warmup_done = true;
+            self.warm_up_flash_instances();
+        }
+
         // UNLOAD pass FIRST: tear down any Ruffle instance whose channel no
         // longer holds that exact Flash member — BEFORE the load pass below, so
         // a member swap is deterministically unload(old) → load(new). If the
@@ -1095,6 +1237,82 @@ impl DirPlayer {
                 ruffle_stop(cn as i32);
             }
             self.movie.score.get_sprite_mut(cn).flash_prev_frame = cur;
+        }
+    }
+
+    /// Movie-load Flash warm-up (docs/flash-instance-warmup-handoff.md §5.2):
+    /// walk the whole score's per-frame channel data, collect every distinct
+    /// (channel, castLib, castMember) Flash triple, and pre-create an UNBOUND
+    /// Ruffle instance for each via `onFlashMemberWarm`. The JS side parks them
+    /// at frame 1, stopped and capturing nothing; when the playhead reaches a
+    /// triple, the normal load dispatch finds the warm instance and binds it
+    /// near-instantly. The frame loop's `is_flash_loading` gate holds the movie
+    /// while warm creations are in flight — load-time waiting, so playback
+    /// never waits. Script-created sprites (puppet `member =` swaps) are not in
+    /// the score and still cold-load, exactly as before.
+    fn warm_up_flash_instances(&mut self) {
+        let mut seen: HashSet<(i16, i32, i32)> = HashSet::new();
+        let mut warm_list: Vec<(i16, i32, i32, u32, u32)> = Vec::new();
+        for (_frame, channel_idx, data) in self.movie.score.channel_initialization_data.iter() {
+            if data.cast_member == 0 {
+                continue;
+            }
+            let channel_number =
+                crate::player::score::get_channel_number_from_index(*channel_idx as u32);
+            if channel_number < 1 {
+                continue; // frame-script / effects channels
+            }
+            // Same cast_lib resolution as the score's span-init pass: 65535 is
+            // a "relative cast" ref (stage → cast 1), 0 is D5's "default cast".
+            let cast_lib = if data.cast_lib == 65535 || data.cast_lib == 0 {
+                1
+            } else {
+                data.cast_lib as i32
+            };
+            let triple = (channel_number as i16, cast_lib, data.cast_member as i32);
+            if !seen.insert(triple) {
+                continue;
+            }
+            let w = data.width.max(1) as u32;
+            let h = data.height.max(1) as u32;
+            warm_list.push((triple.0, triple.1, triple.2, w, h));
+        }
+        for (ch, cl, cm, w, h) in warm_list {
+            // Skip triples the channel is showing RIGHT NOW: the load pass in
+            // this very same call dispatches those, and firing both a warm and
+            // a load create for one triple in the same tick started TWO Ruffle
+            // players on the same key (the first's `finally` then marked the
+            // second's record ready before its AS init finished — rifleman's
+            // intro gate never opened).
+            let cur = self
+                .movie
+                .score
+                .get_sprite(ch)
+                .and_then(|s| s.member.as_ref())
+                .map(|m| (m.cast_lib, m.cast_member));
+            if cur == Some((cl, cm)) {
+                continue;
+            }
+            let member_ref = CastMemberRef { cast_lib: cl, cast_member: cm };
+            let Some(member) = self.movie.cast_manager.find_member_by_ref(&member_ref) else {
+                continue;
+            };
+            let CastMemberType::Flash(flash_member) = &member.member_type else {
+                continue;
+            };
+            if !crate::rendering::has_swf_signature(&flash_member.data) {
+                continue;
+            }
+            let paused_at_start = flash_member
+                .flash_info
+                .as_ref()
+                .map(|fi| fi.paused_at_start)
+                .unwrap_or(false);
+            debug!(
+                "[Flash] Warming sprite#{} {}:{} ({}x{}, {} bytes)",
+                ch, cl, cm, w, h, flash_member.data.len(),
+            );
+            JsApi::dispatch_flash_member_warm(ch as i32, cl, cm, &flash_member.data, w, h, paused_at_start);
         }
     }
 
@@ -1516,7 +1734,7 @@ impl DirPlayer {
             });
         }
 
-        let (stage_w, stage_h) = crate::player::stage::stage_canvas_dims(self);
+        let (stage_w, stage_h) = crate::player::stage::stage_css_dims(self);
         crate::js_api::JsApi::dispatch_stage_size_changed(stage_w, stage_h, self.center_stage);
 
         JsApi::dispatch_movie_loaded(self.movie.file.as_ref().unwrap());
@@ -1810,6 +2028,19 @@ impl DirPlayer {
         }
     }
 
+    /// The palette the movie is currently displaying in — the last entry the
+    /// score's palette (effects) channel set at or before the playhead, falling
+    /// back to the system default when the movie never sets one.
+    ///
+    /// Every *sprite-level* palette index — `the stageColor`, a sprite's
+    /// foreColor/backColor, a shape's colours — is an index into THIS palette,
+    /// not into the system palette and not into whatever palette a source
+    /// bitmap happens to carry. Only an indexed bitmap's own pixels are read
+    /// through the bitmap's own palette.
+    pub fn current_movie_palette(&self) -> crate::player::bitmap::bitmap::PaletteRef {
+        self.movie.score.get_frame_palette(self.movie.current_frame)
+    }
+
     pub fn get_hydrated_globals(&self) -> FxHashMap<Symbol, &Datum> {
         self.globals
             .iter()
@@ -1872,7 +2103,10 @@ impl DirPlayer {
         // frame change; the next frame re-dirties it only if it draws into the
         // stage image again.
         if prev_frame != next_frame {
+            self.start_pending_puppet_transition();
             self.stage_image_dirty = false;
+            self.stage_image_dirty_rect = None;
+            self.stage_image_dirty_full = false;
 
             // A transition placed on the entered frame plays between the previous
             // stage and this frame's stage. Look up the transition member and hand
@@ -1921,6 +2155,14 @@ impl DirPlayer {
         true
     }
 
+    /// Start the hold for a `puppetTransition` that was registered earlier, now
+    /// that the playhead has actually moved. No-op when none is pending.
+    pub fn start_pending_puppet_transition(&mut self) {
+        if let Some(duration_ms) = self.pending_transition_hold_ms.take() {
+            self.begin_transition_hold(duration_ms);
+        }
+    }
+
     /// Begin holding the playhead for a transition of `duration_ms`. The renderer
     /// releases the hold on completion; the failsafe deadline is set generously
     /// past the animation window so it never trips during normal playback.
@@ -1952,6 +2194,14 @@ impl DirPlayer {
         // so switching movies doesn't leave old sounds looping or leak players.
         self.sound_manager.stop_all();
         self.flash_frame_buffers.clear();
+        // The next movie's score gets its own warm-up pass (all JS instances
+        // are torn down by the reset-all right below). The load bookkeeping
+        // must be cleared with them: reset-all destroys every JS instance, so a
+        // stale `flash_sprite_loaded` entry would make the load pass skip the
+        // re-dispatch and the sprite would never get an instance again.
+        self.flash_warmup_done = false;
+        self.flash_sprite_loaded.clear();
+        self.flash_sprite_warmed.clear();
         JsApi::dispatch_flash_reset_all();
         // JS-Lingo runtimes live in a thread_local map, not on the player, so
         // they survive both this reset and a full player drop — clear them here.
@@ -3008,17 +3258,27 @@ impl DirPlayer {
             // backward-jump handler yields cooperatively (see input_polled).
             BuiltInSymbol::Ticks => { self.input_polled = true; Ok(self.alloc_datum(Datum::Int(get_elapsed_ticks(self.system_start_time)))) },
             BuiltInSymbol::FrameLabel => {
+                // Director 11.5 Scripting Dictionary, `frameLabel`: "identifies
+                // the label assigned to the CURRENT frame [...] When the current
+                // frame has no label, the value of the frameLabel property is 0."
+                //
+                // So this is an exact match on the current frame, NOT a scan back
+                // to the nearest preceding marker -- that is what `label()` /
+                // `marker()` are for. Scanning backwards reported the section's
+                // label from every unlabelled frame inside it, which makes
+                // `the frameLabel` useless as a "have we arrived yet?" test.
+                // And the no-label value is the integer 0, not the string "0".
                 let frame_label = self
                     .movie
                     .score
                     .frame_labels
                     .iter()
-                    .filter(|&label| label.frame_num <= self.movie.current_frame as i32)
-                    .max_by_key(|label| label.frame_num)
+                    .find(|&label| label.frame_num == self.movie.current_frame as i32)
                     .map(|label| label.label.clone());
-                Ok(self.alloc_datum(Datum::String(
-                    frame_label.unwrap_or_else(|| "0".to_string()),
-                )))
+                Ok(match frame_label {
+                    Some(label) => self.alloc_datum(Datum::String(label)),
+                    None => self.alloc_datum(Datum::Int(0)),
+                })
             },
             BuiltInSymbol::CurrentSpriteNum => {
                 // TODO: this can also be called by a static script
@@ -3188,13 +3448,32 @@ impl DirPlayer {
                 Ok(self.alloc_datum(Datum::PropList(props, false)))
             },
             BuiltInSymbol::XtraList => {
+                // Each entry carries BOTH keys. `the xtraList` (Movie property,
+                // Director 11.5 Scripting Dictionary) is documented on
+                // `#filename` — "specifies the filename of the Xtra extension on
+                // the current platform" — while `xtraList` (Player) is the
+                // `#name` form; movies read whichever they were written against.
+                //
+                // PHOSPHOR's `M_Util.FindXtra` reads BOTH, picking by execution
+                // style:
+                //     case the scriptExecutionStyle of
+                //       9:  if gXtraList[I].name.char[1..n] = aXtraName
+                //       10: if gXtraList[I].fileName.char[1..n] = aXtraName
+                // so with `#fileName` absent the style-10 branch compared against
+                // VOID, `FindXtra("Multiusr")` returned 0, and C_NetLobby halted
+                // the game with "Multiuser Xtra not installed".
                 let xtra_names = xtra::manager::get_registered_xtra_names();
                 let xtra_list: VecDeque<DatumRef> = xtra_names
                     .iter()
                     .map(|name| {
                         let name_key = self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Name)));
                         let name_val = self.alloc_datum(Datum::String(name.to_string()));
-                        self.alloc_datum(Datum::PropList(VecDeque::from(vec![(name_key, name_val)]), false))
+                        let file_key = self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::FileName)));
+                        let file_val = self.alloc_datum(Datum::String(format!("{}.x32", name)));
+                        self.alloc_datum(Datum::PropList(
+                            VecDeque::from(vec![(name_key, name_val), (file_key, file_val)]),
+                            false,
+                        ))
                     })
                     .collect();
                 Ok(self.alloc_datum(Datum::List(crate::director::lingo::datum::DatumType::List, xtra_list, false)))
@@ -3442,20 +3721,30 @@ impl DirPlayer {
         }
     }
 
+    /// Programmatic mouse warp — the FPS mouselook recentre.
+    ///
+    /// A movie does this either with `_mouse.mouseLoc = point(x, y)` or through
+    /// a cursor-warping Xtra (MoveCursor's `move_cursor x, y`, which Miniclip's
+    /// Rifleman uses). BOTH spellings mean the same thing and must behave
+    /// identically — including requesting pointer lock — or the camera turns in
+    /// movies that use one and stays frozen in movies that use the other.
+    /// Callers must go through here rather than assigning `mouse_loc`.
+    pub fn warp_mouse_loc(&mut self, x: i32, y: i32) {
+        self.mouse_loc = (x, y);
+        // Only request pointer lock if the cursor is hidden AND 3D content is
+        // active — a movie nudging the cursor on a 2D stage isn't mouselook.
+        if self.cursor_is_hidden && self.w3d_any_rendered {
+            self.wants_pointer_lock = true;
+        }
+    }
+
     fn set_mouse_prop(&mut self, prop: Symbol, value_ref: &DatumRef) -> Result<(), ScriptError> {
         match prop.into_builtin() {
             Some(BuiltInSymbol::MouseLoc) => {
                 let value = self.get_datum(value_ref).clone();
                 match value {
                     Datum::Point(vals, _flags) => {
-                        let x = vals[0] as i32;
-                        let y = vals[1] as i32;
-                        self.mouse_loc = (x, y);
-                        // Game is programmatically warping the mouse — this is the FPS mouselook pattern.
-                        // Only request pointer lock if cursor is hidden AND 3D content is active.
-                        if self.cursor_is_hidden && self.w3d_any_rendered {
-                            self.wants_pointer_lock = true;
-                        }
+                        self.warp_mouse_loc(vals[0] as i32, vals[1] as i32);
                         Ok(())
                     }
                     _ => Err(ScriptError::new("mouseLoc requires a point value".to_string())),
@@ -3659,7 +3948,7 @@ impl DirPlayer {
             Some(BuiltInSymbol::CenterStage) => {
                 self.center_stage = value.int_value()? != 0;
                 crate::player::stage::apply_stage_draw_rect(self);
-                let (w, h) = crate::player::stage::stage_canvas_dims(self);
+                let (w, h) = crate::player::stage::stage_css_dims(self);
                 crate::js_api::JsApi::dispatch_stage_size_changed(w, h, self.center_stage);
                 Ok(())
             },
@@ -3675,6 +3964,29 @@ impl DirPlayer {
                     }
                     _ => Err(ScriptError::new("actorList must be a list".to_string())),
                 }
+            },
+            // `the soundLevel` / `_sound.soundLevel` (Director 11.5 Scripting
+            // Dictionary, Sound property): the speaker's master volume, 0 (no
+            // sound) to 7 (maximum, the default). Channel `volume` is scaled to
+            // it, so it is applied as a master gain across every channel — and
+            // it has to reach sounds that are already playing, since the
+            // documented use is a mute toggle.
+            Some(BuiltInSymbol::SoundLevel) => {
+                let level = value.int_value()?.clamp(0, 7);
+                self.movie.sound_level = level;
+                self.sound_manager
+                    .set_sound_level(if self.movie.sound_enabled { level } else { 0 });
+                Ok(())
+            },
+            // `the soundEnabled` (same entry): sound on (TRUE, default) or off
+            // (FALSE). Documented to leave the volume setting UNCHANGED, so it
+            // is tracked separately from soundLevel and only gates the gain.
+            Some(BuiltInSymbol::SoundEnabled) => {
+                let enabled = value.int_value()? != 0;
+                self.movie.sound_enabled = enabled;
+                self.sound_manager
+                    .set_sound_level(if enabled { self.movie.sound_level } else { 0 });
+                Ok(())
             },
             _ => self.movie.set_prop(prop, value, &self.allocator)
         }
@@ -7463,6 +7775,35 @@ async fn player_ext_call<'a>(
     result
 }
 
+/// One ELEMENT of a list being duplicated.
+///
+/// Director 11.5 Scripting Dictionary, `duplicate() (list function)`:
+///
+/// > returns a copy of a list and copies nested lists (list items that also are
+/// > lists) and their contents.
+///
+/// Nested LISTS, and nothing else. Every other element is an object or a value,
+/// and the entry's own note — "when you assign a list to a variable, the
+/// variable contains a reference to the list, not the list itself" — is the
+/// general rule: a copy shares the objects it holds. Duplicating them instead
+/// silently severed every reference a duplicated list carried.
+///
+/// Burnin' Rubber 3's menu slide-in is exactly that shape. `[M] 3D HandlerList
+/// Functions.Interpolator` runs each frame over
+/// `gSystem.InterPolatorList.duplicate()` and moves the node with
+/// `entry[1].interpolateTo(entry[2], pct)`, where `entry[1]` is the node's own
+/// `transform` object. With the transform deep-copied by the duplicate, every
+/// frame interpolated a throwaway: the six menu lines stayed parked at the
+/// x = -1200 offset `AnimateMainIn` had pushed them to, so the whole main menu
+/// sat off-screen while the state machine reported success.
+fn duplicate_list_item(datum: &DatumRef) -> DatumRef {
+    let datum_type = reserve_player_ref(|player| player.get_datum(datum).type_enum());
+    match datum_type {
+        DatumType::PropList | DatumType::List => player_duplicate_datum(datum),
+        _ => datum.clone(),
+    }
+}
+
 fn player_duplicate_datum(datum: &DatumRef) -> DatumRef {
     let datum_type = reserve_player_ref(|player| player.get_datum(datum).type_enum());
     let new_datum = match datum_type {
@@ -7473,8 +7814,8 @@ fn player_duplicate_datum(datum: &DatumRef) -> DatumRef {
             });
             let mut new_props = VecDeque::new();
             for (key, value) in props {
-                let new_key = player_duplicate_datum(&key);
-                let new_value = player_duplicate_datum(&value);
+                let new_key = duplicate_list_item(&key);
+                let new_value = duplicate_list_item(&value);
                 new_props.push_back((new_key, new_value));
             }
             Datum::PropList(new_props, sorted)
@@ -7486,7 +7827,7 @@ fn player_duplicate_datum(datum: &DatumRef) -> DatumRef {
             });
             let mut new_list = VecDeque::new();
             for item in list {
-                let new_item = player_duplicate_datum(&item);
+                let new_item = duplicate_list_item(&item);
                 new_list.push_back(new_item);
             }
             Datum::List(list_type.clone(), new_list, sorted)

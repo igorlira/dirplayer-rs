@@ -323,9 +323,17 @@ impl Mesh3dBuffers {
         })
     }
 
-    /// Upload or replace the secondary UV set (location 3) for lightmap/shadow coordinates.
-    /// Called at render time when meshDeform provides runtime lightmap UVs.
-    pub fn update_texcoord2(&mut self, gl: &WebGl2RenderingContext, tc2: &[[f32; 2]]) {
+    /// Upload or replace the secondary UV set (location 3) for lightmap/shadow
+    /// coordinates.
+    ///
+    /// `direct` says which UV space `tc2` is in: `true` for Director-space
+    /// coordinates already in [0,1] (what meshDeform hands back), `false` for the
+    /// CLOD decoder's PRE-CENTERED -0.5..0.5 space, which the vertex shader
+    /// un-centers with (u+0.5, 0.5-v) exactly as it does for the base set. This
+    /// used to be hard-coded to `true`, which silently overrode the space the
+    /// loader had measured for a file-provided set and made every pre-centered
+    /// lightmap sample at negative u — i.e. the clamped black edge of the atlas.
+    pub fn update_texcoord2(&mut self, gl: &WebGl2RenderingContext, tc2: &[[f32; 2]], direct: bool) {
         gl.bind_vertex_array(Some(&self.vao));
         let vbo = if let Some(ref vbo) = self.vbo_texcoords2 {
             vbo.clone()
@@ -348,7 +356,7 @@ impl Mesh3dBuffers {
         gl.vertex_attrib_pointer_with_i32(3, 2, WebGl2RenderingContext::FLOAT, false, 0, 0);
         gl.bind_vertex_array(None);
         self.has_texcoord2 = true;
-        self.texcoord2_direct = true;
+        self.texcoord2_direct = direct;
     }
 
     /// Bind this mesh for drawing

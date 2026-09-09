@@ -19,7 +19,15 @@ export function onScopeListChanged() {}
 export function onBreakpointListChanged() {}
 export function onGlobalListChanged() {}
 export function onScriptErrorCleared() {}
-export function onDebugMessage() {}
+// Forward Lingo trace output (`put`, assert failures, the engine's own debug
+// lines) to the page console so E2E_CONSOLE can capture it. This was a no-op,
+// which meant every `put` a movie made vanished in the harness — including the
+// diagnostics movies emit on the exact failure paths you want to see, e.g. AI
+// Entity's `put "Invalid destination: " & kDest` when a navmesh lookup fails.
+// Prefixed so it can be filtered: E2E_CONSOLE=LINGO.
+export function onDebugMessage(message) {
+  console.log('[LINGO]', message);
+}
 export function onDebugContent() {}
 export function onMovieLoadFailed() {}
 
@@ -49,6 +57,24 @@ export function onClearAllTimeouts() {
     clearInterval(_timeoutHandles[name]);
     delete _timeoutHandles[name];
   }
+}
+
+/// Drop every piece of JS-side state that still points at the wasm instance.
+///
+/// Called by the runner when it re-instantiates the module after a Rust panic.
+/// A wasm trap doesn't unwind, so the dying instance never gets to run its own
+/// teardown (`dispatch_clear_timeouts`, `dispatch_flash_reset_all`, sound
+/// stop) — those all execute INSIDE wasm and can't be reached on a corpse. The
+/// JS side has to do it from the outside instead, or the dead instance keeps
+/// being re-entered by its own timers and Ruffle callbacks.
+export function __resetHostState() {
+  // setInterval handles created for the dead instance's `timeout` objects.
+  // Each tick calls `window.__wasm_trigger_timeout`, which the template
+  // repoints at the new instance — so leaving these alive would fire the OLD
+  // movie's timeouts against the NEW player.
+  onClearAllTimeouts();
+  // Ruffle players, their per-frame capture RAF loops, and SWF audio.
+  onFlashResetAll();
 }
 
 export function onDatumSnapshot() {}
@@ -100,6 +126,13 @@ export function onFlashMemberLoaded(spriteNum, castLib, castMember, swfData, wid
       ?.catch?.(e => console.error('createFlashInstance failed:', e));
   });
 }
+export function onFlashMemberWarm(spriteNum, castLib, castMember, swfData, width, height, pausedAtStart) {
+  const copy = new Uint8Array(swfData);
+  flashManager().then(m => {
+    m.warmFlashInstance?.(spriteNum, castLib, castMember, copy, width, height, pausedAtStart)
+      ?.catch?.(e => console.error('warmFlashInstance failed:', e));
+  });
+}
 export function onFlashMemberUnloaded(spriteNum) {
   flashManager().then(m => m.destroyFlashInstance?.(spriteNum));
 }
@@ -139,6 +172,7 @@ export {
   setXtraMovieBase,
   setXtraHostBase,
   setVmModule,
+  reregisterExternalXtras,
   loadDefaultXtraRegistry,
   resolveAndLoadMovieXtras,
 } from './dirplayer-js-api-real.js';

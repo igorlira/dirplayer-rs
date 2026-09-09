@@ -98,6 +98,14 @@ impl StringDatumUtils {
                     }
                 }
             }
+            // `<string>.symbol` is the dot form of `symbol(<string>)` — Director
+            // lets any function be written as a method on its first argument.
+            // "Using Director 11.5" ("Symbols"): `symbol("novice")` results in
+            // `#novice`. thehillshaveeyes' menu behaviours build their marker
+            // range this way: `marker_list[i] = _movie.markerlist[i].symbol`.
+            Some(BuiltInSymbol::Symbol) => {
+                Ok(Datum::Symbol(Symbol::from_str(value)))
+            }
             Some(BuiltInSymbol::CharToNum) => {
                 let code = value.chars().next().map_or(0, |c| c as i32);
                 Ok(Datum::Int(code))

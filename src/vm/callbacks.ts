@@ -8,7 +8,7 @@ import {
   setXtraRegistry,
   getXtraRegistry,
 } from "dirplayer-js-api";
-import { createFlashInstance, destroyFlashInstance, destroyAllFlashInstances, initFlashBridge } from "../services/flashPlayerManager";
+import { createFlashInstance, warmFlashInstance, destroyFlashInstance, destroyAllFlashInstances, initFlashBridge } from "../services/flashPlayerManager";
 import store from "../store";
 import { breakpointListChanged, castLibNameChanged, castListChanged, castMemberChanged, castMemberListChanged, channelChanged, channelDisplayNameChanged, channelDisplayNamesChanged, datumSnapshot, debugContentAdded, debugMessageAdded, debugMessagesCleared, frameChanged, globalsChanged, movieLoaded, movieLoadFailed, onScriptError, removeTimeoutHandle, scopeListChanged, scoreChanged, scriptErrorCleared, scriptInstanceSnapshot, setTimeoutHandle } from "../store/vmSlice";
 import { OnMovieLoadedCallbackData, trigger_timeout, exportW3dObj, exportW3dRaw, listW3dMembers, get_breakpoints } from 'vm-rust'
@@ -203,6 +203,13 @@ export function initVmCallbacks() {
       console.log(`Flash member loaded: sprite#${spriteNum} ${castLib}:${castMember} ${width}x${height} (${swfDataCopy.length} bytes, first=[${Array.from(swfDataCopy.slice(0, 4)).join(',')}], pausedAtStart=${pausedAtStart}, assertedFrame=${assertedFrame})`);
       createFlashInstance(spriteNum, castLib, castMember, swfDataCopy, width, height, pausedAtStart, assertedFrame)
         .catch(e => console.error('Failed to create Flash instance:', e));
+    },
+    onFlashMemberWarm: (spriteNum: number, castLib: number, castMember: number, swfData: Uint8Array, width: number, height: number, pausedAtStart: boolean) => {
+      // Copy immediately - swfData is a view into WASM memory that may be invalidated
+      const swfDataCopy = new Uint8Array(swfData);
+      console.log(`Flash member warm: sprite#${spriteNum} ${castLib}:${castMember} ${width}x${height} (${swfDataCopy.length} bytes, pausedAtStart=${pausedAtStart})`);
+      warmFlashInstance(spriteNum, castLib, castMember, swfDataCopy, width, height, pausedAtStart)
+        .catch(e => console.error('Failed to warm Flash instance:', e));
     },
     onFlashMemberUnloaded: (spriteNum: number) => {
       destroyFlashInstance(spriteNum);

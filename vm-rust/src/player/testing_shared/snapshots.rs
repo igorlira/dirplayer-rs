@@ -47,6 +47,57 @@ impl SnapshotOutput {
             }
         }
     }
+
+    /// Decode to raw RGBA once.
+    ///
+    /// [`pixel`] decodes the whole PNG per call on the browser harness, so a
+    /// test that samples more than a handful of points must decode once and
+    /// index the result instead.
+    pub fn to_rgba(&self) -> Self {
+        match self {
+            SnapshotOutput::Rgba { .. } => self.clone(),
+            SnapshotOutput::Base64Png(b64) => {
+                use base64::Engine;
+                let png_bytes = base64::engine::general_purpose::STANDARD
+                    .decode(b64).expect("Invalid base64 in snapshot");
+                let img = image::load_from_memory_with_format(&png_bytes, image::ImageFormat::Png)
+                    .expect("Failed to decode PNG snapshot")
+                    .to_rgba8();
+                SnapshotOutput::Rgba {
+                    width: img.width(),
+                    height: img.height(),
+                    data: img.into_raw(),
+                }
+            }
+        }
+    }
+
+    /// Read one pixel as (r, g, b, a). Returns `None` outside the image.
+    ///
+    /// Lets a test assert about the COMPOSITED stage — what the renderer
+    /// actually put on screen — rather than only diffing a whole picture. A
+    /// snapshot diff cannot say WHY it moved, and for a live 3D game most of
+    /// the frame is legitimately different every run; a single probe pixel in
+    /// a HUD strip is stable and names the defect.
+    pub fn pixel(&self, x: u32, y: u32) -> Option<(u8, u8, u8, u8)> {
+        match self {
+            SnapshotOutput::Rgba { width, height, data } => {
+                if x >= *width || y >= *height { return None; }
+                let i = ((y * *width + x) * 4) as usize;
+                data.get(i..i + 4).map(|p| (p[0], p[1], p[2], p[3]))
+            }
+            SnapshotOutput::Base64Png(b64) => {
+                use base64::Engine;
+                let png_bytes = base64::engine::general_purpose::STANDARD
+                    .decode(b64).ok()?;
+                let img = image::load_from_memory_with_format(
+                    &png_bytes, image::ImageFormat::Png).ok()?;
+                if x >= img.width() || y >= img.height() { return None; }
+                let p = image::GenericImageView::get_pixel(&img, x, y);
+                Some((p.0[0], p.0[1], p.0[2], p.0[3]))
+            }
+        }
+    }
 }
 
 /// Tracks snapshot paths and diff tolerance for snapshot verification.

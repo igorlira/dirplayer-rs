@@ -126,6 +126,15 @@ extern "C" {
 /// AS-initialized), so a Flash interop call reads/writes a live instance rather
 /// than returning null. Bounded (~10s) so a sprite that never gets a ready
 /// instance falls back to the caller's existing lazy-handle / VOID behaviour.
+/// Non-blocking readiness check for one sprite's Ruffle instance: loaded AND
+/// finished AS init. Backs the documented `member.state` codes (3 vs 4).
+pub(crate) fn is_flash_sprite_ready(sprite_num: i16) -> bool {
+    is_flash_instance_ready(sprite_num as i32)
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
 async fn wait_for_flash_ready(sprite_num: i16) {
     for _ in 0..100u32 {
         let ready = is_flash_instance_ready(sprite_num as i32)
@@ -1615,6 +1624,53 @@ impl SpriteDatumHandlers {
                     Err(e) => warn!("sprite direct Flash method '{}' error: {:?}", handler_name, e),
                 }
                 return Ok(DatumRef::Void);
+            }
+        }
+
+        // `sprite(n).PROP.count` compiles to `count(sprite, #PROP)` — an objcall
+        // on the SPRITE, not on the property's value — so it arrives here, after
+        // the sprite's own behaviours have been offered a `count` handler and
+        // declined. Answer the count of the named sprite property.
+        //
+        // The endpoint below returns VOID, which is why this was invisible:
+        // Burnin' Rubber 2's `[M] Event Manager Functions.AddModule` opens its
+        // dispatch with
+        //     pcount = pSprite.scriptInstanceList.count
+        //     if pcount = 1 then …
+        // and a VOID there made every AddModule a silent no-op — no error, no
+        // PutError — so the race ran with none of its per-car modules: no
+        // speedometer, no lightmap lighting, no shadow, no checkpoint manager.
+        //
+        // Only a LIST-valued property answers. Anything else keeps the VOID
+        // rather than inventing a number: `sprite(n).member.count` compiles to
+        // this same shape and means the MEMBER's count (a field's line count),
+        // which this endpoint has no business guessing at.
+        if handler_name == BuiltInSymbol::Count && !args.is_empty() {
+            let counted = reserve_player_mut(|player| {
+                let Ok(sprite_num) = player.get_datum(&datum).to_sprite_ref() else {
+                    return None;
+                };
+                let Ok(prop_name) = player.get_datum(&args[0]).symbol_value() else {
+                    return None;
+                };
+                let prop_datum =
+                    crate::player::score::sprite_get_prop(player, sprite_num, prop_name).ok()?;
+                // `sprite_get_prop` can stash the live (cached) list ref —
+                // `scriptInstanceList` does, so behaviours attached at runtime
+                // via `.add()` are counted too.
+                let prop_datum = match player.last_sprite_prop_ref.take() {
+                    Some(r) => player.get_datum(&r).clone(),
+                    None => prop_datum,
+                };
+                let n = match &prop_datum {
+                    Datum::List(_, items, _) => items.len() as i32,
+                    Datum::PropList(pairs, _) => pairs.len() as i32,
+                    _ => return None,
+                };
+                Some(player.alloc_datum(Datum::Int(n)))
+            });
+            if let Some(r) = counted {
+                return Ok(r);
             }
         }
 

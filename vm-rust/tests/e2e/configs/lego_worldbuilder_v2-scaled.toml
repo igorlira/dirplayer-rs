@@ -1,0 +1,12 @@
+[movie]
+path = "dcr_lego/ClubGames/WorldBuilder2/worldbuilder2/worldbuilder2.dcr"
+
+[test]
+suite = "lego"
+tags = ["2d"]
+
+[external_params]
+# The layout fullscreen uses — canvas sized to the container, movie scaled
+# into it with the aspect preserved. Exercises the identical layout code
+# without a real Fullscreen API, which the browser harness cannot drive.
+swStretchStyle = "meet"

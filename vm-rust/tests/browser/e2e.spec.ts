@@ -11,7 +11,9 @@ const UPDATE_SNAPSHOTS = process.env.SNAPSHOT_UPDATE === "1";
 
 interface TestResult {
   name: string;
-  status: "pass" | "fail";
+  /// "skip" is a test the runner never reached: a Rust panic left the wasm
+  /// instance trapped, so it stopped rather than keep calling into it.
+  status: "pass" | "fail" | "skip";
   error?: string;
 }
 
@@ -19,6 +21,9 @@ interface TestResults {
   tests: TestResult[];
   passed: number;
   failed: number;
+  /// Tests the runner never got to, because a Rust panic left the wasm
+  /// instance trapped and it stopped rather than call into it again.
+  skipped?: number;
   done: boolean;
 }
 
@@ -130,7 +135,21 @@ function processSnapshot(
   return `${(diff.diffRatio * 100).toFixed(3)}% diff`;
 }
 
-test("browser e2e tests", async ({ page }) => {
+// How many browser pages to split the corpus across. Each shard is its own
+// page and therefore its own wasm instance, so sharding buys more than wall
+// clock: a Rust panic can only take down the shard it happens in, and no single
+// heap has to survive the whole corpus. A full sweep died at movie 48 inside
+// dlmalloc's own heap-metadata assertion -- a cumulative-state failure that a
+// smaller slice per page is much less likely to reach.
+//
+// Defaults to 1, i.e. exactly the old single-page behaviour. Raise it with
+// `E2E_SHARDS=4 npm run e2e-test-browser`.
+const SHARDS = Math.max(1, Number(process.env.E2E_SHARDS ?? 1) || 1);
+
+if (SHARDS > 1) test.describe.configure({ mode: "parallel" });
+
+for (let shard = 0; shard < SHARDS; shard++) {
+test(SHARDS > 1 ? `browser e2e tests (shard ${shard + 1}/${SHARDS})` : "browser e2e tests", async ({ page }) => {
   const snapshotErrors: string[] = [];
 
   // Expose snapshot handler so snapshots are saved as they're taken
@@ -151,35 +170,86 @@ test("browser e2e tests", async ({ page }) => {
   // `E2E_CONSOLE=1` forwards the page console to the terminal (optionally
   // filtered by a substring, e.g. `E2E_CONSOLE=PROBE`) — the only way to see
   // `log_test_action` / diagnostic output from inside the wasm test.
+  // Every page console line is written to its own file under
+  // test-results/console/, ALWAYS -- not only when E2E_CONSOLE is set.
+  //
+  // This is the artifact worth keeping from a sweep: the corpus emits a lot of
+  // diagnostic traffic (unimplemented built-ins, value parsing failures,
+  // missing member properties) that is the raw material for triage, and reading
+  // it off interleaved stdout stopped being possible the moment shards began
+  // running side by side. One file per shard keeps each stream in order and
+  // attributable.
+  //
+  // A write stream rather than a buffer flushed at the end: the runs worth
+  // reading are often the ones that die, and a crash must not take the log
+  // with it.
+  const consoleDir = path.resolve(__dirname, "../../..", "test-results", "console");
+  fs.mkdirSync(consoleDir, { recursive: true });
+  const logPath = path.join(
+    consoleDir,
+    SHARDS > 1 ? `shard${shard + 1}-of-${SHARDS}.log` : "console.log"
+  );
+  const logStream = fs.createWriteStream(logPath, { flags: "w" });
+
+  // `E2E_CONSOLE=1` ALSO forwards to the terminal (optionally filtered by a
+  // substring, e.g. `E2E_CONSOLE=PROBE`).
   const consoleFilter = process.env.E2E_CONSOLE;
-  if (consoleFilter) {
-    const needle = consoleFilter === "1" ? "" : consoleFilter;
-    page.on("console", (msg) => {
-      const text = msg.text();
-      if (!needle || text.includes(needle)) console.log(`[page] ${text}`);
-    });
-  }
+  const needle = consoleFilter && consoleFilter !== "1" ? consoleFilter : "";
+  page.on("console", (msg) => {
+    const text = msg.text();
+    logStream.write(text + "\n");
+    if (consoleFilter && (!needle || text.includes(needle))) {
+      console.log(`[page] ${text}`);
+    }
+  });
+  // An uncaught page error never reaches `console`, and that is exactly what a
+  // wasm trap surfaces as -- so it belongs in the log too.
+  page.on("pageerror", (err) => {
+    logStream.write(`[pageerror] ${err.message}\n`);
+  });
 
-  await page.goto("/index.html");
+  await page.goto(SHARDS > 1 ? `/index.html?shard=${shard}&shards=${SHARDS}` : "/index.html");
 
-  // Stop waiting as soon as the harness finishes, a panic hook reports a
-  // Rust panic, or the page accumulates script errors.
+  // Wait for the harness to FINISH, or to declare itself aborted.
+  //
+  // This used to also stop on `__testPanic` being set, or on the first entry in
+  // `__scriptErrors`. Both fire while the runner is still going, and because the
+  // runner only published `__testResults` at the very end, the spec then read
+  // null and reported "harness exited without publishing test results" --
+  // throwing away every test that had already passed. A whole-suite run died
+  // that way twice: an assert_eq! in rasterwerks_settings, and a dlmalloc
+  // heap-metadata assertion 48 movies into the shared heap, the second of which
+  // discarded 47 green results.
+  //
+  // The runner now owns both cases: it records a panic against the test that
+  // raised it, marks the rest skipped, and sets `__testAborted`. Script errors
+  // are still collected and reported below, they just no longer cut the run
+  // short.
   const handle = await page.waitForFunction(
     () => {
       const win = window as any;
       return (
-        win.__testResults?.done === true ||
-        typeof win.__testPanic === "string" ||
-        (Array.isArray(win.__scriptErrors) && win.__scriptErrors.length > 0)
+        win.__testResults?.done === true || typeof win.__testAborted === "string"
       );
     },
-    { timeout: 900_000 }
+    // Just under the Playwright test timeout (5_400_000), so a slow-but-healthy
+    // sweep reports through the normal path instead of being cut off here. The
+    // old 900_000 was already below the wall time of a full run -- the `3d` tag
+    // alone takes ~15.7 min -- so a complete suite could have tripped it while
+    // making perfectly good progress.
+    //
+    // `undefined` for `arg`: the options are the THIRD parameter of
+    // `waitForFunction`, and passing them second makes them the predicate's
+    // argument instead -- silently reinstating the 30 s default timeout.
+    undefined,
+    { timeout: 5_220_000 }
   );
   await handle.dispose();
 
-  const [testResults, panicMessage, scriptErrors, interpStats] = await Promise.all([
+  const [testResults, panicMessage, abortMessage, scriptErrors, interpStats] = await Promise.all([
     page.evaluate(() => ((window as any).__testResults ?? null) as TestResults | null),
     page.evaluate(() => ((window as any).__testPanic ?? null) as string | null),
+    page.evaluate(() => ((window as any).__testAborted ?? null) as string | null),
     page.evaluate(() => ((window as any).__scriptErrors ?? []) as string[]),
     page.evaluate(() => ((window as any).__interpStats ?? null) as string | null),
   ]);
@@ -190,7 +260,10 @@ test("browser e2e tests", async ({ page }) => {
   if (interpStats) {
     const statsDir = path.resolve(__dirname, "../../..", "test-results");
     fs.mkdirSync(statsDir, { recursive: true });
-    const statsPath = path.join(statsDir, "interp-stats.txt");
+    const statsPath = path.join(
+      statsDir,
+      SHARDS > 1 ? `interp-stats-shard${shard + 1}.txt` : "interp-stats.txt"
+    );
     fs.writeFileSync(statsPath, interpStats);
     console.log(`\nInterpreter stats written to ${statsPath}`);
     console.log(interpStats);
@@ -199,7 +272,13 @@ test("browser e2e tests", async ({ page }) => {
   // Collect all errors before acting on them so keep-open can fire first.
   const errors: string[] = [];
 
-  if (panicMessage) {
+  // A panic the runner already attributed to a test is reported through that
+  // test's own result line, so mention it once here as the reason the run
+  // stopped early. `panicMessage` on its own is the residue of a panic raised
+  // OUTSIDE any test (module init, say), which no test result covers.
+  if (abortMessage) {
+    errors.push(`Run aborted: ${abortMessage}`);
+  } else if (panicMessage) {
     errors.push(`Rust panic during browser test:\n${panicMessage}`);
   }
 
@@ -219,12 +298,16 @@ test("browser e2e tests", async ({ page }) => {
     for (const t of testResults.tests) {
       if (t.status === "pass") {
         console.log(`✓ ${t.name}`);
+      } else if (t.status === "skip") {
+        console.log(`- ${t.name} (skipped): ${t.error}`);
       } else {
         console.log(`✗ ${t.name}: ${t.error}`);
       }
     }
+    const skipped = testResults.skipped ?? 0;
     console.log(
-      `${testResults.passed} passed, ${testResults.failed} failed`
+      `${testResults.passed} passed, ${testResults.failed} failed` +
+        (skipped ? `, ${skipped} skipped` : "")
     );
   }
 
@@ -255,6 +338,11 @@ test("browser e2e tests", async ({ page }) => {
     await new Promise<void>(() => {});
   }
 
+  // Flush the page log before anything can throw, so a failing run still
+  // leaves a complete console capture behind.
+  logStream.end();
+  console.log(`Page console log: ${logPath}`);
+
   if (errors.length > 0) {
     throw new Error(errors.join("\n\n"));
   }
@@ -262,3 +350,4 @@ test("browser e2e tests", async ({ page }) => {
   // Assert all tests passed
   expect(testResults!.failed).toBe(0);
 });
+}

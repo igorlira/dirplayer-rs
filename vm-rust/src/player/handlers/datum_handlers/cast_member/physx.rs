@@ -1264,7 +1264,34 @@ impl PhysXPhysicsMemberHandlers {
                 .ok_or_else(|| ScriptError::new("Invalid ConstraintDesc".to_string()))?
         };
         // For D6 args[1] is rb1, not a length.
-        let extra_length = if !is_d6 && args.len() > 1 {
+        //
+        // For a LINEAR joint args[1] is not a length either: the dictionary
+        // signature is `createLinearJoint(ConstraintDesc desc, list orientation)`
+        // and the list is `[axisVector, angleDegrees]` — "the angles to be
+        // maintained as constrained". `to_float()` on that list yields 0.0, so
+        // the orientation used to be discarded outright and the joint had no
+        // angular effect at all. Decode it into the constraint's axis-angle.
+        let is_linear = matches!(kind, PhysXConstraintKind::LinearJoint);
+        let mut orientation: Option<[f64; 4]> = None;
+        if is_linear && args.len() > 1 {
+            if let Datum::List(_, items, _) = player.get_datum(&args[1]) {
+                let items = items.clone();
+                if items.len() >= 2 {
+                    let axis = player.get_datum(&items[0]).to_vector().ok();
+                    let angle = player.get_datum(&items[1]).to_float().unwrap_or(0.0);
+                    if let Some(a) = axis {
+                        // Normalize; a zero axis means "no rotation".
+                        let len = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
+                        orientation = Some(if len > 1e-9 {
+                            [a[0] / len, a[1] / len, a[2] / len, angle]
+                        } else {
+                            [1.0, 0.0, 0.0, 0.0]
+                        });
+                    }
+                }
+            }
+        }
+        let extra_length = if !is_d6 && !is_linear && args.len() > 1 {
             player.get_datum(&args[1]).to_float().unwrap_or(0.0)
         } else {
             0.0
@@ -1297,6 +1324,7 @@ impl PhysXPhysicsMemberHandlers {
         c.stiffness = desc.stiffness;
         c.damping = desc.damping;
         c.rest_length = extra_length;
+        if let Some(o) = orientation { c.orientation = o; }
         physx.state.constraints.push(c);
 
         let object_type = match kind {
@@ -1620,6 +1648,38 @@ impl PhysXPhysicsMemberHandlers {
                 // Box / convex fall through to box AABB until a ray-vs-convex-hull
                 // port lands.
                 _ => rc::raycast_box(rb.half_extents, q, c, origin, dir, distance),
+            };
+            // Drop INITIAL OVERLAP — a solid the ray already starts inside.
+            //
+            // The Gu primitives are faithful ports and signal that case the way
+            // PhysX does: distance exactly 0, position == the ray origin, normal
+            // == -direction. A scene query must not report it, though; PhysX
+            // raycasts report where a ray CROSSES a surface from outside, and a
+            // shape containing the origin has no such crossing.
+            //
+            // AreaZero is the proof, in two places. The player's eye sits inside
+            // its own ~1.8-tall collision proxy, so:
+            //   * `[M] FPS Weapon.Fire_Elite` raycasts from the camera to find
+            //     what the crosshair is on. We returned FPSPlayer1Stand at
+            //     distance 0, the script's own `contains "fpsplayer"` guard threw
+            //     the hit away, and the fallback aimed at `camera + view * 1000`.
+            //     Aiming the muzzle at a point that far away is effectively
+            //     PARALLEL to the view axis (measured: 0.0102° between them), and
+            //     the muzzle is 0.17 to the side of the eye — so every bullet
+            //     landed beside the crosshair instead of on it, at every range.
+            //   * `[PS] FPS`'s ground probe casts from `feet + 0.1` straight down
+            //     and treats a hit within 0.2 as standing. A distance-0 self-hit
+            //     made that unconditionally true, and its `if count = 0` branch —
+            //     the author's own evidence that this ray is expected to return
+            //     NOTHING rather than the player — was dead code.
+            //
+            // Triangle meshes are exempt: they are surfaces, not solids, so there
+            // is no inside for the origin to be in, and a t=0 mesh hit is a
+            // genuine crossing at the ray origin.
+            let hit = match hit {
+                Some(h) if h.distance == 0.0
+                    && !matches!(rb.shape, PhysXShapeKind::ConcaveShape) => None,
+                other => other,
             };
             if let Some(h) = hit { out.push((rb.id, h)); }
         }

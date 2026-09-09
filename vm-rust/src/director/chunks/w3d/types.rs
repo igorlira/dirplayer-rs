@@ -94,6 +94,11 @@ pub struct W3dShader {
     pub render_pass: u32,
     pub texture_layers: Vec<W3dTextureLayer>,
     pub shader_type: W3dShaderType,
+    /// `shader.flat` (Director 11.5 Scripting Dictionary, #standard shader
+    /// property): TRUE renders the mesh with FLAT shading — one colour per
+    /// face — instead of Gouraud, which interpolates across the face. Default
+    /// FALSE.
+    pub flat: bool,
     /// When true, textured models use actual diffuse color for lighting.
     /// When false (default), textured models use white (1,1,1) for lighting.
     pub use_diffuse_with_texture: bool,
@@ -314,6 +319,14 @@ pub struct W3dNode {
     pub near_plane: f32,
     pub far_plane: f32,
     pub fov: f32,
+    /// View node projection: `true` when the IFX view attributes carry bit 0
+    /// (`IFX_VIEW_ORTHOGRAPHIC_PROJECTION`), Director's `camera.projection =
+    /// #orthographic`.
+    pub projection_ortho: bool,
+    /// World units spanned VERTICALLY by an orthographic view — Director's
+    /// `camera.orthoHeight`. Stored in the view block after the viewport rect
+    /// and the target-node name; 0 when the block was too short to carry it.
+    pub ortho_height: f32,
     pub screen_width: i32,
     pub screen_height: i32,
 }
@@ -332,6 +345,8 @@ impl Default for W3dNode {
             near_plane: 1.0,
             far_plane: 1000.0,
             fov: 30.0,
+            projection_ortho: false,
+            ortho_height: 0.0,
             screen_width: 640,
             screen_height: 480,
         }
@@ -490,6 +505,45 @@ pub struct W3dScene {
     pub nodes: Vec<W3dNode>,
     pub lights: Vec<W3dLight>,
     pub texture_images: HashMap<Symbol, Vec<u8>>,
+    /// Per-texture `nearFiltering` (Director 11.5 Scripting Dictionary, 3D
+    /// texture property): TRUE uses bilinear filtering when the texture covers
+    /// more screen space than its source, FALSE samples it unfiltered. The
+    /// documented default is TRUE, so an ABSENT entry means TRUE.
+    ///
+    /// Movies that blit UI text into a texture turn this OFF so the glyphs stay
+    /// crisp — AreaZero's `[M] Text Director` sets it on every string it bakes,
+    /// and ignoring it left the in-game controls list soft enough to be
+    /// unreadable wherever it crossed bright scene geometry.
+    pub texture_near_filtering: HashMap<Symbol, bool>,
+    /// Per-texture `quality` (Director 11.5 Scripting Dictionary, 3D texture
+    /// property): the level of MIPMAPPING applied — `#low` none, `#medium`
+    /// bilinear, `#high` trilinear; documented default `#low`. Stored as the
+    /// symbol the movie set, including the undocumented `#lowFiltered` /
+    /// `#mediumFiltered` / `#highFiltered` spellings that appear in the wild,
+    /// so a script reads back exactly what it wrote.
+    pub texture_quality: HashMap<Symbol, Symbol>,
+    /// Per-texture `renderFormat` (Director 11.5 Scripting Dictionary, 3D
+    /// property): the pixel format the renderer uses for this texture, one of
+    /// `#default`, `#rgba8888`, `#rgba8880`, `#rgba5650`, `#rgba5550`,
+    /// `#rgba5551`, `#rgba4444`. `#default` means "use
+    /// `getRendererServices().textureRenderFormat`"; anything else OVERRIDES
+    /// that global for this texture alone.
+    pub texture_render_format: HashMap<Symbol, Symbol>,
+    /// Per-texture `type` (Director 11.5 Scripting Dictionary, 3D texture
+    /// property): `#importedFromFile` for a texture that came with the W3D,
+    /// `#fromCastMember` for one built from a bitmap member, `#fromImageObject`
+    /// for one built from a Lingo image. Absent = came from the file.
+    ///
+    /// Movies branch on it. Burnin' Rubber's `[PS] LightManager` reads the road's
+    /// lightmap through `case ttexture.type of … #fromCastMember: tmember =
+    /// member(ttexture.name); tWidth = tmember.width`, and uses those dimensions
+    /// to map the ray-cast hit into lightmap pixels; the colour it samples there
+    /// becomes the CAR's `shader.emissive` every frame. Reporting a type outside
+    /// the documented three matched no case arm, so the mapping collapsed and the
+    /// cars raced unlit.
+    pub texture_types: HashMap<Symbol, Symbol>,
+    /// The `(cast_lib, cast_member)` each `#fromCastMember` texture was bound to.
+    pub texture_source_members: HashMap<Symbol, (i32, i32)>,
     pub texture_infos: Vec<W3dTextureInfo>,
     pub skeletons: Vec<W3dSkeleton>,
     pub motions: Vec<W3dMotion>,
@@ -499,17 +553,135 @@ pub struct W3dScene {
     pub raw_meshes: Vec<W3dRawMesh>,
     /// Monotonically increasing counter; bumped whenever mesh geometry changes
     pub mesh_content_version: u64,
+    /// Per-resource write counter, the geometry twin of `texture_write_versions`.
+    /// Lets the renderer carry an unchanged mesh across a rebuild without
+    /// comparing its contents: one resource being rewritten no longer says
+    /// anything about the others. Bump through `bump_mesh`.
+    pub mesh_write_versions: HashMap<Symbol, u64>,
+    /// Bumped when geometry changed but the change could NOT be attributed to
+    /// particular resources (a whole scene merged in). The renderer falls back
+    /// to hashing contents for that rebuild, which is correct but slower — so
+    /// prefer `bump_mesh` wherever the resource is known.
+    pub mesh_bulk_version: u64,
     /// Monotonically increasing counter; bumped whenever texture_images is mutated
     pub texture_content_version: u64,
-    /// Per skinned model (lowercased node name): the biped COM that Director folds
-    /// into the model node at import — the root bone's frame-0 pose from the model's
-    /// reference motion. Recorded here so the renderer strips exactly the matrix the
-    /// parser composed, and the two can never drift apart. See
-    /// `apply_root_com_to_model_nodes`.
+    /// Per-texture write counter, bumped by `put_texture_image` on every write.
+    ///
+    /// The renderer needs to know WHICH texture changed, and it cannot tell from
+    /// the bytes: a HUD readout regenerated from a fixed-size image object
+    /// (Rifleman's clock is always a 64x64 RGBA buffer) writes the exact same
+    /// byte length every second, so a length comparison reports "unchanged"
+    /// forever and the GPU copy freezes at whatever was first uploaded. This
+    /// counter changes on every write regardless of content or size.
+    pub texture_write_versions: HashMap<Symbol, u64>,
+    /// Bumped ONLY when the whole texture set stops being comparable to what the
+    /// GPU holds — `resetWorld` and `revertToWorldDefaults`, which restore an
+    /// earlier scene and therefore REWIND `texture_write_versions` to values the
+    /// renderer has already seen.
+    ///
+    /// Kept separate from `texture_content_version` on purpose. That counter means
+    /// "some texture changed" and is bumped by every ordinary write, including the
+    /// few textures a `cloneModelFromCastmember` copies in; using it to veto GPU
+    /// carry-over made one cloned texture re-decode every JPEG in the member, which
+    /// is most of what made Agent Free Ride's level 2 slow to load and to run.
+    /// Per-texture write counters handle the ordinary case precisely; this epoch
+    /// covers the case they cannot express, where a counter goes BACKWARDS.
+    pub texture_epoch: u64,
+    /// Per skinned model (lowercased node name): the rig's biped COM — the root
+    /// bone's frame-0 pose from the model's reference motion, or from the REST pose
+    /// when the member holds no clip for this rig.
+    ///
+    /// Recorded for EVERY rig, whether or not it was folded into the node, because
+    /// two different consumers need it and they do not agree:
+    ///
+    ///  * the renderer's fold-cancelling strip, which must see only rigs that were
+    ///    actually folded — it gates on `model_com_folded` below;
+    ///  * the clone provenance path (`cloneModelFromCastmember` →
+    ///    `clone_hop_count`), which uses it to REPLACE an idle-clip strip in the
+    ///    destination scene with the rig's own root. Street Sesh clones its skater
+    ///    out of the clip-less "player_mike" and only then clones `player_idle` in;
+    ///    without this the strip picks up `cpy_player2_idle`, whose frame-0 root sits
+    ///    at the pelvis, and buries the skater to the waist. AreaZero's robots are
+    ///    the same shape and walk sideways without it.
+    ///
+    /// See `apply_root_com_to_model_nodes`.
     pub model_root_com: HashMap<String, [f32; 16]>,
+    /// The subset of `model_root_com` that was actually composed into
+    /// `node.transform`. Director folds only when the rig's reference MOTION lives
+    /// in the same cast member (measured — see `apply_root_com_to_model_nodes`), so
+    /// only these may be stripped back out as a cancellation.
+    pub model_com_folded: std::collections::HashSet<String>,
 }
 
 impl W3dScene {
+    /// Write a texture's RGBA/encoded bytes and record that it changed.
+    ///
+    /// Every write to `texture_images` should go through here: it keeps
+    /// `texture_write_versions` (which texture changed) and
+    /// `texture_content_version` (whether ANY texture changed) in step, and the
+    /// renderer relies on both to decide what to re-upload.
+    /// `renderFormat` for a texture. Absent means `#default`, i.e. defer to the
+    /// renderer-wide `textureRenderFormat`.
+    /// `type` for a texture. Absent means it was parsed from the W3D file.
+    pub fn texture_type(&self, name: &Symbol) -> Symbol {
+        self.texture_types
+            .get(name)
+            .copied()
+            .unwrap_or_else(|| Symbol::from_str("importedFromFile"))
+    }
+
+    pub fn texture_render_format(&self, name: &Symbol) -> Symbol {
+        self.texture_render_format
+            .get(name)
+            .copied()
+            .unwrap_or_else(|| Symbol::from_str("default"))
+    }
+
+    /// `quality` for a texture, defaulting to Director's documented `#low`.
+    pub fn texture_quality(&self, name: &Symbol) -> Symbol {
+        self.texture_quality
+            .get(name)
+            .copied()
+            .unwrap_or_else(|| Symbol::from_str("low"))
+    }
+
+    /// `nearFiltering` for a texture, defaulting to Director's documented TRUE.
+    pub fn texture_near_filtering(&self, name: &Symbol) -> bool {
+        self.texture_near_filtering.get(name).copied().unwrap_or(true)
+    }
+
+    /// Record that ONE mesh resource was rewritten.
+    ///
+    /// Every geometry mutation should go through here (or `bump_all_meshes`):
+    /// it keeps the per-resource counter and the scene-wide
+    /// `mesh_content_version` in step, and the renderer needs both — the
+    /// scene-wide one to notice anything changed at all, the per-resource one
+    /// to work out WHAT, without re-deriving it from the vertex data.
+    ///
+    /// Adding or removing a resource needs no bump: a name the renderer has
+    /// never uploaded is uploaded, and one that has disappeared is dropped.
+    pub fn bump_mesh(&mut self, name: Symbol) {
+        *self.mesh_write_versions.entry(name).or_insert(0) += 1;
+        self.mesh_content_version = self.mesh_content_version.wrapping_add(1);
+    }
+
+    /// Geometry changed in a way that cannot be attributed to named resources.
+    pub fn bump_all_meshes(&mut self) {
+        self.mesh_bulk_version = self.mesh_bulk_version.wrapping_add(1);
+        self.mesh_content_version = self.mesh_content_version.wrapping_add(1);
+    }
+
+    /// Write counter for one resource; 0 when it has never been rewritten.
+    pub fn mesh_write_version(&self, name: &Symbol) -> u64 {
+        self.mesh_write_versions.get(name).copied().unwrap_or(0)
+    }
+
+    pub fn put_texture_image(&mut self, name: Symbol, data: Vec<u8>) {
+        self.texture_images.insert(name, data);
+        *self.texture_write_versions.entry(name).or_insert(0) += 1;
+        self.texture_content_version = self.texture_content_version.wrapping_add(1);
+    }
+
     /// Export the scene to OBJ format with default mtl name.
     pub fn export_obj(&self) -> String {
         self.export_obj_with_mtl("scene.mtl")

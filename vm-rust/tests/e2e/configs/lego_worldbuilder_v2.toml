@@ -3,3 +3,4 @@ path = "dcr_lego/ClubGames/WorldBuilder2/worldbuilder2/worldbuilder2.dcr"
 
 [test]
 suite = "lego"
+tags = ["2d"]

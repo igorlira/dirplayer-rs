@@ -1,0 +1,17 @@
+[movie]
+# Skyworks "DK Barrel Blast". `dkbmload.dcr` is a
+# loader that pulls in `dkbmmain.dcr`.
+path = "dcr_misc/dkbarrel/dkbmload.dcr"
+
+[test]
+suite = "misc"
+tags = ["2d"]
+
+# From the original <EMBED>. sw1..sw4 are the Shockwave external params the
+# movie reads via `externalParamValue`; the plugin's bgColor attribute is an
+# HTML-side background and not an external param, so it is not listed here.
+[external_params]
+sw1 = "default.htm"
+sw2 = "Copyright2003Skyworks"
+sw3 = ""
+sw4 = "/asp/leader.asp"

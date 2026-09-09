@@ -85,7 +85,6 @@ define_builtin_symbols! {
     "exitLock" => ExitLock,
     "itemDelimiter" => ItemDelimiter,
     "debugPlaybackEnabled" => DebugPlaybackEnabled,
-    "editShortCutsEnabled" => EditShortCutsEnabled,
     "alertHook" => AlertHook,
     "traceScript" => TraceScript,
     // Movie properties dirplayer supports that the upstream table lacked.
@@ -99,6 +98,18 @@ define_builtin_symbols! {
     "enableFlashLingo" => EnableFlashLingo,
     "preLoadEventAbort" => PreLoadEventAbort,
     "machineType" => MachineType,
+    // NOTE: `editShortCutsEnabled` (capital C) is intentionally NOT a second
+    // entry, for the same reason as `rollOver` below. The table interns
+    // case-insensitively, so both spellings are ONE symbol; a duplicate entry
+    // only decides — by its position — which variant `spur_to_builtin` ends up
+    // holding, and the loser becomes a variant no input can ever produce.
+    //
+    // This one was live: `EditShortCutsEnabled` existed with no handler
+    // anywhere, and `the editShortcutsEnabled = 0` worked solely because the
+    // lower-c entry sat LATER in this table and overwrote it. Reversing the two
+    // lines made every spelling resolve to the unhandled variant, which would
+    // have silently stopped Junk Food Jack's `prepareMovie` from setting it —
+    // no error, just a property that quietly does nothing.
     "editShortcutsEnabled" => EditShortcutsEnabled,
     // 3D object types dirplayer exposes that upstream lacked.
     "collision" => Collision,
@@ -273,7 +284,9 @@ define_builtin_symbols! {
     "listp" => Listp,
     "objectp" => Objectp,
     "voidp" => Voidp,
+    "vectorp" => Vectorp,
     "rgb" => Rgb,
+    "audioFilter" => AudioFilter,
     "paletteIndex" => PaletteIndex,
     "grayscale" => Grayscale,
     "pastels" => Pastels,
@@ -810,6 +823,7 @@ define_builtin_symbols! {
     "adjustColorFilter" => AdjustColorFilter,
     "glowFilter" => GlowFilter,
     "dropShadowFilter" => DropShadowFilter,
+    "bevelFilter" => BevelFilter,
     "brightness" => Brightness,
     "contrast" => Contrast,
     "hue" => Hue,
@@ -871,6 +885,7 @@ define_builtin_symbols! {
     "ambientColor" => AmbientColor,
     "renderer" => Renderer,
     "rendererDeviceList" => RendererDeviceList,
+    "getHardwareInfo" => GetHardwareInfo,
     "colorBufferDepth" => ColorBufferDepth,
     "depthBufferDepth" => DepthBufferDepth,
     "antiAliasingEnabled" => AntiAliasingEnabled,
@@ -952,8 +967,20 @@ define_builtin_symbols! {
     "world" => World,
     "MainA" => MainA,
     "DefaultView" => DefaultView,
-    "DefaultDirectional" => DefaultDirectional,
-    "DefaultAmbient" => DefaultAmbient,
+    // Director's own light pair for a 3D member — an empty one has exactly these two,
+    // and movies address them by index. dirplayer used to invent them under the names
+    // "DefaultDirectional"/"DefaultAmbient", which Director has no counterpart for.
+    "UIDirectional" => UIDirectional,
+    "UIAmbient" => UIAmbient,
+    // `userData` — the per-node property list Director hangs on a model, group,
+    // camera or light. The 3D object getters match property names as STRINGS, so
+    // they never needed it interned; the 3D CAST MEMBER getter resolves through
+    // `into_builtin_or_error` first, and without an entry here it raised
+    // "Symbol 'userData' is not a built-in symbol" before ever reaching a match
+    // arm. Burnin' Rubber 3's `Create3DText` opens every glyph with
+    // `if tmember.userData <> VOID`, so that raise took out the whole 3D-text
+    // menu system.
+    "userData" => UserData,
     "TextMaterial" => TextMaterial,
     "DefaultShader" => DefaultShader,
     "<world>" => _Angle_World,
@@ -988,6 +1015,7 @@ define_builtin_symbols! {
     "getNormalized" => GetNormalized,
     "normalize" => Normalize,
     "crossProduct" => CrossProduct,
+    "perpendicularTo" => PerpendicularTo,
     "cross" => Cross,
     "dotProduct" => DotProduct,
     "dot" => Dot,
@@ -1010,7 +1038,9 @@ define_builtin_symbols! {
     "emitter" => Emitter,
     "bone" => Bone,
     "meshDeformMesh" => MeshDeformMesh,
+    "meshDeformFace" => MeshDeformFace,
     "sds" => Sds,
+    "inker" => Inker,
     "lod" => Lod,
     "synchronized" => Synchronized,
     "exponential" => Exponential,

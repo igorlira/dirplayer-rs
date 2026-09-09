@@ -3,3 +3,4 @@ path = "dcr_intel/MrmLod.dcr"
 
 [test]
 suite = "intel"
+tags = ["3d"]

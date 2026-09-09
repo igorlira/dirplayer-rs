@@ -1,5 +1,7 @@
 mod worldbuilder_v1;
+mod worldbuilder_v1_scaled;
 mod worldbuilder_v2;
+mod worldbuilder_v2_scaled;
 mod supersonic;
 mod roboriders_onyx;
 mod roboriders_frost;
@@ -7,4 +9,6 @@ mod roboriders_dust;
 mod roboriders_lava;
 mod roboriders_swamp;
 mod junkbot_v1;
+mod junkbot_v1_scaled;
 mod junkbot_v2;
+mod junkbot_v2_scaled;

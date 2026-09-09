@@ -142,11 +142,23 @@ pub fn screen_to_ray_shockwave(
     // viewport pixels — mixing the two scales produces wrong ray angles.
     let half_fov_rad = (fov_degrees * 0.5).to_radians();
     let dist_to_proj = (height * 0.5) / half_fov_rad.tan();
-    // Pixel aspect corrects for non-square pixels when viewport aspect ≠ original aspect
-    let orig_aspect = if original_height > 0.0 { original_width / original_height } else { 1.0 };
-    let pixel_aspect = if orig_aspect > 0.0 { (width / height) / orig_aspect } else { 1.0 };
 
-    let film_x = (screen_x - (width - 1.0) * 0.5) * pixel_aspect;
+    // NO pixel-aspect correction — the same correction the orthographic path
+    // above had to drop, for the same reason. The renderer builds the frustum as
+    // `perspective(fov_y, sprite_width / sprite_height)`, i.e. the camera's
+    // fieldOfView is VERTICAL and the horizontal extent follows the viewport
+    // aspect; the member's original (default_rect) aspect never enters it.
+    // Scaling film_x by `(width/height) / original_aspect` therefore skewed the
+    // pick ray horizontally by exactly that ratio whenever a member's authored
+    // rect and its sprite disagreed. Bottle Rocket is a 320x240 member on a
+    // 750x405 sprite, so picking ran at 0.72x the rendered width: its fuse is
+    // drawn at x=392..396 but was pickable only at x=388..390 — no overlap at
+    // all, so clicking the fuse could never launch the rocket.
+    //
+    // With this gone the ray is the exact inverse of the render projection:
+    // film_x / dist_to_proj == x_ndc * (width/height) * tan(fov/2).
+    let _ = (original_width, original_height);
+    let film_x = screen_x - (width - 1.0) * 0.5;
     let film_y = (height - 1.0) * 0.5 - screen_y;
     let film_z = -dist_to_proj;
 
@@ -176,7 +188,73 @@ pub fn raycast_scene(
     scene: &W3dScene,
     max_dist: f32,
 ) -> Option<RayHit> {
-    raycast_scene_multi(ray, scene, max_dist, 1, None, None, None).into_iter().next()
+    raycast_scene_multi(ray, scene, max_dist, 1, None, None, None, None).into_iter().next()
+}
+
+/// Local-space AABB of one model resource's geometry, or `None` when it has no
+/// vertices. Computed once per resource per ray cast and reused across every
+/// node that instances it — `#maxDistance` culling must not cost a pass over
+/// the geometry per node.
+fn resource_local_aabb(scene: &W3dScene, resource: &Symbol) -> Option<([f32; 3], [f32; 3])> {
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    let mut any = false;
+    {
+        let mut visit = |positions: &[[f32; 3]]| {
+            for p in positions {
+                for i in 0..3 {
+                    if p[i] < min[i] { min[i] = p[i]; }
+                    if p[i] > max[i] { max[i] = p[i]; }
+                }
+                any = true;
+            }
+        };
+        if let Some(meshes) = scene.clod_meshes.get(resource) {
+            for mesh in meshes {
+                visit(&mesh.positions);
+            }
+        }
+        for mesh in scene.raw_meshes.iter().filter(|m| m.name == *resource) {
+            visit(&mesh.positions);
+        }
+    }
+    if any { Some((min, max)) } else { None }
+}
+
+/// World-space bounding sphere of a local AABB placed by `world_transform`:
+/// the eight transformed corners, their midpoint as the centre and the farthest
+/// corner as the radius. A corner-derived sphere is never tighter than the true
+/// one, and for `#maxDistance` looser only means MORE models are considered —
+/// which the ray then rejects on its own.
+fn aabb_world_sphere(
+    (min, max): ([f32; 3], [f32; 3]),
+    world_transform: &[f32; 16],
+) -> ([f32; 3], f32) {
+    let mut corners = [[0.0f32; 3]; 8];
+    for (i, c) in corners.iter_mut().enumerate() {
+        let x = if i & 1 == 0 { min[0] } else { max[0] };
+        let y = if i & 2 == 0 { min[1] } else { max[1] };
+        let z = if i & 4 == 0 { min[2] } else { max[2] };
+        *c = transform_point_4x4(world_transform, x, y, z);
+    }
+    let mut lo = corners[0];
+    let mut hi = corners[0];
+    for c in &corners[1..] {
+        for i in 0..3 {
+            if c[i] < lo[i] { lo[i] = c[i]; }
+            if c[i] > hi[i] { hi[i] = c[i]; }
+        }
+    }
+    let center = [
+        (lo[0] + hi[0]) * 0.5,
+        (lo[1] + hi[1]) * 0.5,
+        (lo[2] + hi[2]) * 0.5,
+    ];
+    let radius = ((hi[0] - center[0]).powi(2)
+        + (hi[1] - center[1]).powi(2)
+        + (hi[2] - center[2]).powi(2))
+        .sqrt();
+    (center, radius)
 }
 
 /// Test ray against all meshes in a scene, returning up to max_hits sorted by distance.
@@ -190,8 +268,48 @@ pub fn raycast_scene_multi(
     node_transforms: Option<&std::collections::HashMap<Symbol, [f32; 16]>>,
     excluded_nodes: Option<&std::collections::HashSet<Symbol>>,
     included_nodes: Option<&std::collections::HashSet<Symbol>>,
+    // Per-model animation state: (model, skeleton) -> (motion name, time, rootLock,
+    // root strip). Supplied by the player, which owns the bonesPlayer state the
+    // renderer draws from; passing it as a closure keeps this module free of
+    // player types. `None` disables skinned raycasting and tests bind-pose
+    // geometry.
+    anim: Option<&dyn Fn(Symbol, Symbol) -> Option<(Option<Symbol>, f32, bool, [f32; 16])>>,
 ) -> Vec<RayHit> {
     let mut all_hits: Vec<RayHit> = Vec::new();
+
+    // Progressive tightening. `modelsUnderRay` returns the NEAREST `max_hits`
+    // models, so once that many are in hand nothing beyond the current worst can
+    // survive — the bound can shrink to it and prune the rest of the scene.
+    //
+    // This matters because `maxDistance` is optional in Director and therefore
+    // UNBOUNDED by default (measured: a ray with no maxDistance returns a hit at
+    // distance 499921). Without tightening, an unbounded ray tests every triangle
+    // of every model in the member: level 2 of Agent Free Ride went from ~97 to
+    // ~198 ms/frame purely from that.
+    //
+    // `max_dist` is `#maxDistance`, which is NOT a cutoff on the intersection.
+    // Director 11.5 Scripting Dictionary, `modelsUnderRay`:
+    //
+    //   maxDistance — "The maximum distance from the world position specified by
+    //   locationVector. If a MODEL'S BOUNDING SPHERE is within the maximum
+    //   distance specified, THAT MODEL IS INCLUDED. If the bounding sphere is in
+    //   range, then it may contain polygons in range and thus might be
+    //   intersected."
+    //
+    // So it selects MODELS by their bounding sphere and then intersects their
+    // polygons with no distance limit at all — a hit may come back far beyond
+    // maxDistance. Treating it as a hit-distance cutoff broke thehillshaveeyes:
+    // `_controller_FPS.checkFloor` casts straight down with `#maxDistance: 100`
+    // to seat the player on `L_C_floor`, but the mine floor under the spawn is
+    // ~530 units below. Director includes the model (the ray starts well inside
+    // its 3378-unit bounding sphere), returns the hit at 530, and the player
+    // stands on the ground; clamped to 100 the ray found nothing and the movie —
+    // which has no gravity, only this snap — left the player floating ~480 units
+    // above the mine for the whole game.
+    //
+    // The hit-distance bound therefore starts UNBOUNDED and is only ever
+    // tightened by the progressive pruning below.
+    let mut work_max = f32::INFINITY;
 
     // Name -> node index, built once per call. The world transform of each model
     // is accumulated by walking its parent chain, and each level did
@@ -208,6 +326,12 @@ pub fn raycast_scene_multi(
         .enumerate()
         .map(|(i, n)| (n.name, i))
         .collect();
+
+    // Local AABB per model resource, filled on demand for the `#maxDistance`
+    // cull below. Scoped to the call for the same reason `node_index` is: the
+    // scene's geometry changes at runtime.
+    let mut local_aabb_cache: std::collections::HashMap<Symbol, Option<([f32; 3], [f32; 3])>> =
+        std::collections::HashMap::new();
 
     // For each model node, find its mesh data and test
     for node in scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Model) {
@@ -288,6 +412,65 @@ pub fn raycast_scene_multi(
             origin: transform_point_4x4(&inv_transform, ray.origin[0], ray.origin[1], ray.origin[2]),
             direction: transform_dir_4x4(&inv_transform, ray.direction[0], ray.direction[1], ray.direction[2]),
         };
+        // `transform_dir_4x4` NORMALISES, so a scaled model's local parametric
+        // distance is not the world distance and a world-space bound cannot be
+        // handed to the local mesh test. Tighten only for unit-scale models —
+        // exact there — and leave scaled ones on the caller's original bound,
+        // exactly as before. The world-space filter below uses `work_max`
+        // unconditionally, which is always valid.
+        let unit_scale = {
+            let l = |a: usize, b: usize, c: usize| {
+                (world_transform[a] * world_transform[a]
+                    + world_transform[b] * world_transform[b]
+                    + world_transform[c] * world_transform[c]).sqrt()
+            };
+            (l(0, 1, 2) - 1.0).abs() < 1e-3
+                && (l(4, 5, 6) - 1.0).abs() < 1e-3
+                && (l(8, 9, 10) - 1.0).abs() < 1e-3
+        };
+        let node_max = if unit_scale { work_max } else { f32::INFINITY };
+
+        // `#maxDistance` model cull: skip the whole model when its world-space
+        // bounding sphere is farther than maxDistance from the ray's origin.
+        // This is the only thing maxDistance does, and it is also what keeps an
+        // unbounded ray affordable — a far model costs one sphere test instead
+        // of a pass over its triangles. Runs before the skinning below so a
+        // culled model costs no pose either; the AABB is the BIND pose, which
+        // is what the sphere's generous corner-derived radius is there to
+        // absorb.
+        if max_dist.is_finite() {
+            let aabb = *local_aabb_cache
+                .entry(*resource)
+                .or_insert_with(|| resource_local_aabb(scene, resource));
+            if let Some(aabb) = aabb {
+                let (center, radius) = aabb_world_sphere(aabb, &world_transform);
+                let dx = center[0] - ray.origin[0];
+                let dy = center[1] - ray.origin[1];
+                let dz = center[2] - ray.origin[2];
+                let to_center = (dx * dx + dy * dy + dz * dz).sqrt();
+                if to_center - radius > max_dist {
+                    continue;
+                }
+            }
+        }
+        // Skinned models are tested against their POSED geometry. `anim` supplies
+        // the same (motion, time, rootLock) the renderer is drawing with, so the
+        // hit volume tracks the body instead of the bind pose. `None` (no rig, or
+        // a caller that passed no animation state) falls through to the raw mesh,
+        // which is correct for rigid geometry.
+        let skin_pose: Option<Vec<[f32; 16]>> = anim.and_then(|a| {
+            let skeleton = scene.skeletons.iter()
+                .find(|s| s.name == *resource && s.bones.len() > 1)?;
+            let (motion, time, root_lock, relinv) = a(node.name, skeleton.name)?;
+            Some(super::skeleton::build_skinning_matrices(
+                skeleton,
+                motion.and_then(|m| scene.motions.iter().find(|x| x.name == m)),
+                time,
+                root_lock,
+                &relinv,
+            ))
+        });
+
         // Handedness of this node's world transform. The ray is tested in LOCAL
         // space against a normal built as cross(e1,e2) from the local winding, but
         // the front/back test below is a statement about WORLD space. A transform
@@ -391,7 +574,20 @@ pub fn raycast_scene_multi(
                     }
                 }
                 let tc = mesh.tex_coords.first().map(|v| v.as_slice());
-                if let Some(mut hit) = raycast_mesh(&local_ray, &mesh.positions, &mesh.normals, &mesh.faces, tc, node.name, (mi + 1) as u32, max_dist, cull_flip) {
+                // Pose the mesh before intersecting it. A skinned model's drawn
+                // geometry is `skin_mat * vertex`, so testing the raw (BIND) mesh
+                // hit a T-pose standing wherever the bind pose rests — for
+                // Rifleman's soldiers that is sunk into the ground, and only the
+                // belly, which barely moves relative to the skeleton root,
+                // overlapped the animated body enough to be shootable.
+                let posed = skin_pose.as_ref().and_then(|mats| {
+                    if mesh.bone_indices.is_empty() { return None; }
+                    Some(super::skeleton::skin_positions(
+                        &mesh.positions, &mesh.bone_indices, &mesh.bone_weights, mats,
+                    ))
+                });
+                let positions = posed.as_deref().unwrap_or(&mesh.positions);
+                if let Some(mut hit) = raycast_mesh(&local_ray, positions, &mesh.normals, &mesh.faces, tc, node.name, (mi + 1) as u32, node_max, cull_flip) {
                     // Transform hit position and vertices back to world space
                     hit.position = transform_point_4x4(&world_transform, hit.position[0], hit.position[1], hit.position[2]);
                     hit.normal = transform_dir_4x4(&world_transform, hit.normal[0], hit.normal[1], hit.normal[2]);
@@ -402,7 +598,7 @@ pub fn raycast_scene_multi(
                     let dy = hit.position[1] - ray.origin[1];
                     let dz = hit.position[2] - ray.origin[2];
                     hit.distance = (dx*dx + dy*dy + dz*dz).sqrt();
-                    if hit.distance <= max_dist {
+                    if hit.distance <= work_max {
                         all_hits.push(hit);
                     }
                 }
@@ -413,7 +609,7 @@ pub fn raycast_scene_multi(
         for (mi, mesh) in scene.raw_meshes.iter().enumerate() {
             if mesh.name == *resource {
                 let tc = if !mesh.tex_coords.is_empty() { Some(mesh.tex_coords.as_slice()) } else { None };
-                if let Some(mut hit) = raycast_mesh(&local_ray, &mesh.positions, &mesh.normals, &mesh.faces, tc, node.name, (mi + 1) as u32, max_dist, cull_flip) {
+                if let Some(mut hit) = raycast_mesh(&local_ray, &mesh.positions, &mesh.normals, &mesh.faces, tc, node.name, (mi + 1) as u32, node_max, cull_flip) {
                     hit.position = transform_point_4x4(&world_transform, hit.position[0], hit.position[1], hit.position[2]);
                     hit.normal = transform_dir_4x4(&world_transform, hit.normal[0], hit.normal[1], hit.normal[2]);
                     for v in &mut hit.vertices {
@@ -423,10 +619,20 @@ pub fn raycast_scene_multi(
                     let dy = hit.position[1] - ray.origin[1];
                     let dz = hit.position[2] - ray.origin[2];
                     hit.distance = (dx*dx + dy*dy + dz*dz).sqrt();
-                    if hit.distance <= max_dist {
+                    if hit.distance <= work_max {
                         all_hits.push(hit);
                     }
                 }
+            }
+        }
+
+        // Enough hits in hand: shrink the bound to the current worst so the
+        // remaining models are pruned by distance instead of triangle-tested.
+        if max_hits > 0 && all_hits.len() >= max_hits {
+            all_hits.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
+            all_hits.truncate(max_hits);
+            if let Some(worst) = all_hits.last() {
+                work_max = work_max.min(worst.distance);
             }
         }
     }
@@ -452,7 +658,7 @@ fn raycast_mesh(
     positions: &[[f32; 3]],
     _normals: &[[f32; 3]],
     faces: &[[u32; 3]],
-    tex_coords: Option<&[[f32; 2]]>,
+    _tex_coords: Option<&[[f32; 2]]>,
     model_name: Symbol,
     mesh_id: u32,
     max_dist: f32,
@@ -507,7 +713,26 @@ fn raycast_mesh(
                         ray.origin[1] + ray.direction[1] * t,
                         ray.origin[2] + ray.direction[2] * t,
                     ];
-                    let uv = interpolate_uv(tex_coords, i0, i1, i2, u, v);
+                    // Director 11.5 Scripting Dictionary, modelsUnderLoc /
+                    // modelsUnderRay: "#uvCoord is a property list with
+                    // properties #u and #v that represent the u and v
+                    // BARYCENTRIC coordinates of the face." Not the interpolated
+                    // texture coordinate this used to hand back — a different
+                    // quantity, which can be negative or outside [0,1].
+                    //
+                    // Scripts reconstruct the hit point from it, and that only
+                    // works with barycentrics. Burnin' Rubber 3's GetAlphaPixel
+                    // (the alpha gate every #alpha 3D button is clicked through)
+                    // does exactly that against the face's own UV triangle:
+                    //     tUVector = (tLocB - tLocA) * tUVCoord.u
+                    //     tVVector = (tLocC - tLocA) * tUVCoord.V
+                    //     tPos     = tLocA + tUVector + tVVector
+                    //     tAlpha   = tImage.extractAlpha().getPixel(tPos)
+                    // A + u(B-A) + v(C-A) IS the barycentric reconstruction of
+                    // the hit point. Fed texture UVs, tPos landed off the image,
+                    // getPixel raised, and the raise took the whole enterFrame
+                    // with it — so no alpha-tested button ever lit up.
+                    let uv = [u, v];
                     closest = Some(RayHit {
                         model_name: model_name.to_string(),
                         distance: t,
@@ -723,7 +948,8 @@ fn raycast_bvh(
                             ray.origin[1] + ray.direction[1] * t,
                             ray.origin[2] + ray.direction[2] * t,
                         ];
-                        let uv = interpolate_uv(tex_coords, i0, i1, i2, u, v);
+                        // Barycentric — see the note in raycast_mesh.
+                        let uv = [u, v];
                         closest = Some(RayHit {
                             model_name: model_name.to_string(),
                             distance: t,
@@ -754,21 +980,6 @@ fn raycast_bvh(
             }
         }
     }
-}
-
-/// Interpolate UV coordinates using barycentric coords (u, v) from ray-triangle intersection.
-/// The barycentric weights are: w0 = 1-u-v, w1 = u, w2 = v.
-fn interpolate_uv(tex_coords: Option<&[[f32; 2]]>, i0: usize, i1: usize, i2: usize, u: f32, v: f32) -> [f32; 2] {
-    if let Some(tc) = tex_coords {
-        if i0 < tc.len() && i1 < tc.len() && i2 < tc.len() {
-            let w0 = 1.0 - u - v;
-            return [
-                w0 * tc[i0][0] + u * tc[i1][0] + v * tc[i2][0],
-                w0 * tc[i0][1] + u * tc[i1][1] + v * tc[i2][1],
-            ];
-        }
-    }
-    [0.0, 0.0]
 }
 
 // ─── Vector math helpers ───

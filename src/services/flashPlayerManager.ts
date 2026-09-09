@@ -26,6 +26,32 @@ interface FlashInstance {
   spriteNum: number;     // Director sprite number this instance belongs to
   castLib: number;       // SWF source cast member (diagnostics + cleanup)
   castMember: number;
+  /// This instance's key in the `instances` map (the (spriteNum, castLib,
+  /// castMember) triple) — stored so async continuations can re-look themselves
+  /// up without recomputing.
+  key: string;
+  /// True while this instance is the channel's ACTIVE one: it renders (frame
+  /// capture pushes into dirplayer) and spriteNum-addressed Lingo calls resolve
+  /// to it. A WARM instance (pre-created at movie load for a triple the score
+  /// will show later) is unbound: parked at frame 1, root-stopped, no capture.
+  bound: boolean;
+  /// Content signature of the SWF bytes this instance was created from (see
+  /// swfDataSig). A later load for the same triple with a different signature
+  /// means the member's bytes were replaced (cast-lib reload) — the instance
+  /// must be destroyed and cold-created, never reused.
+  dataSig: string;
+  /// Set when a bind request arrives while this (warm) instance is still mid-
+  /// creation: the creation's `finally` completes the bind instead of parking.
+  pendingBind: { width: number; height: number; assertedFrame: number } | null;
+  /// Flash→Director callbacks (getURL("event:…"/"lingo:…"), fscommand) fired
+  /// while UNBOUND. A warm SWF runs its frame-1 actions at creation — rifleman's
+  /// storage gate is a one-frame SWF whose only job is
+  /// `getURL("event:flash_start_game")` — and dispatching that into the movie
+  /// while the sprite isn't on stage yet jumped the playhead over the whole
+  /// init sequence. Queue them and replay at bind, which is when the cold path
+  /// would have fired them (instance creation happens with the sprite on
+  /// stage). If the instance never binds, the events are correctly never seen.
+  pendingEvents: Array<{ kind: 'event' | 'lingo' | 'fscommand'; body: string }>;
   rufflePlayer: any; // RufflePlayerElement (direct) or stub element (bridge mode)
   bridgeId: string | null; // Set when this instance is driven by the main-world bridge
   container: HTMLDivElement;
@@ -35,10 +61,11 @@ interface FlashInstance {
   nativeW: number; // SWF native stage size (detail floor for resizes); 0 if unknown
   nativeH: number;
   animFrameId: number | null;
-  /// Becomes true only after the SWF has loaded AND the 3s AS init wait
-  /// has elapsed AND the inheritance/queue replay has finished. Lingo
-  /// calls (goTo / play / stop / rewind) that arrive before this is
-  /// true are queued instead of going to the half-initialised player.
+  /// Becomes true only after the SWF has loaded AND its ActionScript has
+  /// initialized (polled for a live root timeline, capped at 3s) AND the
+  /// inheritance/queue replay has finished. Lingo calls (goTo / play / stop /
+  /// rewind) that arrive before this is true are queued instead of going to
+  /// the half-initialised player.
   ready: boolean;
   /// Mirrors the Director Flash member property of the same name.
   /// When true we pass `autoplay: 'off'` to Ruffle's loadConfig (so
@@ -66,6 +93,29 @@ const instances = new Map<string, FlashInstance>();
 
 // Track pending Flash instance creations so the WASM frame loop can wait for them
 let flashLoadingCount = 0;
+
+// Movie-load warm-up bookkeeping. While warm instance creations are in flight
+// (and only then), `dirplayer_isFlashLoading` reports true so the Rust frame
+// loop holds the movie at LOAD time — where waiting is expected — instead of
+// racing playback against instance readiness. Never raised during playback:
+// transient in-game spawns (bogey_nights' splashes) are non-warm creates and
+// leave these untouched. The deadline is a safety valve so a broken SWF can't
+// hold the movie hostage.
+let warmupPending = 0;
+let warmupDeadlineMs = 0;
+const WARMUP_MAX_HOLD_MS = 10000;
+
+// Creations currently in flight, keyed by triple. Guards against starting a
+// SECOND Ruffle player for the same key when a load dispatch lands while the
+// triple's (warm) creation hasn't yet registered itself in `instances` — the
+// two players would share one map slot and the first's `finally` would mark the
+// second ready before its AS init finished. A load that hits an in-flight
+// creation records a bind request instead; the creation's `finally` applies it.
+interface CreateInFlight {
+  warm: boolean;
+  bindRequest: { spriteNum: number; width: number; height: number; assertedFrame: number } | null;
+}
+const creatingKeys = new Map<string, CreateInFlight>();
 
 // Track when getVariable/callFunction is called on a non-existent instance.
 // This signals the frame loop to wait — the rendering loop will dispatch
@@ -351,32 +401,78 @@ function getSocketProxyConfig(): Array<{host: string, port: number, proxyUrl: st
 // it even when the host page doesn't call `configureFlashManager`.
 // Re-evaluates `getSocketProxyConfig` on every call so dev defaults +
 // runtime-supplied entries both stay live.
+//
+// An entry matches by host and port, with two wildcards so a host page can
+// express "route this whole server through the proxy" without enumerating
+// every address the movie might dial (CokeStudios' gateway address is baked
+// into the movie's own casts, and differs between the archived cut and a
+// self-hosted one):
+//   host: "*"  matches any host
+//   port: 0    matches any port
+// The chosen `proxyUrl` may then reference the movie-side values it replaced
+// as `${host}` / `${port}` — e.g. `ws://127.0.0.1:${port}` forwards a whole
+// range of ports to a local WS-TCP proxy listening on the same numbers.
+// Exact entries are preferred over wildcard ones regardless of list order.
 (window as any).dirplayerResolveSocketUrl = (host: string, port: number): string => {
   const proxies = getSocketProxyConfig();
+  const expand = (url: string) =>
+    url.replace(/\$\{host\}/g, host).replace(/\$\{port\}/g, String(port));
+  let wildcard: string | null = null;
   for (const entry of proxies) {
-    if (entry.host.toLowerCase() === host.toLowerCase() && entry.port === port) {
-      return entry.proxyUrl;
+    const hostOk = entry.host === "*" || entry.host.toLowerCase() === host.toLowerCase();
+    const portOk = entry.port === 0 || entry.port === port;
+    if (!hostOk || !portOk) continue;
+    if (entry.host !== "*" && entry.port !== 0) {
+      return expand(entry.proxyUrl); // exact match wins outright
     }
+    if (wildcard === null) wildcard = expand(entry.proxyUrl);
   }
-  return "";
+  return wildcard ?? "";
 };
 
-// Each Flash sprite has its own Ruffle instance — keyed by the Director
-// sprite number. Sprite numbers are unique within a movie so castLib /
-// castMember don't need to be part of the key.
-function instanceKey(spriteNum: number): string {
-  return `${spriteNum}`;
+// Instances are keyed by the full (channel, castLib, castMember) triple so a
+// channel that shows member A on frame 1 and member B on frame 50 can hold BOTH
+// — one bound (rendering + Lingo target), the other warm and waiting. This is
+// what makes the movie-load warm-up possible at all (see warmFlashInstance):
+// with the old channel-only key the two members fought over one slot.
+function tripleKey(spriteNum: number, castLib: number, castMember: number): string {
+  return `${spriteNum}:${castLib}:${castMember}`;
 }
 
-// Publish the count of live Ruffle instances so dirplayer's Rust frame loop can
+// Which instance is currently BOUND to each channel — the one that renders and
+// that all spriteNum-addressed Lingo bridge calls (getVariable / goToFrame /
+// play / …) resolve to. Warm (unbound) instances are invisible to those calls.
+const activeByChannel = new Map<number, string>();
+
+function resolveActive(spriteNum: number): FlashInstance | undefined {
+  const key = activeByChannel.get(spriteNum);
+  return key !== undefined ? instances.get(key) : undefined;
+}
+
+// Cheap content signature so a warm instance is never reused for a member whose
+// BYTES changed under the same ref (storyscramble reloads cast lib 2 in place:
+// member 2:1 keeps its number but is a different SWF). Length + a sparse byte
+// sum is enough to tell "same SWF" from "replaced SWF" without hashing MBs.
+function swfDataSig(data: Uint8Array): string {
+  let sum = 0;
+  const step = Math.max(1, Math.floor(data.length / 64));
+  for (let i = 0; i < data.length; i += step) sum = (sum + data[i] * (i + 1)) >>> 0;
+  return `${data.length}:${sum}`;
+}
+
+// Publish the count of BOUND Ruffle instances so dirplayer's Rust frame loop can
 // floor its per-frame yield while any Flash sprite is on stage. The offscreen
 // Ruffle instances self-tick via requestAnimationFrame; a tight high-tempo
 // Director loop (DGS puppetTempo(999) guest-gate poll) otherwise hogs the main
 // thread and starves those RAF ticks, so a text field whose htmlText was just
 // updated (the preloader login links) never re-renders. Only affects movies
-// running faster than ~60fps — see the yield logic in player/mod.rs.
+// running faster than ~60fps — see the yield logic in player/mod.rs. Warm
+// unbound instances are parked (root-stopped, no capture) and deliberately
+// excluded so pre-warming a big score doesn't change the yield behavior.
 function syncActiveFlashCount(): void {
-  (window as any).__dirplayerActiveFlashCount = instances.size;
+  let bound = 0;
+  instances.forEach((inst) => { if (inst.bound) bound++; });
+  (window as any).__dirplayerActiveFlashCount = bound;
 }
 
 /**
@@ -402,7 +498,7 @@ function dispatchMouseEvent(
   spriteW?: number,
   spriteH?: number,
 ): boolean {
-  const inst = instances.get(instanceKey(spriteNum));
+  const inst = resolveActive(spriteNum);
   if (!inst) {
     // No Flash instance for this sprite (e.g. a click on a non-Flash sprite, or
     // before the SWF instance is created) — nothing to forward.
@@ -492,7 +588,7 @@ export function dispatchFlashLingo(body: string): boolean {
  * Ruffle fork's `dirplayer_addOpenUrlHandler` patch; until it lands the
  * call is a no-op and navigations stay denied via `openUrlMode: 'deny'`.
  */
-function registerEventUrlHandler(player: any, castLib: number, castMember: number): void {
+function registerEventUrlHandler(player: any, castLib: number, castMember: number, instance: FlashInstance): void {
   if (typeof player?.dirplayer_addOpenUrlHandler !== 'function') {
     console.warn(
       `[Flash] ${castLib}:${castMember}: dirplayer_addOpenUrlHandler missing on Ruffle player — ` +
@@ -511,6 +607,12 @@ function registerEventUrlHandler(player: any, castLib: number, castMember: numbe
     // `lingo:bdPlaySound(...)`). Swallow the navigation either way.
     if (url.startsWith('lingo:')) {
       const body = url.slice('lingo:'.length).trim();
+      // UNBOUND (warm) instance: the sprite isn't on stage yet — queue the
+      // callback and replay it at bind (see FlashInstance.pendingEvents).
+      if (!instance.bound) {
+        instance.pendingEvents.push({ kind: 'lingo', body });
+        return true;
+      }
       const handled = dispatchFlashLingo(body);
       if (!handled) {
         console.warn(
@@ -523,6 +625,10 @@ function registerEventUrlHandler(player: any, castLib: number, castMember: numbe
       return false; // not ours — let Ruffle's openUrlMode decide
     }
     const body = url.slice('event:'.length).trim();
+    if (!instance.bound) {
+      instance.pendingEvents.push({ kind: 'event', body });
+      return true;
+    }
     const handled = dispatchFlashEvent(castLib, castMember, body);
     if (!handled) {
       console.warn(
@@ -551,7 +657,7 @@ function registerEventUrlHandler(player: any, castLib: number, castMember: numbe
  * the command name is the handler; any args string is appended so
  * dispatch_flash_event tokenises trailing args.
  */
-function registerFSCommandHandler(player: any, castLib: number, castMember: number): void {
+function registerFSCommandHandler(player: any, castLib: number, castMember: number, instance: FlashInstance): void {
   // Prefer the fork's namespaced `dirplayer_addFSCommandHandler` (binds only to
   // our player, never a stock Ruffle sharing the page); fall back to the stock
   // `addFSCommandHandler` if an older bundle is loaded.
@@ -568,6 +674,11 @@ function registerFSCommandHandler(player: any, castLib: number, castMember: numb
     const body = (typeof args === 'string' && args.trim())
       ? `${command.trim()} ${args.trim()}`
       : command.trim();
+    if (!instance.bound) {
+      // Unbound (warm) instance — queue and replay at bind.
+      instance.pendingEvents.push({ kind: 'fscommand', body });
+      return;
+    }
     const handled = dispatchFlashEvent(castLib, castMember, body);
     if (!handled) {
       console.warn(
@@ -587,7 +698,7 @@ function registerFSCommandHandler(player: any, castLib: number, castMember: numb
  * Lingo dispatch runs. Neopets' DGS include movie fires `fscommand("FlashLoader
  * Loaded")` this way; without it the loader stalls at load_state 6.
  */
-function registerBridgeCallbacks(bridgeId: string, castLib: number, castMember: number): void {
+function registerBridgeCallbacks(bridgeId: string, castLib: number, castMember: number, instance: FlashInstance): void {
   bridgeOnEvent(bridgeId, (name, detail) => {
     const d = detail as { url?: string; target?: string; command?: string; args?: string } | undefined;
     if (!d) return;
@@ -595,9 +706,13 @@ function registerBridgeCallbacks(bridgeId: string, castLib: number, castMember: 
       const url = d.url;
       if (typeof url !== 'string') return;
       if (url.startsWith('lingo:')) {
-        dispatchFlashLingo(url.slice('lingo:'.length).trim());
+        const body = url.slice('lingo:'.length).trim();
+        if (!instance.bound) instance.pendingEvents.push({ kind: 'lingo', body });
+        else dispatchFlashLingo(body);
       } else if (url.startsWith('event:')) {
-        dispatchFlashEvent(castLib, castMember, url.slice('event:'.length).trim());
+        const body = url.slice('event:'.length).trim();
+        if (!instance.bound) instance.pendingEvents.push({ kind: 'event', body });
+        else dispatchFlashEvent(castLib, castMember, body);
       }
     } else if (name === 'fsCommand') {
       const command = d.command;
@@ -606,7 +721,8 @@ function registerBridgeCallbacks(bridgeId: string, castLib: number, castMember: 
       const body = (typeof args === 'string' && args.trim())
         ? `${command.trim()} ${args.trim()}`
         : command.trim();
-      dispatchFlashEvent(castLib, castMember, body);
+      if (!instance.bound) instance.pendingEvents.push({ kind: 'fscommand', body });
+      else dispatchFlashEvent(castLib, castMember, body);
     }
   });
   void bridgeRegisterCallbackForwarders(bridgeId);
@@ -703,7 +819,7 @@ function parseSwfStageSize(data: Uint8Array): { w: number; h: number } | null {
  */
 function setFlashSize(spriteNum: number, w: number, h: number): void {
   if (spriteNum < 0) return; // off-screen 3D texture: fixed size
-  const inst = instances.get(instanceKey(spriteNum));
+  const inst = resolveActive(spriteNum);
   if (!inst) return;
   let tw = Math.max(1, Math.round(w));
   let th = Math.max(1, Math.round(h));
@@ -740,8 +856,9 @@ export async function createFlashInstance(
   height: number,
   pausedAtStart: boolean = false,
   assertedFrame: number = -1,
+  warm: boolean = false,
 ): Promise<void> {
-  const key = instanceKey(spriteNum);
+  const key = tripleKey(spriteNum, castLib, castMember);
 
   // Skip when Flash is explicitly disabled by the host. The Lingo
   // bridge functions all early-return on missing instance, so the
@@ -754,8 +871,48 @@ export async function createFlashInstance(
     return;
   }
 
-  // Destroy existing instance for this sprite if any.
-  destroyFlashInstance(spriteNum);
+  const sig = swfDataSig(swfData);
+
+  // Warm-hit path: an instance for this exact triple already exists (pre-created
+  // by the movie-load warm-up, or left over from an earlier span). If the SWF
+  // bytes are unchanged, bind it — near-instant, no Ruffle creation, no AS-init
+  // wait. A signature mismatch means the member's bytes were replaced under the
+  // same ref (storyscramble's in-place cast-lib reload) — destroy and recreate.
+  const existing = instances.get(key);
+  if (existing) {
+    if (existing.dataSig === sig) {
+      if (warm) return; // triple already covered
+      console.log(`[Flash] Instance ${key} warm hit — binding pre-created instance`);
+      bindInstance(existing, spriteNum, width, height, assertedFrame);
+      return;
+    }
+    console.log(`[Flash] Instance ${key} bytes changed (was ${existing.dataSig}, now ${sig}) — recreating`);
+    destroyInstanceByKey(key);
+  }
+
+  const inFlight = creatingKeys.get(key);
+  if (inFlight) {
+    if (warm) return; // this triple is already being created
+    // A load landed while the triple's creation is still in flight: don't start
+    // a second player on the same key — replace the channel's current instance
+    // now (flash→flash swap semantics) and let the in-flight creation complete
+    // the bind in its `finally`.
+    console.log(`[Flash] Instance ${key} creation in flight — queuing bind`);
+    destroyFlashInstance(spriteNum);
+    inFlight.bindRequest = { spriteNum, width, height, assertedFrame };
+    return;
+  }
+
+  if (!warm) {
+    // About to bind a fresh instance to this channel: tear down whatever
+    // instance is currently bound there (a flash→flash swap replaces it).
+    destroyFlashInstance(spriteNum);
+  } else {
+    warmupPending++;
+    warmupDeadlineMs = Math.max(warmupDeadlineMs, Date.now() + WARMUP_MAX_HOLD_MS);
+  }
+  const createRec: CreateInFlight = { warm, bindRequest: null };
+  creatingKeys.set(key, createRec);
 
   // Per-sprite frame intent is now owned by the Rust sprite
   // (`flash_asserted_frame`) and threaded in as `assertedFrame`, which we pin
@@ -766,6 +923,10 @@ export async function createFlashInstance(
 
   flashLoadingCount++;
   console.log(`[Flash] Instance ${key} creation started (pending: ${flashLoadingCount})`);
+
+
+  // Declared out here because the `finally` releases it. See the comment at the
+  // pin site below.
 
   try {
 
@@ -830,6 +991,10 @@ export async function createFlashInstance(
     spriteNum,
     castLib,
     castMember,
+    key,
+    bound: !warm,
+    dataSig: sig,
+    pendingBind: null,
     rufflePlayer: player,
     bridgeId,
     container,
@@ -841,9 +1006,11 @@ export async function createFlashInstance(
     animFrameId: null,
     ready: false,
     pausedAtStart,
+    pendingEvents: [],
   };
 
   instances.set(key, instance);
+  if (!warm) activeByChannel.set(spriteNum, key);
   syncActiveFlashCount();
 
   // Copy data out of WASM memory immediately — the underlying ArrayBuffer
@@ -922,6 +1089,34 @@ export async function createFlashInstance(
     preferredRenderer: 'canvas',
     socketProxy: getSocketProxyConfig(),
   };
+
+  // Director's Flash Asset Xtra intercepts `getURL("event: …")` and routes
+  // the body into the host movie's event chain (e.g. `event: send #done`
+  // fires the `done` handler). Register the handler speculatively — when
+  // the Ruffle-fork patch is present, navigations whose URL starts with
+  // `event:` get routed into dispatch_flash_event and the real open is
+  // suppressed. Otherwise it's a safe no-op.
+  // The other Flash→Director channel: `fscommand("handler", "args")`. DGS's
+  // include movie (objMain) uses this to fire `on FlashLoaderLoaded`.
+  //
+  // MUST be registered BEFORE `load()`. `load()` starts the SWF, so a movie
+  // that fires its callback from a FRAME 1 action does so while still inside
+  // that await — registering afterwards meant the very first event was handed
+  // to Ruffle's navigator instead ("SWF tried to open a website, but opening a
+  // website is not allowed") and lost. Rifleman's storage gate is a ONE-frame
+  // SWF whose only job is `getURL("event:flash_start_game")` from frame 1; it
+  // then `stop()`s and never retries, so the movie waited on frame 6 forever.
+  if (bridgeId) {
+    // Bridge mode (MV3 extension): the player + its handlers live in the main
+    // world, and callback functions can't cross worlds — so the host registers
+    // its own forwarders and posts each event/fscommand back here. Handles both
+    // the event:/lingo: URL channel and fscommand in one call.
+    registerBridgeCallbacks(bridgeId, castLib, castMember, instance);
+  } else {
+    registerEventUrlHandler(player, castLib, castMember, instance);
+    registerFSCommandHandler(player, castLib, castMember, instance);
+  }
+
   if (bridgeId) {
     // The host's `callMethod` convention: methodName='load' resolves
     // via `player.ruffle().load(args)` on the main-world side.
@@ -945,7 +1140,24 @@ export async function createFlashInstance(
   // never saw the `frame =` op) takes PRECEDENCE over `pausedAtStart`'s frame-1:
   // StoryScramble's 3 story tiles share cast 2:1 but each must show its own
   // poster; pinning them all to frame 1 (pausedAtStart) shows the SAME picture.
-  const initialPin = assertedFrame >= 0 ? assertedFrame : (pausedAtStart ? 1 : -1);
+  // A WARM instance always parks at frame 1, stopped: it must not run ahead of
+  // the score while it waits to be shown. The bind (completeBind) re-establishes
+  // the correct playback state when the score actually reaches it.
+  const initialPin = warm ? 1 : (assertedFrame >= 0 ? assertedFrame : (pausedAtStart ? 1 : -1));
+
+  // In Director a Flash sprite starts when the SPRITE starts: the SWF never
+  // runs ahead of the Director playhead. Here, instance creation is async and
+  // holds the frame loop across the AS-init window below, which handed the SWF
+  // a multi-second head start over the movie's own frame 1. Miniclip's Rifleman
+  // is the case that exposes it — its intro SWF ran its whole 3-frame timeline
+  // and stopped before any Lingo executed, and by then the loading MovieClip
+  // that watches Lingo's `loadedPercent` (and calls `_root.play()` to raise
+  // `isLoaded`) only existed on the frames the root had already left. The movie
+  // then sat on frame 1 forever waiting for an `isLoaded` nothing could set.
+  //
+  // So hold every instance at frame 1 for the window and release it in the
+  // `finally` below, once the movie is allowed to run again. `pausedAtStart` /
+  // asserted-frame instances keep their own pin and are NOT released.
   if (initialPin >= 0) {
     try {
       // Two-step: gotoAndPlay so Ruffle paints the frame (it skips paint for an
@@ -960,28 +1172,17 @@ export async function createFlashInstance(
     }
   }
 
-  // Director's Flash Asset Xtra intercepts `getURL("event: …")` and routes
-  // the body into the host movie's event chain (e.g. `event: send #done`
-  // fires the `done` handler). Register the handler speculatively — when
-  // the Ruffle-fork patch is present, navigations whose URL starts with
-  // `event:` get routed into dispatch_flash_event and the real open is
-  // suppressed. Otherwise it's a safe no-op.
-  // The other Flash→Director channel: `fscommand("handler", "args")`. DGS's
-  // include movie (objMain) uses this to fire `on FlashLoaderLoaded`.
-  if (bridgeId) {
-    // Bridge mode (MV3 extension): the player + its handlers live in the main
-    // world, and callback functions can't cross worlds — so the host registers
-    // its own forwarders and posts each event/fscommand back here. Handles both
-    // the event:/lingo: URL channel and fscommand in one call.
-    registerBridgeCallbacks(bridgeId, castLib, castMember);
-  } else {
-    registerEventUrlHandler(player, castLib, castMember);
-    registerFSCommandHandler(player, castLib, castMember);
-  }
 
-  // Find the internal canvas element that Ruffle renders to
-  await new Promise<void>((resolve) => {
-    setTimeout(() => {
+  // Find the internal canvas element that Ruffle renders to.
+  //
+  // POLL, don't sleep. This was a flat `setTimeout(500)`, which put a 500ms
+  // floor under every instance's time-to-ready on top of the AS-init wait below
+  // — and a movie that continuously spawns transient Flash sprites
+  // (bogey_nights' "superstar" splashes) therefore always has an instance in
+  // flight. The canvas usually exists within a frame or two.
+  {
+    const canvasDeadline = Date.now() + 500;
+    for (;;) {
       const shadow = player.shadowRoot;
       if (shadow) {
         const canvas = shadow.querySelector('canvas');
@@ -991,22 +1192,58 @@ export async function createFlashInstance(
         const canvas = player.querySelector('canvas');
         if (canvas) instance.canvas = canvas;
       }
-      if (instance.canvas) {
-        startFrameCapture(key);
-      }
-      resolve();
-    }, 500);
-  });
+      if (instance.canvas || Date.now() >= canvasDeadline) break;
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+    }
+    if (instance.canvas && instance.bound) {
+      // Warm (unbound) instances do NOT capture: frame capture pushes pixels
+      // into the channel's dirplayer frame buffer, which belongs to whatever
+      // instance is actually bound there. Capture starts on bind.
+      startFrameCapture(key);
+    }
+  }
 
-  // Give the SWF time to run its ActionScript initialization (ExternalInterface callbacks etc.)
+  // Wait for the SWF's ActionScript to initialize.
+  //
+  // This used to be a flat `setTimeout(3000)`, which made EVERY instance take
+  // ~3s to reach `ready` no matter how small it was — Splat's 1786-byte "mspac"
+  // paid exactly what a large movie pays. That single constant is behind most of
+  // the Flash timing pain: the ~3s-per-spawn stall documented on
+  // `dirplayer_isFlashLoading`, Rifleman needing a manual pause before its PLAY
+  // click, and Splat's loading-screen pacman never being ready in time.
+  //
+  // Poll for a real signal instead, with the old 3s kept only as a CAP, so this
+  // can never be slower than before and is usually far faster. The probe is
+  // movie-agnostic: `_level0._totalframes` returns a value only once AVM1 has
+  // built the root timeline, which is exactly "the root movie clip exists and
+  // its script can be reached".
   console.log(`[Flash] Instance ${key} loaded, waiting for SWF ActionScript to initialize...`);
-  await new Promise(resolve => setTimeout(resolve, 3000));
+  {
+    const asDeadline = Date.now() + 3000;
+    let asReadyMs = -1;
+    for (;;) {
+      const probe = playerGetVar(instance, '_level0._totalframes');
+      if (probe !== null && probe !== '' && probe !== 'undefined') {
+        asReadyMs = 3000 - (asDeadline - Date.now());
+        break;
+      }
+      if (Date.now() >= asDeadline) break;
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    console.log(
+      `[Flash] Instance ${key} AS init ${asReadyMs >= 0 ? `ready in ${asReadyMs}ms` : 'TIMED OUT at 3000ms'}`
+    );
+  }
 
   } finally {
     flashLoadingCount--;
+    // Guarded: destroyAllFlashInstances zeroes the counter mid-flight on a
+    // movie switch, so this must not go negative.
+    if (warm) warmupPending = Math.max(0, warmupPending - 1);
     flashAccessBeforeReady = false;
     console.log(`[Flash] Instance ${key} fully ready (pending: ${flashLoadingCount})`);
 
+    creatingKeys.delete(key);
     const live = instances.get(key);
     // Mark ready BEFORE the queue replay so the internal
     // `live.rufflePlayer.GotoFrame(...)` calls aren't seen as targeting
@@ -1014,26 +1251,161 @@ export async function createFlashInstance(
     // calls bypass the queue.
     if (live) live.ready = true;
 
-    // Replay any beginSprite-time `gotoFrame(sprite,N)` / `play(sprite)` /
-    // `stop(sprite)` Lingo calls that arrived before this instance was created.
-    flushPendingGoto(spriteNum);
+    if (live && createRec.bindRequest) {
+      // A load dispatch arrived mid-creation (see creatingKeys): bind now that
+      // the instance is ready. bindInstance → completeBind, which flushes the
+      // channel's queued Lingo ops.
+      const br = createRec.bindRequest;
+      bindInstance(live, br.spriteNum, br.width, br.height, br.assertedFrame);
+    } else if (live && live.pendingBind) {
+      // A bind request landed while this (warm) creation was still in flight:
+      // complete it now that the instance is ready.
+      const pb = live.pendingBind;
+      live.pendingBind = null;
+      completeBind(live, pb.width, pb.height, pb.assertedFrame);
+    } else if (live && live.bound) {
+      // Replay any beginSprite-time `gotoFrame(sprite,N)` / `play(sprite)` /
+      // `stop(sprite)` Lingo calls that arrived before this instance was created.
+      flushPendingGoto(spriteNum);
 
-    // Finally, re-assert the sprite's authoritative frame (from Rust). The
-    // early pin above set it before autoplay, but the 3s AS-init window +
-    // flushPendingGoto may have moved the playhead; re-pinning here guarantees
-    // the poster survives to `ready` (StoryScramble tiles). Skipped if a queued
-    // `play`/`gotoFrame` already resumed the sprite (the flush's stopped flag
-    // reflects that).
-    if (assertedFrame >= 0 && live && live.stopped) {
-      try {
-        playerExec(live, 'GotoFrame', [assertedFrame, false]);
-        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
-        playerExec(live, 'GotoFrame', [assertedFrame, true]);
-      } catch (e) {
-        console.warn(`[Flash] asserted-frame re-pin failed for ${key}:`, e);
+      // Finally, re-assert the sprite's authoritative frame (from Rust). The
+      // early pin above set it before autoplay, but the 3s AS-init window +
+      // flushPendingGoto may have moved the playhead; re-pinning here guarantees
+      // the poster survives to `ready` (StoryScramble tiles). Skipped if a queued
+      // `play`/`gotoFrame` already resumed the sprite (the flush's stopped flag
+      // reflects that).
+      // Release the begin-sprite hold: the movie is running again, so the SWF
+      // may start. `flushPendingGoto` above may already have resumed it (a queued
+      // `play`), in which case `stopped` is false and there's nothing to do.
+      if (assertedFrame >= 0 && live.stopped) {
+        try {
+          playerExec(live, 'GotoFrame', [assertedFrame, false]);
+          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+          playerExec(live, 'GotoFrame', [assertedFrame, true]);
+        } catch (e) {
+          console.warn(`[Flash] asserted-frame re-pin failed for ${key}:`, e);
+        }
       }
     }
+    // A warm, unbound instance stays parked at frame 1 (the initialPin above)
+    // with no pending-op flush — the channel's queued ops belong to whatever
+    // instance actually binds there. Suspend the whole player too: nothing may
+    // run (or SOUND) ahead of the Director playhead — rifleman's intro music
+    // was audible before PLAY was ever clicked — and a suspended player costs
+    // no per-frame work while it waits. completeBind resumes it.
+    else if (live && !live.bound) {
+      playerExec(live, 'pause', []);
+    }
   }
+}
+
+/**
+ * Bind an existing (usually warm) instance to its channel: it becomes the
+ * channel's rendering + Lingo target, replacing whatever was bound before.
+ * If the instance is still mid-creation the bind completes in the creation's
+ * `finally` (pendingBind).
+ */
+function bindInstance(
+  inst: FlashInstance,
+  spriteNum: number,
+  width: number,
+  height: number,
+  assertedFrame: number,
+): void {
+  const prevKey = activeByChannel.get(spriteNum);
+  if (prevKey !== undefined && prevKey !== inst.key) {
+    // Flash→flash swap: the previous member's instance is replaced, exactly as
+    // the old channel-keyed map did implicitly.
+    destroyInstanceByKey(prevKey);
+  }
+  activeByChannel.set(spriteNum, inst.key);
+  inst.bound = true;
+  syncActiveFlashCount();
+  if (!inst.ready) {
+    inst.pendingBind = { width, height, assertedFrame };
+    return;
+  }
+  completeBind(inst, width, height, assertedFrame);
+}
+
+/**
+ * Second half of a bind, run once the instance is ready: size it to the
+ * sprite, start frame capture, and re-establish the playback state Director
+ * expects from a freshly shown Flash sprite — the sprite's asserted frame wins,
+ * else `pausedAtStart` pins frame 1, else the SWF starts playing from frame 1
+ * (the warm park replaced autoplay, so this is the release). Queued
+ * beginSprite-time Lingo ops replay last and win over all of it.
+ */
+function completeBind(inst: FlashInstance, width: number, height: number, assertedFrame: number): void {
+  const spriteNum = inst.spriteNum;
+  try {
+    // Warm instances are fully SUSPENDED while parked (see the creation
+    // `finally`) — resume the player first so everything below actually paints.
+    // For an already-running instance this is a harmless no-op; the pin path's
+    // deferred stop halts the CLIP again, not the player, matching stopFlash.
+    playerExec(inst, 'play', []);
+    setFlashSize(spriteNum, width, height);
+    if (inst.canvas && inst.animFrameId === null && spriteNum >= 0) {
+      startFrameCapture(inst.key);
+    }
+    const pin = assertedFrame >= 0 ? assertedFrame : (inst.pausedAtStart ? 1 : -1);
+    if (pin >= 0) {
+      inst.stopped = true;
+      // Two-step pin: paint the frame (goto+play), then stop there on the next
+      // RAF — same rationale as the creation-time initial pin. The deferred
+      // stop checks `stopped` so a queued `play` replayed below can cancel it.
+      playerExec(inst, 'GotoFrame', [pin, false]);
+      requestAnimationFrame(() => {
+        if (inst.bound && inst.stopped) playerExec(inst, 'GotoFrame', [pin, true]);
+      });
+    } else {
+      inst.stopped = false;
+      playerExec(inst, 'play', []);
+      playerExec(inst, 'GotoFrame', [1, false]);
+    }
+  } catch (e) {
+    console.warn(`[Flash] bind of ${inst.key} failed:`, e);
+  }
+  flushPendingGoto(spriteNum);
+
+  // Replay Flash→Director callbacks the SWF fired while unbound (a warm SWF
+  // runs its frame-1 actions at creation — rifleman's storage gate fires
+  // `event:flash_start_game` there). Bind time is when the cold path would have
+  // delivered them: the sprite is on stage now. Deferred to a microtask so the
+  // Lingo dispatch never re-enters WASM from inside the load callback that
+  // triggered this bind.
+  if (inst.pendingEvents.length > 0) {
+    const events = inst.pendingEvents.splice(0);
+    queueMicrotask(() => {
+      for (const ev of events) {
+        try {
+          if (ev.kind === 'lingo') dispatchFlashLingo(ev.body);
+          else dispatchFlashEvent(inst.castLib, inst.castMember, ev.body);
+        } catch (e) {
+          console.warn(`[Flash] replaying queued ${ev.kind} for ${inst.key} failed:`, e);
+        }
+      }
+    });
+  }
+}
+
+/**
+ * Movie-load warm-up entry: pre-create an UNBOUND instance for a Flash triple
+ * the score will show later, so the expensive Ruffle creation + AS init happens
+ * at load time (where waiting is expected) instead of mid-playback. The
+ * instance parks at frame 1, stopped, capturing nothing; when the score reaches
+ * the triple, the normal load dispatch finds it and binds it near-instantly.
+ */
+export function warmFlashInstance(
+  spriteNum: number,
+  castLib: number,
+  castMember: number,
+  swfData: Uint8Array,
+  width: number,
+  height: number,
+  pausedAtStart: boolean = false,
+): Promise<void> {
+  return createFlashInstance(spriteNum, castLib, castMember, swfData, width, height, pausedAtStart, -1, true);
 }
 
 /**
@@ -1140,10 +1512,17 @@ function startFrameCapture(key: string): void {
 }
 
 /**
- * Destroy a Flash instance and clean up resources.
+ * Destroy the Flash instance currently BOUND to a channel. Warm (unbound)
+ * instances for the same channel are left alone — they are pre-created for
+ * members the score will show later and cost nothing while parked.
  */
 export function destroyFlashInstance(spriteNum: number): void {
-  const key = instanceKey(spriteNum);
+  const key = activeByChannel.get(spriteNum);
+  if (key !== undefined) destroyInstanceByKey(key);
+}
+
+/** Destroy one instance by its triple key and clean up resources. */
+function destroyInstanceByKey(key: string): void {
   const instance = instances.get(key);
   if (!instance) return;
 
@@ -1166,6 +1545,10 @@ export function destroyFlashInstance(spriteNum: number): void {
 
   instance.container.remove();
   instances.delete(key);
+  instance.bound = false;
+  if (activeByChannel.get(instance.spriteNum) === key) {
+    activeByChannel.delete(instance.spriteNum);
+  }
   syncActiveFlashCount();
 }
 
@@ -1189,9 +1572,35 @@ function translateLevel0(path: string): string {
 // `createFlashInstance` / `bridgeCallMethod`) still works; only
 // Lingo-driven Flash interactivity is degraded.
 
+// Director's Flash asset `getVariable()` reaches the player through the classic
+// string-valued GetVariable interface, so the ActionScript value arrives having
+// already been through AVM1's ToString — an AS boolean reads back as the STRING
+// "true"/"false". Ruffle's JS API skips that step and hands back a real JS
+// boolean, which the Rust side turns into Lingo 1/0; a movie testing
+// `getVariable("isLoaded") = "true"` then never matches. Miniclip's Rifleman
+// gates its entire boot on exactly that comparison against its intro SWF.
+//
+// (AVM1 stringifies booleans as "1"/"0" for SWF version <= 4 and "true"/"false"
+// from 5 on. We don't track a per-instance SWF version, and Director-hosted
+// content is >= 5 in practice, so assume the modern rule.)
+function coerceFlashValue(val: unknown): string | null {
+  if (typeof val === "boolean") return val ? "true" : "false";
+  // Director's getVariable() "returns a string that contains the current value
+  // of the specified Flash variable" (Scripting Dictionary, getVariable()) —
+  // the value is ALWAYS stringified, whatever ActionScript type holds it.
+  // Ruffle hands numbers back as JS numbers, and letting one through untouched
+  // meant the WASM side (which only reads `as_string()`) saw a non-string and
+  // answered VOID. Sewer Run's menu keeps every selection in a numeric root
+  // variable — `sprite(1).track`, `.challenge`, `.enviro`, `.kudos` — so
+  // `startGame` read VOID for all of them, built gGame with a VOID
+  // boarderTotal, and `repeat with i = 1 to gGame.boarderTotal` then created no
+  // boarders at all.
+  if (typeof val === "number") return Number.isFinite(val) ? String(val) : "";
+  return val as string | null;
+}
+
 function getVariable(spriteNum: number, path: string): string | null {
-  const key = instanceKey(spriteNum);
-  const instance = instances.get(key);
+  const instance = resolveActive(spriteNum);
   if (!instance || !instance.ready) {
     // Not ready: either the SWF instance hasn't been created yet, or it has
     // loaded but its ActionScript hasn't finished initializing (so the objects
@@ -1216,10 +1625,10 @@ function getVariable(spriteNum: number, path: string): string | null {
     // its GetVariable method isn't visible on the isolated-world element — route
     // the read through the synchronous bridge instead.
     if (instance.bridgeId) {
-      return bridgeGetVariableSync(instance.bridgeId, translateLevel0(path));
+      return coerceFlashValue(bridgeGetVariableSync(instance.bridgeId, translateLevel0(path)));
     }
     const val = instance.rufflePlayer.GetVariable(translateLevel0(path));
-    return val;
+    return coerceFlashValue(val);
   } catch (e) {
     console.warn(`ruffleGetVariable error:`, e);
     return null;
@@ -1231,8 +1640,7 @@ function getVariable(spriteNum: number, path: string): string | null {
  * Called from WASM via window.dirplayer_ruffleSetVariable.
  */
 function setVariable(spriteNum: number, path: string, value: string): boolean {
-  const key = instanceKey(spriteNum);
-  const instance = instances.get(key);
+  const instance = resolveActive(spriteNum);
   // The instance may not exist / be ready yet: a script can push values into
   // the SWF (e.g. spectral-wizard's loader writing `playerScore`) before the
   // renderer has lazily created the Flash instance and finished AS init.
@@ -1437,7 +1845,7 @@ function flushPendingGoto(spriteNum: number): void {
   const ops = pendingOps.get(spriteNum);
   if (!ops || ops.length === 0) return;
   pendingOps.delete(spriteNum);
-  const instance = instances.get(instanceKey(spriteNum));
+  const instance = resolveActive(spriteNum);
   if (!instance) return;
   for (const op of ops) {
     try {
@@ -1523,8 +1931,7 @@ function flushPendingGoto(spriteNum: number): void {
  * goToFrameAndStop below.
  */
 function goToFrame(spriteNum: number, frameOrLabel: string): void {
-  const key = instanceKey(spriteNum);
-  const instance = instances.get(key);
+  const instance = resolveActive(spriteNum);
   const trimmed = frameOrLabel.trim();
   const isNumeric = /^-?\d+$/.test(trimmed);
 
@@ -1561,8 +1968,7 @@ function goToFrame(spriteNum: number, frameOrLabel: string): void {
  * Called from WASM via window.dirplayer_ruffleGoToFrameAndStop.
  */
 function goToFrameAndStop(spriteNum: number, frameOrLabel: string): void {
-  const key = instanceKey(spriteNum);
-  const instance = instances.get(key);
+  const instance = resolveActive(spriteNum);
   const trimmed = frameOrLabel.trim();
   const isNumeric = /^-?\d+$/.test(trimmed);
 
@@ -1637,8 +2043,7 @@ function applyFrameSetting(
 // type-branches (bool → Int(1/0), object → FlashObjectRef, …). Stringifying here
 // broke DGS's `includeIsLoaded() = 1` (AS true → "true" ≠ 1).
 function callFunction(spriteNum: number, path: string, argsXml: string): unknown {
-  const key = instanceKey(spriteNum);
-  const instance = instances.get(key);
+  const instance = resolveActive(spriteNum);
   // Instance not created / AS-init not finished yet: a beginSprite (or a
   // puppet/mid-frame) script can call into the SWF before the renderer has
   // lazily created the Ruffle player. A synchronous Lingo call can't be made
@@ -1677,8 +2082,7 @@ function callFunction(spriteNum: number, path: string, argsXml: string): unknown
  * Stop playback of a Ruffle instance (stays on current frame).
  */
 function stopFlash(spriteNum: number): void {
-  const key = instanceKey(spriteNum);
-  const instance = instances.get(key);
+  const instance = resolveActive(spriteNum);
   if (!instance || !instance.ready) {
     queueOp(spriteNum, { kind: 'stop' });
     return;
@@ -1715,8 +2119,7 @@ function stopFlash(spriteNum: number): void {
  * `goto_frame`, which both re-seats the playhead and clears that flag.
  */
 function playFlash(spriteNum: number): void {
-  const key = instanceKey(spriteNum);
-  const instance = instances.get(key);
+  const instance = resolveActive(spriteNum);
   if (!instance || !instance.ready) {
     queueOp(spriteNum, { kind: 'play' });
     return;
@@ -1735,8 +2138,7 @@ function playFlash(spriteNum: number): void {
  * Rewind a Ruffle instance to frame 1 and stop.
  */
 function rewindFlash(spriteNum: number): void {
-  const key = instanceKey(spriteNum);
-  const instance = instances.get(key);
+  const instance = resolveActive(spriteNum);
   if (!instance || !instance.ready) {
     queueOp(spriteNum, { kind: 'rewind' });
     return;
@@ -1750,9 +2152,14 @@ function rewindFlash(spriteNum: number): void {
  * Check if a Ruffle instance is currently playing.
  */
 function isPlaying(spriteNum: number): boolean {
-  const key = instanceKey(spriteNum);
-  const instance = instances.get(key);
+  const instance = resolveActive(spriteNum);
   if (!instance) return false;
+  // Still loading / AS-initialising (a warm instance bound mid-creation sits
+  // here too, with the park's `stopped=true` as an implementation detail, not
+  // a Lingo intent): Director has no "instance wiring up" state — a sprite
+  // that just began IS playing unless the member is authored pausedAtStart.
+  // eds_kart_attack's "Wait for Flash" advances the instant playing reads 0.
+  if (!instance.ready) return !instance.pausedAtStart;
   // The player's render loop stays alive even when a sprite is "stopped" (we
   // halt the root timeline, not the player — see stopFlash), so the
   // player-level isPlaying is no longer a reliable proxy for the movie's
@@ -1772,8 +2179,7 @@ function isPlaying(spriteNum: number): boolean {
  * Get the total frame count of a Ruffle instance.
  */
 function getFrameCount(spriteNum: number): number {
-  const key = instanceKey(spriteNum);
-  const instance = instances.get(key);
+  const instance = resolveActive(spriteNum);
   if (!instance) return 0;
   try {
     return parseInt(playerGetVar(instance, "/:_totalframes") || "0", 10);
@@ -1786,8 +2192,7 @@ function getFrameCount(spriteNum: number): number {
  * Get the current frame of a Ruffle instance (1-based).
  */
 function getCurrentFrame(spriteNum: number): number {
-  const key = instanceKey(spriteNum);
-  const instance = instances.get(key);
+  const instance = resolveActive(spriteNum);
   if (!instance) return 0;
   try {
     return parseInt(playerGetVar(instance, "/:_currentframe") || "0", 10);
@@ -1802,8 +2207,7 @@ function getCurrentFrame(spriteNum: number): number {
  * We implement this as goToFrame + immediate return (best effort).
  */
 function callFrame(spriteNum: number, frame: number): void {
-  const key = instanceKey(spriteNum);
-  const instance = instances.get(key);
+  const instance = resolveActive(spriteNum);
   if (!instance) return;
   // callFrame in Director executes the actions on a given frame.
   // Best approximation: go to that frame (which runs its scripts) and stop.
@@ -1814,8 +2218,7 @@ function callFrame(spriteNum: number, frame: number): void {
  * Find a frame label and return its frame number (1-based), or -1 if not found.
  */
 function findLabel(spriteNum: number, _label: string): number {
-  const key = instanceKey(spriteNum);
-  const instance = instances.get(key);
+  const instance = resolveActive(spriteNum);
   if (!instance) return -1;
   // No direct label lookup in the legacy Flash Player JS API; if the SWF
   // exposes a `findLabel` AS function we could call it, otherwise return
@@ -1836,7 +2239,7 @@ function findLabel(spriteNum: number, _label: string): number {
  * (0 when no instance / the fork method is unavailable).
  */
 function hitTest(spriteNum: number, localX: number, localY: number): number {
-  const inst = instances.get(instanceKey(spriteNum));
+  const inst = resolveActive(spriteNum);
   if (!inst) return 0;
 
   let canvasX = localX;
@@ -1873,8 +2276,7 @@ function hitTest(spriteNum: number, localX: number, localY: number): number {
  * Property numbers follow the original Flash Player property indices.
  */
 function getFlashProperty(spriteNum: number, target: string, propNum: number): string | null {
-  const key = instanceKey(spriteNum);
-  const instance = instances.get(key);
+  const instance = resolveActive(spriteNum);
   if (!instance) return null;
 
   // Flash property number to variable name mapping
@@ -1902,8 +2304,7 @@ function getFlashProperty(spriteNum: number, target: string, propNum: number): s
  * Set a Flash property by property number.
  */
 function setFlashProperty(spriteNum: number, target: string, propNum: number, value: string): void {
-  const key = instanceKey(spriteNum);
-  const instance = instances.get(key);
+  const instance = resolveActive(spriteNum);
   if (!instance) return;
 
   const propMap: Record<number, string> = {
@@ -1928,8 +2329,7 @@ function setFlashProperty(spriteNum: number, target: string, propNum: number, va
  * In Flash, tellTarget changes the target timeline for subsequent actions.
  */
 function tellTarget(spriteNum: number, target: string, action: string): void {
-  const key = instanceKey(spriteNum);
-  const instance = instances.get(key);
+  const instance = resolveActive(spriteNum);
   if (!instance) return;
   try {
     // tellTarget + action: best effort via SetVariable/CallFunction
@@ -2083,7 +2483,38 @@ export function initFlashBridge(): void {
   // player input — for ~3s per spawn, perpetually, since there's always a load
   // in flight. Those sprites are never scripted, so blocking for them is pure
   // lost time; they just pop in when their background load finishes.
-  win.dirplayer_isFlashLoading = () => flashAccessBeforeReady;
+  //
+  // Self-clearing when nothing is actually loading. `flashAccessBeforeReady`
+  // records that a script touched an instance that wasn't ready — but it is
+  // only lowered in the `finally` of an instance FINISHING its load. If the
+  // instance the script asked for is never created at all, nothing lowers it
+  // and the latch sticks forever: every frame then burns the full 2 x 15s of
+  // waiting and the movie stops advancing.
+  //
+  // Argent Free Ride hits this during its level load. `OffGame.GetSprite` does
+  //   getVariable(sprite(pFlashSprite), "_level0", 0)
+  // and once the off-game menu's sprite is gone that resolves to a sprite with
+  // no Flash instance — logged as "no instance yet for sprite#0" — which raises
+  // the flag with no pending load to ever lower it. The game froze at 84% with
+  // `clearTimeout` (the 100 ms wait slices) at 78% of profile self time.
+  //
+  // A pending load is what makes waiting meaningful, so treat "nothing in
+  // flight" as "not loading" AND drop the stale flag — otherwise the next
+  // unrelated Flash load would inherit it and block for 15s.
+  win.dirplayer_isFlashLoading = () => {
+    // Movie-load warm-up: hold the frame loop while warm instance creations are
+    // in flight — this is the load-time wait that makes playback never wait.
+    // Bounded by a deadline so a broken SWF can't stall the movie forever, and
+    // NEVER raised by playback-time (non-warm) creations.
+    if (warmupPending > 0 && Date.now() < warmupDeadlineMs) {
+      return true;
+    }
+    if (flashLoadingCount === 0) {
+      flashAccessBeforeReady = false;
+      return false;
+    }
+    return flashAccessBeforeReady;
+  };
 
   // Per-sprite readiness, used by the WASM side to BLOCK an individual Flash
   // interop call (getVariable / setVariable / callFunction / setCallback) until
@@ -2095,7 +2526,7 @@ export function initFlashBridge(): void {
   // instance exists and nothing is loading (so the caller can't hang forever on
   // a sprite that will never get an instance).
   win.dirplayer_isFlashInstanceReady = (spriteNum: number): boolean => {
-    const inst = instances.get(instanceKey(spriteNum));
+    const inst = resolveActive(spriteNum);
     // Only "ready" once the instance exists AND has finished AS init. A missing
     // instance is NOT ready: the sprite's SWF is (or is about to be) loading, so
     // the WASM-side wait must keep polling until it lands — otherwise a very
@@ -2151,6 +2582,9 @@ export function destroyAllFlashInstances(): void {
     instance.container.remove();
   });
   instances.clear();
+  activeByChannel.clear();
+  warmupPending = 0;
+  warmupDeadlineMs = 0;
   syncActiveFlashCount();
 }
 

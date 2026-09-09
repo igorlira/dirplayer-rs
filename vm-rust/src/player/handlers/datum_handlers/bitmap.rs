@@ -14,6 +14,7 @@ use crate::{
 };
 
 use super::prop_list::PropListUtils;
+use crate::player::handlers::datum_handlers::cast_member::text::TextMemberHandlers;
 
 pub struct BitmapDatumHandlers {}
 
@@ -34,12 +35,80 @@ impl BitmapDatumHandlers {
             reserve_player_mut(|player| {
                 if let Ok(bref) = player.get_datum(datum).to_bitmap_ref() {
                     if player.stage_image == Some(*bref) {
+                        // The stage framebuffer is never worth a hi-res twin.
+                        // An "imaging Lingo" title redraws it EVERY FRAME — for
+                        // Spectral Wizard it IS the visible frame — so a twin
+                        // seeded by one text `.image` baked into a speech bubble
+                        // would make every subsequent blit run at scale² the
+                        // pixels for the rest of the movie (measured: 4x slower
+                        // end to end). It also gains nothing: the stage image is
+                        // composited through the stage LAYOUT, which magnifies
+                        // it, and it is addressed by scripts in movie units.
+                        if let Some(b) = player.bitmap_manager.get_bitmap_mut(*bref) {
+                            b.ban_hi_res();
+                        }
                         player.stage_image_dirty = true;
+                        // Remember WHERE, so the renderer composites only the
+                        // touched region instead of pasting the whole opaque
+                        // framebuffer over every live sprite beneath it.
+                        // `None` from here means "could not tell", which keeps
+                        // the old full-stage behaviour for that op.
+                        let touched: Option<[i32; 4]> = match &*handler_name.as_lower_str() {
+                            // copyPixels(source, destRect, sourceRect {, params})
+                            "copypixels" => args.get(1)
+                                .map(|a| player.get_datum(a))
+                                .and_then(|d| d.to_rect_inline().ok())
+                                .map(|(v, _)| [v[0] as i32, v[1] as i32, v[2] as i32, v[3] as i32]),
+                            // fill(rect, color) — the 4-coord spelling is
+                            // fill(l, t, r, b, color), handled by the same
+                            // rect parse failing and falling back to None.
+                            "fill" => args.first()
+                                .map(|a| player.get_datum(a))
+                                .and_then(|d| d.to_rect_inline().ok())
+                                .map(|(v, _)| [v[0] as i32, v[1] as i32, v[2] as i32, v[3] as i32]),
+                            _ => None,
+                        };
+                        match touched {
+                            None => {
+                                player.stage_image_dirty_full = true;
+                                player.stage_image_dirty_rect = None;
+                            }
+                            Some(r) if !player.stage_image_dirty_full => {
+                                player.stage_image_dirty_rect =
+                                    Some(match player.stage_image_dirty_rect {
+                                        Some(c) => [
+                                            c[0].min(r[0]), c[1].min(r[1]),
+                                            c[2].max(r[2]), c[3].max(r[3]),
+                                        ],
+                                        None => r,
+                                    });
+                            }
+                            Some(_) => {}
+                        }
                     }
                 }
                 Ok::<(), ScriptError>(())
             })?;
         }
+        // Every in-place mutation EXCEPT copyPixels writes `data` without any
+        // way to reproduce the same edit in the hi-res twin, so drop the twin
+        // rather than let it drift out of step with the pixels Director sees.
+        // The bitmap then renders magnified — the behaviour before `hi_res`
+        // existed. copyPixels maintains the twin itself (`copy_pixels` below).
+        if matches!(
+            &*handler_name.as_lower_str(),
+            "fill" | "draw" | "setpixel" | "applyfilter" | "setalpha" | "floodfill"
+        ) {
+            reserve_player_mut(|player| {
+                if let Ok(bref) = player.get_datum(datum).to_bitmap_ref() {
+                    if let Some(b) = player.bitmap_manager.get_bitmap_mut(*bref) {
+                        b.invalidate_hi_res();
+                    }
+                }
+                Ok::<(), ScriptError>(())
+            })?;
+        }
+
         match handler_name.as_lower_str() {
             "fill" => Self::fill(datum, args),
             "draw" => Self::draw(datum, args),
@@ -139,7 +208,22 @@ impl BitmapDatumHandlers {
             } else {
                 let x = player.get_datum(&args[0]).int_value()?;
                 let y = player.get_datum(&args[1]).int_value()?;
-                (x, y, false)
+                // `#integer` is documented on BOTH overloads — Director 11.5
+                // Scripting Dictionary, getPixel(): "imageObjRef.getPixel(x, y
+                // {, #integer})" as well as the point() form handled above.
+                // Only the point form read it, so the x/y form handed back a
+                // color object and any arithmetic on it raised. Intel's
+                // ChickenChasin builds its terrain from a heightmap with
+                //     tHeight = float(aHeightMap.getPixel(x, pHeight-y-1, #integer))/255
+                // which failed with "Cannot convert datum of type color_ref to
+                // float" before the terrain mesh could be generated at all.
+                let return_integer = if args.len() > 2 {
+                    let flag = player.get_datum(&args[2]).string_value().unwrap_or_default();
+                    flag.eq_ignore_ascii_case("integer")
+                } else {
+                    false
+                };
+                (x, y, return_integer)
             };
             let color = bitmap.get_pixel_color_ref(x as u16, y as u16);
             if return_integer {
@@ -324,10 +408,28 @@ impl BitmapDatumHandlers {
             let h = src.height;
             let is_32bit = src.bit_depth == 32;
 
-            // Create an 8-bit grayscale bitmap for the alpha channel
+            // Director 11.5 Scripting Dictionary, `extractAlpha()`: "The result is
+            // an 8-bit grayscale image representing the alpha channel." It has to
+            // be 8-bit, not a 32-bit grayscale stand-in: the documented companion
+            // `setAlpha(alphaImageObject)` states "If you specify an alpha image
+            // object, it must be 8-bit... If these conditions are not met,
+            // setAlpha() has no effect and returns FALSE", and that is exactly what
+            // our own set_alpha enforces. Returning 32-bit here made the
+            // dictionary's own idiom — `img.setAlpha(other.extractAlpha())` — a
+            // silent no-op. Agent Free Ride 2's energy bar is drawn that way
+            // (InGame.UpdateEnergyBar refills the alpha of a #fromImageObject
+            // texture and never touches its RGB), so the HUD bar stayed full at
+            // 100 no matter how much damage the player took.
+            //
+            // 1 byte per pixel, no row padding (Bitmap::new sizes 8-bit data as
+            // width*height), and the #grayscale palette so index N reads back as
+            // gray N — which keeps the value both a colour and the raw alpha that
+            // set_alpha's 8-bit branch copies straight into the alpha channel.
             let mut alpha_bitmap = crate::player::bitmap::bitmap::Bitmap::new(
-                w, h, 32, 32, 0,
-                src.palette_ref.clone(),
+                w, h, 8, 8, 0,
+                crate::player::bitmap::bitmap::PaletteRef::BuiltIn(
+                    crate::player::bitmap::bitmap::BuiltInPalette::GrayScale,
+                ),
             );
 
             if is_32bit {
@@ -341,13 +443,9 @@ impl BitmapDatumHandlers {
                         } else {
                             255
                         };
-                        // Write grayscale: R=G=B=alpha, A=255
-                        let dst_idx = y * row_bytes + x * 4;
-                        if dst_idx + 3 < alpha_bitmap.data.len() {
+                        let dst_idx = y * w as usize + x;
+                        if dst_idx < alpha_bitmap.data.len() {
                             alpha_bitmap.data[dst_idx] = alpha;
-                            alpha_bitmap.data[dst_idx + 1] = alpha;
-                            alpha_bitmap.data[dst_idx + 2] = alpha;
-                            alpha_bitmap.data[dst_idx + 3] = 255;
                         }
                     }
                 }
@@ -714,8 +812,35 @@ impl BitmapDatumHandlers {
                     // 8-bit: treat as palette index → grayscale
                     let idx = int_value as u8;
                     bitmap.set_pixel(x, y, (idx, idx, idx), &palettes);
+                } else if bit_depth == 32 {
+                    // 32-bit: the integer is the FULL AARRGGBB value, alpha
+                    // included -- the same encoding `getPixel(pt, #integer)`
+                    // hands back, which is the round-trip the dictionary
+                    // recommends ("If setting many pixels to the color of
+                    // another pixel with getPixel(), it is faster to set them
+                    // as integers").
+                    //
+                    // Dropping the alpha byte made every integer write opaque.
+                    // Movies build these values specifically to write
+                    // TRANSPARENCY: PHOSPHOR's C_ScoreBoard clears its 512x256
+                    // text layer with
+                    //     RGBtoInteger(rgb(255, 255, 255), 0)
+                    // and that helper returns Director's signed 32-bit form
+                    // (negative once alpha >= 128). Forced opaque, the cleared
+                    // layer came out as solid WHITE over the panel art beneath
+                    // it, so the frag table drew on a white box instead of the
+                    // translucent panel.
+                    //
+                    // `as u32` so the negative (alpha >= 128) form keeps its
+                    // bit pattern.
+                    let bits = int_value as u32;
+                    let a = ((bits >> 24) & 0xFF) as u8;
+                    let r = ((bits >> 16) & 0xFF) as u8;
+                    let g = ((bits >> 8) & 0xFF) as u8;
+                    let b = (bits & 0xFF) as u8;
+                    bitmap.set_pixel_rgba(x, y, (r, g, b, a), &palettes);
                 } else {
-                    // 16/32-bit: treat as packed RGB integer (r*65536 + g*256 + b)
+                    // 16-bit: packed RGB, no alpha channel to write.
                     let r = ((int_value >> 16) & 0xFF) as u8;
                     let g = ((int_value >> 8) & 0xFF) as u8;
                     let b = (int_value & 0xFF) as u8;
@@ -874,6 +999,77 @@ impl BitmapDatumHandlers {
         })
     }
 
+    /// Replay one `copyPixels` into the destination's hi-res twin, in that
+    /// twin's coordinate space (see `Bitmap::hi_res`).
+    ///
+    /// Only runs when one of the two bitmaps already carries a twin — a twin is
+    /// SEEDED by a text/field member's `.image`, never by an ordinary blit, so
+    /// this costs nothing for a movie that never composes text into a bitmap.
+    ///
+    /// Bails (dropping the twin) for anything it cannot reproduce faithfully:
+    /// a mask image, a rotation/skew blit, or an `original_dst_rect`, all of
+    /// which carry movie-unit geometry of their own that would have to be
+    /// scaled in lockstep. Dropping is always safe — the bitmap then renders
+    /// magnified, which is the pre-existing behaviour.
+    fn mirror_copy_into_hi_res(
+        dst: &mut Bitmap,
+        src: &Bitmap,
+        dest_rect: IntRect,
+        src_rect: IntRect,
+        params: &HashMap<String, Datum>,
+        palettes: &crate::player::bitmap::palette_map::PaletteMap,
+    ) {
+        // Only a MATERIALISED twin counts. An unfulfilled promise on the
+        // source means we deliberately chose not to render it, so magnifying
+        // the destination into a twin here would cost scale^2 per blit and
+        // deliver no extra sharpness at all.
+        let scale = dst.hi_res.scale.max(src.hi_res.scale);
+        if scale <= 1.0 {
+            return;
+        }
+        if params.contains_key("maskImage")
+            || params.contains_key("mask")
+            || params.contains_key("original_dst_rect")
+            || params.get("rotation").and_then(|d| d.float_value().ok()).unwrap_or(0.0) != 0.0
+            || params.get("skew").and_then(|d| d.float_value().ok()).unwrap_or(0.0) != 0.0
+        {
+            dst.invalidate_hi_res();
+            return;
+        }
+        dst.ensure_hi_res(scale);
+        // Charge this blit against the twin's write budget FIRST: a bitmap that
+        // is really a per-frame framebuffer loses its twin here and pays
+        // nothing more (see `HiResTwin::banned`).
+        let dest_px = (dest_rect.width().max(0) as u64)
+            .saturating_mul(dest_rect.height().max(0) as u64)
+            .saturating_mul((scale * scale).round().max(1.0) as u64);
+        if !dst.note_hi_res_written(dest_px) {
+            return;
+        }
+        let Some(mut hi) = dst.hi_res.image.take() else { return };
+        let up = |r: &IntRect| {
+            IntRect::from(
+                (r.left as f64 * scale).round() as i32,
+                (r.top as f64 * scale).round() as i32,
+                (r.right as f64 * scale).round() as i32,
+                (r.bottom as f64 * scale).round() as i32,
+            )
+        };
+        // A source that has its own twin at the same scale is sampled from it —
+        // that is where the sharp pixels are. Otherwise sample the 1:1 source
+        // into the enlarged destination rect, which magnifies it by exactly the
+        // factor the renderer would have applied anyway.
+        match src.hi_res.image.as_deref() {
+            Some(src_hi) if (src.hi_res.scale - scale).abs() < 1e-6 => {
+                hi.copy_pixels(palettes, src_hi, up(&dest_rect), up(&src_rect), params, None);
+            }
+            _ => {
+                hi.copy_pixels(palettes, src, up(&dest_rect), src_rect, params, None);
+            }
+        }
+        dst.hi_res.image = Some(hi);
+    }
+
     pub fn copy_pixels(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let dst_bitmap_ref = player.get_datum(datum).to_bitmap_ref()?;
@@ -885,6 +1081,12 @@ impl BitmapDatumHandlers {
             } else {
                 src_bitmap_ref.to_bitmap_ref()?
             };
+            // Copy the two slot ids out as plain values: the `*_bitmap_ref`
+            // bindings borrow `player` (via the datum they came from), and the
+            // hi-res materialisation below needs `&mut DirPlayer`, not just a
+            // disjoint borrow of `bitmap_manager`.
+            let src_id = *src_bitmap_ref;
+            let dst_id = *dst_bitmap_ref;
             let dest_rect_or_quad = player.get_datum(&args[1]);
             let (src_rect_vals, _flags) = player.get_datum(&args[2]).to_rect_inline()?;
             let sx1 = src_rect_vals[0] as i32;
@@ -971,19 +1173,72 @@ impl BitmapDatumHandlers {
                     ))
                 }
             };
+            // A `.image` snapshot only PROMISES its hi-res twin; this is one of
+            // the two places that promise is worth cashing in, because the blit
+            // is how composed artwork reaches the screen. Done on the stored
+            // bitmap (not the clone) so copying the same source twice renders
+            // the twin once.
+            // ...but only when the DESTINATION could actually hold a twin.
+            // Spectral Wizard blits every one of its 250+ text `.image`
+            // snapshots into the stage framebuffer, which is banned, so
+            // materialising the source there would rebuild the whole cost the
+            // promise exists to avoid.
+            let dst_can_twin = player
+                .bitmap_manager
+                .get_bitmap(dst_id)
+                .map_or(false, |b| !b.hi_res.banned);
+            if dst_can_twin
+                && player
+                    .bitmap_manager
+                    .get_bitmap(src_id)
+                    .map_or(false, |b| b.hi_res.pending.is_some())
+            {
+                let mut twin = player
+                    .bitmap_manager
+                    .get_bitmap(src_id)
+                    .map(|b| {
+                        let mut shell = Bitmap::new(b.width, b.height, b.bit_depth, b.original_bit_depth, 0, b.palette_ref.clone());
+                        shell.hi_res = b.hi_res.clone();
+                        shell
+                    });
+                if let Some(shell) = twin.as_mut() {
+                    TextMemberHandlers::materialize_hi_res(player, shell);
+                }
+                if let (Some(shell), Some(stored)) = (
+                    twin,
+                    player.bitmap_manager.get_bitmap_mut(src_id),
+                ) {
+                    stored.hi_res = shell.hi_res;
+                }
+            }
             let src_bitmap = player
                 .bitmap_manager
-                .get_bitmap(*src_bitmap_ref)
+                .get_bitmap(src_id)
                 .unwrap()
                 .clone();
             let palettes = player.movie.cast_manager.palettes();
             let dst_bitmap = player
                 .bitmap_manager
-                .get_bitmap_mut(*dst_bitmap_ref)
+                .get_bitmap_mut(dst_id)
                 .unwrap();
 
             match dest_shape {
                 DestShape::Rect(dest_rect) => {
+                    // Keep the hi-res twin (see `Bitmap::hi_res`) in step, so a
+                    // picture composed out of text `.image` snapshots stays
+                    // sharp on a scaled stage instead of being magnified.
+                    //
+                    // BEFORE the 1:1 copy: `ensure_hi_res` seeds a missing twin
+                    // from the destination's CURRENT contents, which is what the
+                    // twin should hold up to this point.
+                    Self::mirror_copy_into_hi_res(
+                        dst_bitmap,
+                        &src_bitmap,
+                        dest_rect.clone(),
+                        IntRect::from_tuple((sx1, sy1, sx2, sy2)),
+                        &param_list_concrete,
+                        &palettes,
+                    );
                     dst_bitmap.copy_pixels(
                         &palettes,
                         &src_bitmap,
@@ -994,6 +1249,11 @@ impl BitmapDatumHandlers {
                     );
                 }
                 DestShape::Quad(quad) => {
+                    // The quad warp has no hi-res equivalent (the corners are
+                    // movie-unit points and the sampler is its own path), so
+                    // the twin cannot be kept truthful — drop it and let the
+                    // bitmap magnify, exactly as before this existed.
+                    dst_bitmap.invalidate_hi_res();
                     dst_bitmap.copy_pixels_quad(
                         &palettes,
                         &src_bitmap,
@@ -1030,12 +1290,16 @@ impl BitmapDatumHandlers {
 
             // Read the filter PropList. Lookup is case-insensitive on symbol /
             // string keys to match Director's convention.
-            let (filter_type, props, filter_color) = match player.get_datum(&args[0]) {
+            let (filter_type, props, filter_color, highlight_color, shadow_color) =
+                match player.get_datum(&args[0]) {
                 Datum::PropList(items, _) => {
                     let mut filter_type: Option<Symbol> = None;
                     let mut props: FxHashMap<Symbol, f64> = FxHashMap::default();
                     // #color is a colour, not a number — glow/dropShadow need it.
                     let mut filter_color: Option<(u8, u8, u8)> = None;
+                    // ...and #bevelFilter carries a PAIR of them.
+                    let mut highlight_color: Option<(u8, u8, u8)> = None;
+                    let mut shadow_color: Option<(u8, u8, u8)> = None;
                     for (k, v) in items.iter() {
                         let key = match player.get_datum(k) {
                             Datum::Symbol(s) => *s,
@@ -1055,13 +1319,31 @@ impl BitmapDatumHandlers {
                                     32,
                                 ));
                             }
+                        } else if key.as_str().eq_ignore_ascii_case("highlightColor")
+                            || key.as_str().eq_ignore_ascii_case("shadowColor")
+                        {
+                            if let Datum::ColorRef(cr) = player.get_datum(v) {
+                                let palettes = player.movie.cast_manager.palettes();
+                                let rgb = crate::player::bitmap::bitmap::resolve_color_ref(
+                                    &palettes, cr,
+                                    &crate::player::bitmap::bitmap::PaletteRef::BuiltIn(
+                                        crate::player::bitmap::bitmap::get_system_default_palette(),
+                                    ),
+                                    32,
+                                );
+                                if key.as_str().eq_ignore_ascii_case("highlightColor") {
+                                    highlight_color = Some(rgb);
+                                } else {
+                                    shadow_color = Some(rgb);
+                                }
+                            }
                         } else {
                             // Numeric properties for AdjustColor.
                             let val = player.get_datum(v).float_value().unwrap_or(0.0);
                             props.insert(key, val);
                         }
                     }
-                    (filter_type, props, filter_color)
+                    (filter_type, props, filter_color, highlight_color, shadow_color)
                 }
                 _ => {
                     return Err(ScriptError::new(
@@ -1116,9 +1398,63 @@ impl BitmapDatumHandlers {
                         off_y = distance * rad.sin();
                     }
                     let color = filter_color.unwrap_or((0, 0, 0));
+                    // `#inner: TRUE` turns a glow inward (Flash GlowFilter.inner).
+                    let inner = props
+                        .get(&Symbol::from_str("inner"))
+                        .copied()
+                        .unwrap_or(0.0)
+                        != 0.0
+                        && kind.into_builtin() == Some(BuiltInSymbol::GlowFilter);
                     apply_glow_shadow_filter(
                         bitmap, color, blur_x, blur_y, quality, strength,
-                        off_x.round() as i32, off_y.round() as i32,
+                        off_x.round() as i32, off_y.round() as i32, inner,
+                    );
+                    bitmap.mark_dirty();
+                }
+                // Bevel. Property set per "Bitmap filters" in Using Director 11.5:
+                // `#distance`, `#angle`, `#highlightColor`/`#highlightAlpha`,
+                // `#shadowColor`/`#shadowAlpha`, `#strength`, `#quality`,
+                // `#knockout`, `#inner`, plus `#blurX`/`#blurY` (documented
+                // defaults: blur 6, quality 1, alpha opaque).
+                Some(BuiltInSymbol::BevelFilter) => {
+                    let bitmap = player.bitmap_manager.get_bitmap_mut(*bitmap_ref).ok_or_else(
+                        || ScriptError::new("applyFilter: invalid bitmap".to_string()),
+                    )?;
+                    let blur_x = props.get(&Symbol::from_str("blurx")).copied().unwrap_or(6.0).max(0.0);
+                    let blur_y = props.get(&Symbol::from_str("blury")).copied().unwrap_or(6.0).max(0.0);
+                    let strength = props
+                        .get(&Symbol::from_str("strengthpercent"))
+                        .copied()
+                        .or_else(|| props.get(&Symbol::from_str("strength")).map(|v| v * 100.0))
+                        .unwrap_or(100.0)
+                        / 100.0;
+                    let quality = props.get(&Symbol::from_str("quality")).copied().unwrap_or(1.0).clamp(1.0, 15.0) as u32;
+                    let distance = props.get(&Symbol::from_str("distance")).copied().unwrap_or(4.0);
+                    let angle = props.get(&Symbol::from_str("angle")).copied().unwrap_or(45.0);
+                    // `#highlightAlpha` / `#shadowAlpha` are 0..1 in the documented
+                    // example (`#shadowAlpha: 0.5`), while the shared property table
+                    // quotes alpha as 0-255; accept either by treating >1 as 0-255.
+                    let norm_alpha = |v: f64| if v > 1.0 { v / 255.0 } else { v };
+                    let highlight_alpha = norm_alpha(
+                        props.get(&Symbol::from_str("highlightalpha")).copied().unwrap_or(1.0),
+                    ).clamp(0.0, 1.0);
+                    let shadow_alpha = norm_alpha(
+                        props.get(&Symbol::from_str("shadowalpha")).copied().unwrap_or(1.0),
+                    ).clamp(0.0, 1.0);
+                    let inner = props.get(&Symbol::from_str("inner")).copied().unwrap_or(0.0) != 0.0;
+                    apply_bevel_filter(
+                        bitmap,
+                        highlight_color.unwrap_or((255, 255, 255)),
+                        shadow_color.unwrap_or((0, 0, 0)),
+                        highlight_alpha,
+                        shadow_alpha,
+                        blur_x,
+                        blur_y,
+                        quality,
+                        strength,
+                        distance,
+                        angle,
+                        inner,
                     );
                     bitmap.mark_dirty();
                 }
@@ -1288,6 +1624,10 @@ fn apply_glow_shadow_filter(
     strength: f64,
     offset_x: i32,
     offset_y: i32,
+    // `#inner: TRUE` — glow INWARD from the edge instead of outward.
+    // AreaZero's ScoreLevelLightInnerGlow depends on this: applying it as an
+    // outer glow stacked a second halo outside every HUD glyph.
+    inner: bool,
 ) {
     if bitmap.bit_depth != 32 {
         log::warn!(
@@ -1302,15 +1642,22 @@ fn apply_glow_shadow_filter(
         return;
     }
 
-    // Source alpha, normalised.
+    // Source alpha, normalised. An INNER glow blurs the inverse coverage —
+    // the glow grows inward from the silhouette edge.
     let mut a: Vec<f32> = (0..w * h)
-        .map(|i| bitmap.data[i * 4 + 3] as f32 / 255.0)
+        .map(|i| {
+            let v = bitmap.data[i * 4 + 3] as f32 / 255.0;
+            if inner { 1.0 - v } else { v }
+        })
         .collect();
 
-    // Separable box blur. Radius is half the Flash blur amount (blurX is the
-    // full extent of the kernel, not its radius).
-    let rx = (blur_x / 2.0).round().max(0.0) as usize;
-    let ry = (blur_y / 2.0).round().max(0.0) as usize;
+    // Separable box blur. blurX is the full WIDTH of the kernel, not its
+    // radius, so the radius is floor(blur/2) — blur 1 is a hard edge (no
+    // spread), blur 3 spreads 1px each side. Rounding UP here (blur 3 →
+    // radius 2) doubled the halo width of AreaZero's HUD glows and made every
+    // baked string look blurry next to a real projector capture.
+    let rx = (blur_x / 2.0).floor().max(0.0) as usize;
+    let ry = (blur_y / 2.0).floor().max(0.0) as usize;
     let mut tmp = vec![0.0f32; w * h];
     for _ in 0..quality.max(1) {
         if rx > 0 {
@@ -1343,9 +1690,34 @@ fn apply_glow_shadow_filter(
         }
     }
 
-    // Composite the tinted, offset blur under the original (dest-over).
     let (sr, sg, sb) = (color.0 as f32, color.1 as f32, color.2 as f32);
     let src = bitmap.data.clone();
+
+    if inner {
+        // Inner glow composites the tint INSIDE the glyph (source-atop): the
+        // pixel's own alpha is untouched, the colour blends toward the glow
+        // colour by the blurred inverse coverage. Offset does not apply.
+        for i in 0..w * h {
+            let di = i * 4;
+            let fa = src[di + 3] as f32 / 255.0;
+            if fa <= 0.0 {
+                continue;
+            }
+            let ga = (a[i] * strength as f32).clamp(0.0, 1.0);
+            if ga <= 0.0 {
+                continue;
+            }
+            for (c, sc) in [(0usize, sr), (1, sg), (2, sb)] {
+                let fc = src[di + c] as f32;
+                bitmap.data[di + c] =
+                    (fc * (1.0 - ga) + sc * ga).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+        bitmap.use_alpha = true;
+        return;
+    }
+
+    // Composite the tinted, offset blur under the original (dest-over).
     for y in 0..h {
         for x in 0..w {
             let di = (y * w + x) * 4;
@@ -1371,6 +1743,169 @@ fn apply_glow_shadow_filter(
                 bitmap.data[di + c] = out_c.round().clamp(0.0, 255.0) as u8;
             }
             bitmap.data[di + 3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    bitmap.use_alpha = true;
+}
+
+/// Director `filter(#bevelFilter, [...])` — a raised/inset edge built from the
+/// source's own ALPHA, the same way Flash's BevelFilter works.
+///
+/// Property set and defaults from the 11.5 dictionary: `filter()` lists
+/// `#bevelfilter` among the bitmap filters, and "Bitmap filters" in Using
+/// Director 11.5 gives the constructor as
+///   `filter(#BevelFilter, [#distance, #angle, #highlightColor, #highlightAlpha,
+///                          #shadowColor, #shadowAlpha, #strength, #quality,
+///                          #knockout, #inner])`
+/// alongside `#blurX` / `#blurY`, with blur 6, quality 1 and alpha fully opaque
+/// as the documented defaults.
+///
+/// Burnin' Rubber 3 is what this was written for. `[M] Text`'s
+/// `CreateTextTexture` finishes every button and field texture with
+/// `#filters: [BR3Bevel, BR3Glow*]`, where `BR3Bevel` is
+/// `[#blurX: 1, #blurY: 1, #quality: 2, #angle: 115, #distance: -1,
+///   #strengthPercent: 30, #inner: 1]`. Unimplemented, `applyFilter` left the
+/// bitmap untouched and the name-entry field lost the thin light rim that makes
+/// it read as an input box — the "shadow of an input" it looks like without it.
+fn apply_bevel_filter(
+    bitmap: &mut Bitmap,
+    highlight: (u8, u8, u8),
+    shadow: (u8, u8, u8),
+    highlight_alpha: f64,
+    shadow_alpha: f64,
+    blur_x: f64,
+    blur_y: f64,
+    quality: u32,
+    strength: f64,
+    distance: f64,
+    angle_deg: f64,
+    inner: bool,
+) {
+    if bitmap.bit_depth != 32 {
+        log::warn!(
+            "applyFilter(#bevel): bitmap is {}-bit; needs alpha, skipped",
+            bitmap.bit_depth
+        );
+        return;
+    }
+    let w = bitmap.width as usize;
+    let h = bitmap.height as usize;
+    if w == 0 || h == 0 {
+        return;
+    }
+
+    let mut a: Vec<f32> = (0..w * h)
+        .map(|i| bitmap.data[i * 4 + 3] as f32 / 255.0)
+        .collect();
+
+    // Same separable box blur (and same radius rule) the glow uses: blurX is the
+    // kernel WIDTH, so the radius is floor(blur/2) and blur 1 is a hard edge.
+    // That is what makes BR3's `blurX: 1` bevel a crisp one-pixel rim rather than
+    // a soft ramp.
+    let rx = (blur_x / 2.0).floor().max(0.0) as usize;
+    let ry = (blur_y / 2.0).floor().max(0.0) as usize;
+    let mut tmp = vec![0.0f32; w * h];
+    for _ in 0..quality.max(1) {
+        if rx > 0 {
+            for y in 0..h {
+                for x in 0..w {
+                    let lo = x.saturating_sub(rx);
+                    let hi = (x + rx).min(w - 1);
+                    let mut sum = 0.0;
+                    for s in lo..=hi { sum += a[y * w + s]; }
+                    tmp[y * w + x] = sum / ((hi - lo + 1) as f32);
+                }
+            }
+            a.copy_from_slice(&tmp);
+        }
+        if ry > 0 {
+            for x in 0..w {
+                for y in 0..h {
+                    let lo = y.saturating_sub(ry);
+                    let hi = (y + ry).min(h - 1);
+                    let mut sum = 0.0;
+                    for s in lo..=hi { sum += a[s * w + x]; }
+                    tmp[y * w + x] = sum / ((hi - lo + 1) as f32);
+                }
+            }
+            a.copy_from_slice(&tmp);
+        }
+    }
+
+    // Angle is measured clockwise from +x with y pointing DOWN, matching the
+    // drop-shadow arm above. Sampled BILINEARLY rather than rounded to whole
+    // pixels: BR3's distance 1 at 115 degrees is (0.42, -0.91), and rounding
+    // would throw the horizontal component away entirely, leaving a rim on only
+    // two sides of the box.
+    let rad = angle_deg.to_radians();
+    let (dx, dy) = (distance * rad.cos(), distance * rad.sin());
+    let sample = |src: &[f32], fx: f64, fy: f64| -> f32 {
+        let x0 = fx.floor();
+        let y0 = fy.floor();
+        let tx = (fx - x0) as f32;
+        let ty = (fy - y0) as f32;
+        let at = |xi: f64, yi: f64| -> f32 {
+            if xi < 0.0 || yi < 0.0 || xi >= w as f64 || yi >= h as f64 {
+                0.0
+            } else {
+                src[yi as usize * w + xi as usize]
+            }
+        };
+        let v00 = at(x0, y0);
+        let v10 = at(x0 + 1.0, y0);
+        let v01 = at(x0, y0 + 1.0);
+        let v11 = at(x0 + 1.0, y0 + 1.0);
+        v00 * (1.0 - tx) * (1.0 - ty) + v10 * tx * (1.0 - ty)
+            + v01 * (1.0 - tx) * ty + v11 * tx * ty
+    };
+
+    let src = bitmap.data.clone();
+    let (hr, hg, hb) = (highlight.0 as f32, highlight.1 as f32, highlight.2 as f32);
+    let (dr, dg, db) = (shadow.0 as f32, shadow.1 as f32, shadow.2 as f32);
+
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            let di = i * 4;
+            // The lit side is sampled UP-light, the shaded side down-light; their
+            // difference is the edge, which is what gives a flat fill a raised rim.
+            let lit = sample(&a, x as f64 - dx, y as f64 - dy);
+            let dim = sample(&a, x as f64 + dx, y as f64 + dy);
+            let mut hl = ((lit - dim).max(0.0) as f64 * strength * highlight_alpha).clamp(0.0, 1.0);
+            let mut sh = ((dim - lit).max(0.0) as f64 * strength * shadow_alpha).clamp(0.0, 1.0);
+            let fa = src[di + 3] as f64 / 255.0;
+            // An INNER bevel lives inside the silhouette, an outer one outside it.
+            if inner {
+                hl *= fa;
+                sh *= fa;
+            } else {
+                hl *= 1.0 - fa;
+                sh *= 1.0 - fa;
+            }
+            if hl <= 0.0 && sh <= 0.0 {
+                continue;
+            }
+            let (cr, cg, cb, ca) = if hl >= sh { (hr, hg, hb, hl) } else { (dr, dg, db, sh) };
+            if inner {
+                // Source-atop: tint the existing pixel, leave its alpha alone.
+                for (c, sc) in [(0usize, cr), (1, cg), (2, cb)] {
+                    let fc = src[di + c] as f64;
+                    bitmap.data[di + c] =
+                        (fc * (1.0 - ca) + sc as f64 * ca).round().clamp(0.0, 255.0) as u8;
+                }
+            } else {
+                // Dest-over: the bevel sits behind the source.
+                let out_a = fa + ca * (1.0 - fa);
+                if out_a <= 0.0 {
+                    continue;
+                }
+                for (c, sc) in [(0usize, cr), (1, cg), (2, cb)] {
+                    let fc = src[di + c] as f64;
+                    bitmap.data[di + c] =
+                        (((fc * fa + sc as f64 * ca * (1.0 - fa)) / out_a)).round().clamp(0.0, 255.0) as u8;
+                }
+                bitmap.data[di + 3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
         }
     }
     bitmap.use_alpha = true;

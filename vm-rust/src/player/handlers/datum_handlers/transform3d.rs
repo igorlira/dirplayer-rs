@@ -1,21 +1,38 @@
 //! Lingo Transform object handler.
 //! A Transform is a mutable 4x4 row-major matrix used for 3D position/rotation/scale.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::cell::RefCell;
 use log::debug;
 
+/// What a dirty Transform3d write did — a bitmask, since several writes can land
+/// on one datum between flushes. The REPLACE bits matter to the renderer's
+/// skinned-model strip (`Shockwave3dRuntimeState::note_node_transform_replaced`):
+/// a script that replaces a node's rotation or position wipes the bonesPlayer's
+/// root clearance from it, while a composing call (`rotate`, `translate`, …) or
+/// a scale write keeps it.
+pub const WRITE_ROTATION: u8 = 1;
+pub const WRITE_POSITION: u8 = 2;
+pub const WRITE_SCALE: u8 = 4;
+pub const WRITE_COMPOSE: u8 = 8;
+
 thread_local! {
-    /// Track which Transform3d datum IDs were mutated in-place (dirty).
-    /// sync_persistent_transforms only writes dirty datums to node_transforms.
-    pub static DIRTY_TRANSFORM_IDS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+    /// Track which Transform3d datum IDs were mutated in-place (dirty), with the
+    /// kind of write. sync_persistent_transforms only writes dirty datums to
+    /// node_transforms.
+    pub static DIRTY_TRANSFORM_IDS: RefCell<HashMap<usize, u8>> = RefCell::new(HashMap::new());
 }
 
+/// A composing mutation (`rotate`, `translate`, `preScale`, …).
 pub fn mark_transform_dirty(datum_ref: &crate::player::DatumRef) {
-    DIRTY_TRANSFORM_IDS.with(|d| d.borrow_mut().insert(datum_ref.unwrap()));
+    mark_transform_dirty_with(datum_ref, WRITE_COMPOSE);
 }
 
-pub fn take_dirty_ids() -> HashSet<usize> {
+pub fn mark_transform_dirty_with(datum_ref: &crate::player::DatumRef, mask: u8) {
+    DIRTY_TRANSFORM_IDS.with(|d| *d.borrow_mut().entry(datum_ref.unwrap()).or_insert(0) |= mask);
+}
+
+pub fn take_dirty_ids() -> HashMap<usize, u8> {
     DIRTY_TRANSFORM_IDS.with(|d| std::mem::take(&mut *d.borrow_mut()))
 }
 
@@ -72,12 +89,23 @@ impl Transform3dDatumHandlers {
                     false,
                 ))
             }
+            // `ilk` is a property of EVERY Lingo value, transforms included, and
+            // scripts use it to type-check arguments. AreaZero's [PS] HandGrenade.new
+            // opens with `if tDataList[#transform].ilk = #transform then ... else
+            // return 0`, so throwing a grenade ("g" / "e") aborted the whole handler
+            // with "Unknown transform property 'ilk'".
+            Some(BuiltInSymbol::Ilk) => Ok(Datum::Symbol(BuiltInSymbol::Transform.into())),
             _ => Err(ScriptError::new(format!("Unknown transform property '{prop}'"))),
         }
     }
 
     pub fn set_prop(player: &mut DirPlayer, datum: &DatumRef, prop: Symbol, value: &DatumRef) -> Result<(), ScriptError> {
-        mark_transform_dirty(datum);
+        mark_transform_dirty_with(datum, match prop.into_builtin() {
+            Some(BuiltInSymbol::Rotation) => WRITE_ROTATION,
+            Some(BuiltInSymbol::Position) => WRITE_POSITION,
+            Some(BuiltInSymbol::Scale) => WRITE_SCALE,
+            _ => WRITE_COMPOSE,
+        });
         let val = player.get_datum(value).clone();
         let m = match player.get_datum_mut(datum) {
             Datum::Transform3d(m) => m,
@@ -199,8 +227,20 @@ impl Transform3dDatumHandlers {
             "prescale" => Self::scale(datum, args, false),
             "inverse" => Self::inverse(datum),
             "invert" => Self::invert(datum),
-            "duplicate" => Self::duplicate(datum),
+            // `duplicate` is the Scripting Dictionary's name for copying a transform
+            // (11.5, `transform (property)`: "t = ...model("Moon1").transform.duplicate()").
+            // `clone` is NOT documented on a transform — the dictionary lists it only for
+            // model/group/light/camera — but Intel's own sample movies, shipped with the
+            // Shockwave 3D asset Intel authored, call it on a transform and cannot work
+            // otherwise: Carousel's `init` opens with
+            //     gInitCameraTrans = member(1).camera(1).transform.clone()
+            // and its Zoom button clones the camera transform before writing `.position`,
+            // so a VOID answer would break the Reset and Zoom buttons outright.
+            // Inferred, not specified; a transform is a value object, so the only thing
+            // `clone` can mean here is the independent copy `duplicate` already returns.
+            "duplicate" | "clone" => Self::duplicate(datum),
             "multiply" => Self::multiply(datum, args),
+            "premultiply" => Self::pre_multiply(datum, args),
             "interpolate" => Self::interpolate(datum, args),
             "interpolateto" => Self::interpolate_to(datum, args),
             "getat" => Self::get_at(datum, args),
@@ -257,7 +297,7 @@ impl Transform3dDatumHandlers {
 
     fn identity(datum: &DatumRef) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            mark_transform_dirty(datum);
+            mark_transform_dirty_with(datum, WRITE_ROTATION | WRITE_POSITION | WRITE_SCALE);
             *player.get_datum_mut(datum) = Datum::transform3d(IDENTITY);
             Ok(DatumRef::Void)
         })
@@ -407,6 +447,35 @@ impl Transform3dDatumHandlers {
         })
     }
 
+    /// `transform1.preMultiply(transform2)` — Director 11.5 Scripting
+    /// Dictionary, `preMultiply`: "alters a transform by PRE-applying the
+    /// positional, rotational, and scaling effects of another transform ...
+    /// The effect is that the order of operations is reversed" relative to
+    /// `multiply`. So where `multiply` composes M*Other, this composes Other*M.
+    ///
+    /// It ALTERS the receiver, like `translate` / `rotate` / `scale` next door,
+    /// and callers rely on that rather than on the return value: thehillshaveeyes'
+    /// `_enemy.stepit` pins each mutant's collision proxies onto its skeleton with
+    ///     pCollBody.transform.preMultiply(pBPmodel.bonesPlayer.bone[16].worldTransform)
+    /// and throws the result away. The result is returned as well so a
+    /// `t = a.preMultiply(b)` form still reads.
+    fn pre_multiply(datum: &DatumRef, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            mark_transform_dirty(datum);
+            let m = match player.get_datum(datum) {
+                Datum::Transform3d(m) => **m,
+                _ => return Err(ScriptError::new("Expected Transform3d".into())),
+            };
+            let other = match player.get_datum(&args[0]) {
+                Datum::Transform3d(m) => **m,
+                _ => return Err(ScriptError::new("Expected Transform3d argument".into())),
+            };
+            let result = mat4_mul(&other, &m);
+            *player.get_datum_mut(datum) = Datum::transform3d(result);
+            Ok(player.alloc_datum(Datum::transform3d(result)))
+        })
+    }
+
     fn interpolate(datum: &DatumRef, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let m = match player.get_datum(datum) {
@@ -460,7 +529,7 @@ impl Transform3dDatumHandlers {
 
     fn set_at(datum: &DatumRef, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            mark_transform_dirty(datum);
+            mark_transform_dirty_with(datum, WRITE_ROTATION | WRITE_POSITION | WRITE_SCALE);
             let index = (player.get_datum(&args[0]).int_value()? - 1) as usize;
             let value = player.get_datum(&args[1]).float_value()?;
             if index >= 16 {

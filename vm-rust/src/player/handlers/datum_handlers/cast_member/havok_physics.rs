@@ -1198,9 +1198,10 @@ fn get_point_velocity(rb: &crate::player::cast_member::HavokRigidBody, world_poi
 
 /// Apply drag forces to all bodies.
 /// From x86: sub_10075C30 (DragAction::apply)
-fn apply_drag(state: &mut HavokPhysicsState) {
+fn apply_drag(state: &mut HavokPhysicsState, dt: f64) {
     let linear_drag = state.drag_params[0];
     let angular_drag = state.drag_params[1];
+    let world_scale = state.scale;
     if linear_drag == 0.0 && angular_drag == 0.0 { return; }
     for rb in &mut state.rigid_bodies {
         if rb.pinned || !rb.active || rb.inverse_mass <= 0.0 { continue; }
@@ -1208,8 +1209,73 @@ fn apply_drag(state: &mut HavokPhysicsState) {
             for i in 0..3 { rb.force[i] -= linear_drag * rb.linear_velocity[i]; }
         }
         if angular_drag != 0.0 {
-            for i in 0..3 { rb.torque[i] -= angular_drag * rb.angular_velocity[i]; }
+            // Applied as a velocity DECAY, not a torque.
+            //
+            // As a torque it goes through explicit Euler, which is only
+            // CONDITIONALLY stable: the per-step decay is
+            // `angular_drag * I^-1 * dt`, and for a light chassis with a stiff
+            // drag that exceeds 1 (1.445 for Age of Speed 2's chassis at one
+            // substep). Past 1 the damping overshoots through zero and the body
+            // settles into a COUNTER-rotation; near 2 it diverges outright. The
+            // result then depended on `subSteps`, which is a solver-accuracy
+            // knob and must not change the physics:
+            //
+            //     subSteps    1       2       5      10
+            //     torque   -0.094   17.14   0.065   0.077
+            //     decay     0.192   0.144   0.112   0.100
+            //
+            // Per-axis on the inverse-inertia diagonal: the tensor is diagonal
+            // in the body frame, and the off-diagonal coupling a rotated tensor
+            // would add is second-order next to the decay itself.
+            // `inv_scale_sq` for the same reason applyAngularImpulse carries it:
+            // the tensor is in DISPLAY units where the engine's is in metres.
+            // A force-derived torque needs no such factor because r x F already
+            // supplies worldScale^2, which cancels — but drag, like a bare
+            // angular impulse, does not. Without it drag was ~1550x too weak to
+            // damp anything and the yaw ran away.
+            let inv_scale_sq = if world_scale.abs() > 1e-10 {
+                (1.0 / world_scale) * (1.0 / world_scale)
+            } else { 1.0 };
+            for i in 0..3 {
+                let inv_i = rb.inverse_inertia_tensor[i * 3 + i];
+                if inv_i > 0.0 {
+                    rb.angular_velocity[i] /= 1.0 + angular_drag * inv_i * inv_scale_sq * dt;
+                }
+            }
         }
+    }
+}
+
+/// The scene's UP axis: the unit vector opposite gravity.
+///
+/// Every HKE-authored scene is Z-up — the Havok Xtra's own default gravity is
+/// `[0,0,-g]` — so the contact code below was written testing index 2 directly.
+/// But up is a property of the MOVIE, not of the engine: Sewer Run 2 drives a
+/// Shockwave 3D world in Director's Y-up space and says so explicitly with
+/// `hk.gravity = vector(0, -8000, 0)`. Asking about index 2 there asks about a
+/// HORIZONTAL axis.
+///
+/// Falls back to +Z when gravity is zero, so a scene that never sets gravity
+/// keeps exactly the behaviour the Z-up scenes were tuned against.
+fn scene_up_axis(gravity: V3) -> V3 {
+    let m = (gravity[0] * gravity[0] + gravity[1] * gravity[1] + gravity[2] * gravity[2]).sqrt();
+    if m < 1e-9 {
+        return [0.0, 0.0, 1.0];
+    }
+    [-gravity[0] / m, -gravity[1] / m, -gravity[2] / m]
+}
+
+/// The index of the scene's dominant up component, and the two ground-plane
+/// indices that go with it. `[0,0,-g]` (every HKE scene) gives `(2, 0, 1)` — the
+/// axes the code below was originally written against.
+fn up_axis_indices(up: V3) -> (usize, usize, usize) {
+    let (ax, ay, az) = (up[0].abs(), up[1].abs(), up[2].abs());
+    if ax >= ay && ax >= az {
+        (0, 1, 2)
+    } else if ay >= az {
+        (1, 0, 2)
+    } else {
+        (2, 0, 1)
     }
 }
 
@@ -1466,7 +1532,17 @@ fn integrate_body(rb: &mut crate::player::cast_member::HavokRigidBody, dt: f64) 
         for i in 0..3 { rb.linear_velocity[i] += rb.force[i] * rb.inverse_mass * dt; }
     }
 
-    // Phase 4: Angular velocity: omega += I_inv * torque * dt
+    // Phase 4: Angular velocity: omega += Iinv_BODY * torque * dt
+    //
+    // BODY-frame tensor applied DIRECTLY to a world torque, no R I R^T. This
+    // looks frame-inconsistent and is not — it is what Havok's eulerIntegrate
+    // does, and it is MEASURED: a Lingo probe applying a known force at an
+    // offset point matches Director's resulting angular-velocity DIRECTION to
+    // 0.00 deg this way and is 28.45 deg off when the tensor is rotated.
+    // The contact solver is the opposite (see `world_inv_inertia`). Do not
+    // unify them; switching this to the world tensor was tried again on
+    // 2026-08-22 against Age of Speed 2's corkscrew and changed nothing there
+    // while contradicting the probe.
     let ang_accel = mat3_transform(rb.inverse_inertia_tensor, rb.torque);
     for i in 0..3 { rb.angular_velocity[i] += ang_accel[i] * dt; }
 }
@@ -1524,7 +1600,32 @@ const MIN_BISECTION_DT: f64 = 0.00001;
 /// Maximum bisection retries.
 const MAX_BISECTION_RETRIES: usize = 30;
 
+/// Per-step setup shared by every substep. Held by the caller so the substep
+/// loop can be driven from OUTSIDE this module — the Xtra fires step callbacks
+/// between substeps, and a callback that computes a state-dependent impulse (a
+/// hover spring, say) must re-evaluate against the position the previous
+/// substep produced. Banking one value and replaying it diverges.
+pub struct StepPrep {
+    pub n_subs: usize,
+    pub sub_dt: f64,
+    force_scale: f64,
+    torque_scale: f64,
+    torque_scale_pitch_roll: f64,
+    torque_scale_yaw: f64,
+    saved_forces: Vec<([f64; 3], [f64; 3])>,
+    saved_step: Vec<([f64; 3], [f64; 3])>,
+}
+
 pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_steps: i32) {
+    let prep = step_begin(state, time_increment, num_sub_steps);
+    for _ in 0..prep.n_subs {
+        step_substep(state, &prep);
+    }
+    step_finish(state, time_increment);
+}
+
+/// Snapshot the forces and scaling factors this step will use.
+pub fn step_begin(state: &mut HavokPhysicsState, time_increment: f64, num_sub_steps: i32) -> StepPrep {
     let n_subs = num_sub_steps.max(1) as usize;
     let sub_dt = time_increment / n_subs as f64;
 
@@ -1579,10 +1680,32 @@ pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_s
     // both tested force_scale=N (=7), which is 6× too strong, hence "way worse"
     // / uncontrollable. 6N matches Director at N=1, 7 AND 20, not just at 7.
     let force_scale: f64 = 6.0 * n_subs as f64;         // 42 at N=7 (was 49)
-    // Torque is left on the OLD N² basis deliberately: the probe measured only
-    // the linear response (angV stayed 0), so there is no measurement of
-    // Director's torque law to justify moving it. These keep their previous
-    // absolute values (434 / 158.76 at N=7) so this change isolates linear force.
+    // TORQUE stays on the same 6N basis as force. A 1/N torque (6x stronger)
+    // was measured on Age of Speed 2's corkscrew and NOT shipped — see below.
+    //
+    // AoS2 is the one place a Director oracle exists for an angular response:
+    // the movie calls `applyTorque` from exactly one place (`AgeOfSpeed2
+    // Vehicle.UpdateGravity`, the roll/pitch alignment onto the road normal)
+    // and everything else it does is impulses, so the divider is a clean gain
+    // knob on that one term. Against Director's roll error of median 0.084 /
+    // p90 0.148, four runs each (this harness is wall-clock driven, so single
+    // runs mean nothing):
+    //
+    //     divider   roll err median              reaches t15
+    //     6N        0.541 / 0.286 / 0.341 / 0.713    2 of 4
+    //     N         0.090 / 0.230 / 0.177 / 0.097    4 of 4
+    //     N²        0.369 / 0.334 (2 runs)           —
+    //
+    // REJECTED anyway: at 1/N FinalDrive's car lands on its roof and its
+    // in-game snapshot moves 67%. A global 6x on every non-driven body's torque
+    // is not a law, it is compensation — almost certainly for the persistent
+    // driving ROLL already documented for FinalDrive (right-side hover points
+    // match Director, left-side sit far off), which AoS2 shows in the same
+    // form. Fix that and re-measure this; do not ship the gain on its own.
+    let torque_scale: f64 = force_scale;                // 6N, same as force
+    // SuperSonic's driven path keeps its own empirical pitch/roll vs yaw
+    // asymmetry (434 / 158.76 at N=7); it was calibrated against a different
+    // Director capture and is not touched by the measurement above.
     let n_sq = (n_subs * n_subs) as f64;                // 49 at N=7
     let torque_scale_pitch_roll: f64 = n_sq * (62.0 / 7.0);  // 434
     let torque_scale_yaw: f64 = n_sq * 3.24;                  // 158.76
@@ -1595,7 +1718,32 @@ pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_s
     let saved_step: Vec<([f64;3],[f64;3])> = state.rigid_bodies.iter()
         .map(|rb| (rb.step_force, rb.step_torque)).collect();
 
-    for _sub in 0..n_subs {
+    StepPrep {
+        n_subs,
+        sub_dt,
+        force_scale,
+        torque_scale,
+        torque_scale_pitch_roll,
+        torque_scale_yaw,
+        saved_forces,
+        saved_step,
+    }
+}
+
+/// One substep: re-seat this step's forces, then integrate.
+pub fn step_substep(state: &mut HavokPhysicsState, prep: &StepPrep) {
+    let StepPrep {
+        sub_dt,
+        force_scale,
+        torque_scale,
+        torque_scale_pitch_roll,
+        torque_scale_yaw,
+        saved_forces,
+        ..
+    } = prep;
+    let (sub_dt, force_scale, torque_scale) = (*sub_dt, *force_scale, *torque_scale);
+    let (torque_scale_pitch_roll, torque_scale_yaw) = (*torque_scale_pitch_roll, *torque_scale_yaw);
+    {
         // Reset forces to game values each substep (gravity/drag added in
         // step_single). The per-axis force/torque dividers are a SuperSonic-
         // specific calibration; applying them to OTHER hover cars crushes their
@@ -1607,27 +1755,38 @@ pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_s
                 let (fs, tsp, tsy) = if rb.driven {
                     (force_scale, torque_scale_pitch_roll, torque_scale_yaw)
                 } else {
-                    // Non-SuperSonic hover cars: scale torque the SAME as force
-                    // (physically consistent) instead of the SuperSonic-only
+                    // Non-SuperSonic hover cars: isotropic torque on the 1/N
+                    // basis (see step_begin) instead of the SuperSonic-only
                     // pitch/roll/yaw asymmetry that crushed levelling torque.
-                    (force_scale, force_scale, force_scale)
+                    (force_scale, torque_scale, torque_scale)
                 };
+                // Step-callback force/torque is read LIVE from the body, not
+                // from the begin-time snapshot. With callbacks interleaved, the
+                // callback for THIS substep has already run and written
+                // `step_force`; using a snapshot taken before the step began
+                // would read the value `step_finish` cleared at the end of the
+                // previous step — i.e. zero. That is what left Age of Speed's
+                // cars hanging in the air with no gravity.
+                let (sf, st) = (rb.step_force, rb.step_torque);
                 rb.force = [
-                    saved_forces[i].0[0]/fs + saved_step[i].0[0],
-                    saved_forces[i].0[1]/fs + saved_step[i].0[1],
-                    saved_forces[i].0[2]/fs + saved_step[i].0[2],
+                    saved_forces[i].0[0]/fs + sf[0],
+                    saved_forces[i].0[1]/fs + sf[1],
+                    saved_forces[i].0[2]/fs + sf[2],
                 ];
                 rb.torque = [
-                    saved_forces[i].1[0]/tsp + saved_step[i].1[0],   // world X ≈ body pitch
-                    saved_forces[i].1[1]/tsp + saved_step[i].1[1],   // world Y ≈ body roll
-                    saved_forces[i].1[2]/tsy + saved_step[i].1[2],   // world Z ≈ body yaw
+                    saved_forces[i].1[0]/tsp + st[0],   // world X ≈ body pitch
+                    saved_forces[i].1[1]/tsp + st[1],   // world Y ≈ body roll
+                    saved_forces[i].1[2]/tsy + st[2],   // world Z ≈ body yaw
                 ];
             }
         }
 
         step_single(state, sub_dt);
     }
+}
 
+/// Everything that runs once per step, after the last substep.
+pub fn step_finish(state: &mut HavokPhysicsState, time_increment: f64) {
     // Clear forces after all substeps. step_force too — the step callback re-sets
     // it fresh each frame (post-step), so it must not accumulate across frames.
     for rb in &mut state.rigid_bodies {
@@ -1751,7 +1910,7 @@ fn step_single(state: &mut HavokPhysicsState, dt: f64) {
         apply_gravity(state);
 
         // Phase 3: Apply actions (drag, springs, dashpots)
-        apply_drag(state);
+        apply_drag(state, remaining);
         apply_springs(state, remaining);
         apply_linear_dashpots(state, remaining);
         apply_angular_dashpots(state, remaining);
@@ -2033,6 +2192,10 @@ fn apply_ground_constraints(state: &mut HavokPhysicsState) {
 /// Clears resting contact when ball leaves the mesh AABB (edge of platform).
 fn apply_surface_contacts(state: &mut HavokPhysicsState, dt: f64) {
     let g = state.gravity;
+    // The plane clamp below adjusts the body along the UP axis only (adjusting
+    // along the tilted normal jitters the other two). Which index that is comes
+    // from gravity, not from an assumption that the world is Z-up.
+    let (ui, a0, a1) = up_axis_indices(scene_up_axis(g));
 
     for bi in 0..state.rigid_bodies.len() {
         let rc = match &state.rigid_bodies[bi].resting_normal {
@@ -2048,9 +2211,39 @@ fn apply_surface_contacts(state: &mut HavokPhysicsState, dt: f64) {
         let pos = state.rigid_bodies[bi].position;
         let n = rc.normal;
 
-        // Check if ball is still within the mesh AABB (on the platform)
-        if pos[0] < rc.aabb_min[0] || pos[0] > rc.aabb_max[0]
-            || pos[1] < rc.aabb_min[1] || pos[1] > rc.aabb_max[1] {
+        // A resting contact is ONE plane, sampled at one point of one triangle,
+        // and while it is held the body is skipped by `detect_all_collisions`
+        // entirely — this is the only thing touching it. That is fine for what it
+        // was written for (a ball settling on a platform, a car sitting on
+        // terrain), where the body barely moves relative to where the plane was
+        // taken. It is badly wrong once the body TRAVELS: Sewer Run 2's boarder
+        // rides a curved half-pipe at ~7000 units/s against a single collision
+        // mesh whose AABB is the entire course, so it stayed glued to the tangent
+        // plane of whatever triangle it first touched and slid straight out of the
+        // tube with no per-triangle collision ever running again.
+        //
+        // So the plane is only trusted near where it was sampled. Beyond that the
+        // resting contact is dropped and the body goes back through the full
+        // narrow phase next step, which re-acquires against the triangle it is
+        // actually over. A body that stays put never reaches the threshold, so
+        // the settle/rest behaviour it was tuned against is unchanged.
+        {
+            let d = v3_sub(pos, rc.plane_point);
+            let dn = v3_dot(d, n);
+            let tangential = v3_len([d[0] - dn * n[0], d[1] - dn * n[1], d[2] - dn * n[2]]);
+            if tangential > 4.0 * eff_radius {
+                state.rigid_bodies[bi].resting_normal = None;
+                continue;
+            }
+        }
+
+        // Check if ball is still within the mesh AABB (on the platform).
+        // Tested on the two GROUND-PLANE axes — which ones those are depends on
+        // where up is (see `up_axis_indices`). Hardcoding 0/1 asks a Y-up movie
+        // whether its HEIGHT is inside the mesh's horizontal extent and never
+        // notices it running off the far end.
+        if pos[a0] < rc.aabb_min[a0] || pos[a0] > rc.aabb_max[a0]
+            || pos[a1] < rc.aabb_min[a1] || pos[a1] > rc.aabb_max[a1] {
             // Left the platform edge — free fall
             state.rigid_bodies[bi].resting_normal = None;
             continue;
@@ -2063,11 +2256,11 @@ fn apply_surface_contacts(state: &mut HavokPhysicsState, dt: f64) {
         //   (px-ppx)*nx + (py-ppy)*ny + (pz-ppz)*nz = eff_radius
         //   pz = ppz + (eff_radius - (px-ppx)*nx - (py-ppy)*ny) / nz
         let rb = &mut state.rigid_bodies[bi];
-        if n[2].abs() > 0.01 {
-            let target_z = rc.plane_point[2]
-                + (eff_radius - (rb.position[0]-rc.plane_point[0])*n[0]
-                              - (rb.position[1]-rc.plane_point[1])*n[1]) / n[2];
-            rb.position[2] = target_z;
+        if n[ui].abs() > 0.01 {
+            let target_up = rc.plane_point[ui]
+                + (eff_radius - (rb.position[a0]-rc.plane_point[a0])*n[a0]
+                              - (rb.position[a1]-rc.plane_point[a1])*n[a1]) / n[ui];
+            rb.position[ui] = target_up;
         }
 
         // Cancel normal velocity
@@ -2192,6 +2385,8 @@ fn detect_all_collisions(state: &HavokPhysicsState) -> Vec<CollisionContact> {
         && state.linear_dashpots.is_empty()
         && state.angular_dashpots.is_empty();
 
+    let up = scene_up_axis(state.gravity);
+
     for bi in 0..state.rigid_bodies.len() {
         let rb = &state.rigid_bodies[bi];
         if rb.pinned || !rb.active || rb.inverse_mass <= 0.0 { continue; }
@@ -2249,8 +2444,13 @@ fn detect_all_collisions(state: &HavokPhysicsState) -> Vec<CollisionContact> {
             // chassis along the road continuously — 1619 of its 1681 contacts carry
             // normal.z ~ 0.995. Discarding those left the hull with no floor, so the
             // car sank through the loop instead of resting on the track.
+            //
+            // Measured along the SCENE's up axis (see `scene_up_axis`), not a
+            // hardcoded +Z: for the Z-up scenes above this is the same test, but
+            // a Y-up movie's walls are not its floor.
             let frictionless = rb.friction.abs() < 1e-6;
-            if c.normal[2] > 0.7 && c.body_b.is_none() && !body_passive && !frictionless { continue; }
+            let n_up = c.normal[0] * up[0] + c.normal[1] * up[1] + c.normal[2] * up[2];
+            if n_up > 0.7 && c.body_b.is_none() && !body_passive && !frictionless { continue; }
             if best.as_ref().map_or(true, |b| c.depth > b.depth) {
                 best = Some(c);
             }

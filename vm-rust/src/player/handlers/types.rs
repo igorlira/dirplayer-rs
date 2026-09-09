@@ -75,11 +75,18 @@ impl TypeUtils {
             Datum::MouseRef => Ok(vec![BuiltInSymbol::Mouse]),
             Datum::XmlRef(..) => Ok(vec![BuiltInSymbol::Xml]),
             Datum::JsObjectRef(..) => Ok(vec![BuiltInSymbol::Instance]),
+            // A mixer's sound object is an object handle, like any other Xtra
+            // instance Director hands a script.
+            Datum::MixerSoundObjectRef(..) => Ok(vec![BuiltInSymbol::Instance]),
             Datum::DateRef(..) => Ok(vec![BuiltInSymbol::Date]),
             Datum::MathRef(..) => Ok(vec![BuiltInSymbol::Math]),
             Datum::VarRef(..) => Ok(vec![BuiltInSymbol::Void]), // VarRef should be dereferenced before checking ilk
             Datum::FlashObjectRef(..) => Ok(vec![BuiltInSymbol::Instance]),
             Datum::Shockwave3dObjectRef(r) => Ok(vec![r.object_type]),
+            // A physics Xtra's rigid bodies, springs and joints are object
+            // handles like any other an Xtra hands out. These had no arm at all,
+            // so both `ilk(rb)` and `rb.ilk` raised.
+            Datum::HavokObjectRef(..) | Datum::PhysXObjectRef(..) => Ok(vec![BuiltInSymbol::Instance]),
             Datum::Transform3d(..) => Ok(vec![BuiltInSymbol::Transform]),
 
             _ => Err(ScriptError::new(format!(
@@ -371,6 +378,19 @@ impl TypeUtils {
     }
 }
 
+
+/// Director clamps an out-of-range colour component into 0..255 — Scripting
+/// Dictionary, `color()`: "Valid values range from 0 to 255. All other values are
+/// truncated." A plain `as u8` WRAPS instead, and scripts routinely overshoot on
+/// the last step of a fade: SweeTarts 3D ramps its menu backdrop with
+/// `gtimer = gtimer + 5 … shader.emissive = rgb(gtimer, gtimer, gtimer)` and only
+/// then tests `gtimer > 255`, so the final write is `rgb(260, 260, 260)`. Wrapped
+/// that is `rgb(4, 4, 4)` and the menu snapped to black at the exact moment the
+/// fade-up finished.
+fn clamp_color_component(v: i32) -> u8 {
+    v.clamp(0, 255) as u8
+}
+
 impl TypeHandlers {
     pub fn objectp(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
@@ -395,6 +415,18 @@ impl TypeHandlers {
                 _ => false,
             };
             Ok(player.alloc_datum(datum_bool(is_void)))
+        })
+    }
+
+    /// `vectorP(x)` — 1 when `x` is a vector. The 11.5 Scripting Dictionary
+    /// has no entry for it (the documented test is `ilk(x) = #vector`, and
+    /// `#vector` is in `ilk`'s 3D type table), but Director accepts it as the
+    /// vector member of the `<type>P` family alongside listP/voidP/objectP.
+    /// Inferred from that family, not specified.
+    pub fn vectorp(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let is_vector = matches!(player.get_datum(&args[0]), Datum::Vector(_));
+            Ok(player.alloc_datum(datum_bool(is_vector)))
         })
     }
 
@@ -555,6 +587,26 @@ impl TypeHandlers {
                         Ok(datum_ref)
                     }
                     Err(err) => {
+                        // STAYS a warning, and deliberately so: this is the only
+                        // place a gap in the expression parser shows up.
+                        //
+                        // Director does NOT raise here -- 11.5 Scripting
+                        // Dictionary, `value()`: "Expressions that Lingo cannot
+                        // parse will produce unexpected results, but will not
+                        // produce Lingo errors. The result is the value of the
+                        // INITIAL PORTION of the expression up to the first
+                        // syntax error found in the string." Answering Void is
+                        // therefore never an error for the movie, but it is not
+                        // the whole contract either: Director returns whatever
+                        // prefix did parse, and we return Void for the lot. So
+                        // every line logged here is a candidate gap -- either an
+                        // expression the parser should have handled, or the
+                        // unimplemented partial-parse rule -- and silencing it
+                        // would hide both.
+                        //
+                        // Volume is real (308 in one corpus sweep, 161 of them
+                        // the record separator 0x1E) but that IS the signal: it
+                        // says which movies to look at first.
                         if !is_expected_value_retry_fragment(&s, &cleaned) {
                             warn!(
                                 "[value()] parse error → Void — input={:?} cleaned={:?} err={}",
@@ -571,6 +623,58 @@ impl TypeHandlers {
 
     pub fn void(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         Ok(DatumRef::Void)
+    }
+
+    /// `audioFilter(<symbol> {, <paramList>})` — Director 11.5 Scripting
+    /// Dictionary, "Audio filters":
+    ///
+    /// > <audioFilter Object Reference> audioFilter (<symbol>, <paramList>)
+    /// > Filters return filter objects if their parameters are properly
+    /// > specified.
+    ///
+    /// The filter object is a bag of named, readable AND writable properties —
+    /// each filter's own parameters (`#shift` for PitchShiftFilter, `#echoLevel`
+    /// / `#feedback` for EchoFilter, …) plus the common `enabled`. That is
+    /// exactly a Lingo property list, so one is what this answers: the caller
+    /// can hold it, `filterList.append(...)` it, and read or write its
+    /// parameters by name, which is the whole surface a movie uses.
+    ///
+    /// Burnin' Rubber 3 pitches its engine loop with it every frame:
+    ///     t.sound[#filter] = audioFilter(#PitchShiftFilter, [#shift: t.sound.rate])
+    ///     t.sound.engine.filterList.append(t.sound.filter)
+    ///     …
+    ///     if t.sound.filter.shift <> tRate then t.sound.filter.shift = tRate
+    ///
+    /// NB the returned list carries `#type` so the owner can tell filters apart;
+    /// the audio path does not yet APPLY these filters, so the pitch shift is
+    /// tracked but not heard.
+    pub fn audio_filter(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let kind = match args.first().map(|a| player.get_datum(a)) {
+                Some(Datum::Symbol(s)) => s.to_string(),
+                Some(other) => other.string_value().unwrap_or_default(),
+                None => {
+                    return Err(ScriptError::new(
+                        "audioFilter: a filter type symbol is required".to_string(),
+                    ))
+                }
+            };
+            let mut pairs: VecDeque<(DatumRef, DatumRef)> = VecDeque::new();
+            let k = player.alloc_datum(Datum::Symbol(Symbol::from_str("type")));
+            let v = player.alloc_datum(Datum::Symbol(Symbol::from_str(&kind)));
+            pairs.push_back((k, v));
+            let k = player.alloc_datum(Datum::Symbol(Symbol::from_str("enabled")));
+            let v = player.alloc_datum(Datum::Int(1));
+            pairs.push_back((k, v));
+            if let Some(p) = args.get(1) {
+                if let Datum::PropList(src, _) = player.get_datum(p) {
+                    for (pk, pv) in src.clone().iter() {
+                        pairs.push_back((pk.clone(), pv.clone()));
+                    }
+                }
+            }
+            Ok(player.alloc_datum(Datum::PropList(pairs, false)))
+        })
     }
 
     pub fn ilk(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
@@ -903,7 +1007,16 @@ impl TypeHandlers {
                 if arg.is_int() {
                     let cursor_val = arg.int_value()?;
                     player.cursor = CursorRef::System(cursor_val);
-                    if cursor_val == 200 || cursor_val == -1 {
+                    // Director 11.5 Scripting Dictionary, `cursor` property value
+                    // table: "-1, 0 Arrow" and "200 Blank (hides cursor)". ONLY
+                    // 200 hides. -1 is the documented way to put the ARROW BACK
+                    // ("To reset the cursor to the regular arrow cursor, specify
+                    // a cursor type of -1"), so treating it as hidden inverted
+                    // the meaning: AreaZero ends mouselook with `cursor -1`, and
+                    // reading that as "still hidden" left `wants_pointer_lock`
+                    // stuck on, so its death/summary and pause menus kept the
+                    // pointer captured and were unclickable.
+                    if cursor_val == 200 {
                         player.cursor_is_hidden = true;
                     } else {
                         player.cursor_is_hidden = false;
@@ -1044,9 +1157,9 @@ impl TypeHandlers {
     pub fn rgb(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             if args.len() == 3 {
-                let r = player.get_datum(&args[0]).int_value()? as u8;
-                let g = player.get_datum(&args[1]).int_value()? as u8;
-                let b = player.get_datum(&args[2]).int_value()? as u8;
+                let r = clamp_color_component(player.get_datum(&args[0]).int_value()?);
+                let g = clamp_color_component(player.get_datum(&args[1]).int_value()?);
+                let b = clamp_color_component(player.get_datum(&args[2]).int_value()?);
                 Ok(player.alloc_datum(Datum::ColorRef(ColorRef::Rgb(r, g, b))))
             } else {
                 let first_arg = player.get_datum(&args[0]);
@@ -1565,7 +1678,7 @@ impl TypeHandlers {
             match args.len() {
                 1 => {
                     // color(paletteIndex) - single argument is palette index
-                    let index = player.get_datum(&args[0]).int_value()? as u8;
+                    let index = clamp_color_component(player.get_datum(&args[0]).int_value()?);
                     Ok(player.alloc_datum(Datum::ColorRef(ColorRef::PaletteIndex(index))))
                 }
                 2 => {
@@ -1581,7 +1694,7 @@ impl TypeHandlers {
                                 Ok(player.alloc_datum(Datum::ColorRef(ColorRef::Rgb(r, g, b))))
                             }
                             Some(BuiltInSymbol::PaletteIndex) => {
-                                let index = player.get_datum(&args[1]).int_value()? as u8;
+                                let index = clamp_color_component(player.get_datum(&args[1]).int_value()?);
                                 Ok(player.alloc_datum(Datum::ColorRef(ColorRef::PaletteIndex(index))))
                             }
                             _ => Err(ScriptError::new(format!(
@@ -1597,16 +1710,16 @@ impl TypeHandlers {
                 }
                 3 => {
                     // color(r, g, b)
-                    let r = player.get_datum(&args[0]).int_value()? as u8;
-                    let g = player.get_datum(&args[1]).int_value()? as u8;
-                    let b = player.get_datum(&args[2]).int_value()? as u8;
+                    let r = clamp_color_component(player.get_datum(&args[0]).int_value()?);
+                    let g = clamp_color_component(player.get_datum(&args[1]).int_value()?);
+                    let b = clamp_color_component(player.get_datum(&args[2]).int_value()?);
                     Ok(player.alloc_datum(Datum::ColorRef(ColorRef::Rgb(r, g, b))))
                 }
                 4 => {
                     // color(#rgb, r, g, b) - first argument is symbol, skip it
-                    let r = player.get_datum(&args[1]).int_value()? as u8;
-                    let g = player.get_datum(&args[2]).int_value()? as u8;
-                    let b = player.get_datum(&args[3]).int_value()? as u8;
+                    let r = clamp_color_component(player.get_datum(&args[1]).int_value()?);
+                    let g = clamp_color_component(player.get_datum(&args[2]).int_value()?);
+                    let b = clamp_color_component(player.get_datum(&args[3]).int_value()?);
                     Ok(player.alloc_datum(Datum::ColorRef(ColorRef::Rgb(r, g, b))))
                 }
                 _ => Err(ScriptError::new(format!(

@@ -343,6 +343,18 @@ pub fn set_stage_size(width: u32, height: u32) {
     player_dispatch(PlayerVMCommand::SetStageSize(width, height));
 }
 
+/// Report the display's `devicePixelRatio` so the stage canvas is rendered at
+/// the resolution it is actually SHOWN at rather than at CSS-pixel size.
+///
+/// Without this a phone (873x393 CSS behind 2400x1080 physical) renders the
+/// movie into an 873x393 buffer that the compositor then blows up nearly 3x —
+/// see `player::stage::stage_layout`. `width`/`height` in `set_stage_size` stay
+/// in CSS pixels; so do the coordinates of every pointer event.
+#[wasm_bindgen]
+pub fn set_stage_pixel_ratio(ratio: f64) {
+    player_dispatch(PlayerVMCommand::SetStagePixelRatio(ratio));
+}
+
 #[wasm_bindgen]
 pub fn trigger_timeout(name: &str) {
     player_dispatch(PlayerVMCommand::TimeoutTriggered(name.to_string()));
@@ -711,7 +723,10 @@ pub fn player_print_filmloop_sprites(cast_lib: i32, cast_member: i32) {
 /// registers the button, not a phantom move.
 fn mouse_event_loc(x: f64, y: f64) -> (i32, i32) {
     reserve_player_ref(|p| {
-        if p.wants_pointer_lock {
+        // `pointer_locked` is the browser's real state; `wants_pointer_lock` is
+        // only the movie's intent and is cleared by any sprite cursor assignment
+        // other than Blank. Either one means the coordinates are meaningless.
+        if p.pointer_locked || p.wants_pointer_lock {
             p.mouse_loc
         } else {
             // Invert the stage auto-scale so mouseH/mouseV land in movie coordinates,
@@ -873,9 +888,71 @@ pub fn right_mouse_up(x: f64, y: f64) {
 }
 
 /// Check if the game wants pointer lock (for FPS mouse look)
+/// Report whether the browser currently holds the pointer lock for THIS player's
+/// canvas. The frontend calls this from its `pointerlockchange` handler with the
+/// result of `ownsPointerLock()`. See `DirPlayer::pointer_locked`.
+#[wasm_bindgen]
+pub fn set_pointer_locked(locked: bool) {
+    reserve_player_mut(|player| {
+        player.pointer_locked = locked;
+    });
+}
+
 #[wasm_bindgen]
 pub fn wants_pointer_lock() -> bool {
     reserve_player_ref(|player| player.wants_pointer_lock)
+}
+
+/// Whether the movie has asked for a fullscreen display mode, through the
+/// Enhancer Xtra's `set_resolution` (cleared again by `reset_resolution`).
+///
+/// Intent only, exactly like [`wants_pointer_lock`]: `requestFullscreen` is
+/// gated on a user gesture, so the frontend polls this from the input it is
+/// already handling rather than being pushed to. Rasterwerks PHOSPHOR reaches
+/// it from the Settings page ("Display Mode" -> fullscreen), which the player
+/// applies on the frame after the OK button is clicked.
+#[wasm_bindgen]
+pub fn wants_fullscreen() -> bool {
+    reserve_player_ref(|player| player.wants_fullscreen)
+}
+
+/// Ask for (or drop) fullscreen from OUTSIDE the movie.
+///
+/// The Enhancer route only works for a movie that ships Enhancer and calls
+/// `set_resolution` itself — PHOSPHOR does, almost nothing else does. Going
+/// fullscreen is not really a movie concern though: it is "make the stage fill
+/// the screen", which is true of any movie, 2D or 3D. So the same flag is
+/// writable directly, and a host page can offer a fullscreen button for a movie
+/// that has no idea what fullscreen is.
+///
+/// Note the browser only grants `requestFullscreen` from inside a user gesture.
+/// Called from a click handler this takes effect immediately; called from a
+/// timer or on load it records the intent and the frontend applies it on the
+/// next click it handles.
+/// Tell the VM whether the browser is REALLY showing the player fullscreen.
+///
+/// Called from the frontend's `fullscreenchange` handler, the same way
+/// `set_pointer_locked` reports the real pointer-lock state. It re-lays the
+/// stage immediately so the canvas is resized in the same tick rather than
+/// waiting for the container's ResizeObserver to catch up.
+#[wasm_bindgen]
+pub fn set_fullscreen_active(active: bool) {
+    reserve_player_mut(|player| {
+        if player.fullscreen_active == active {
+            return;
+        }
+        player.fullscreen_active = active;
+        crate::player::stage::apply_stage_draw_rect(player);
+        let (w, h) = crate::player::stage::stage_css_dims(player);
+        crate::js_api::JsApi::dispatch_stage_size_changed(w, h, player.center_stage);
+    });
+}
+
+#[wasm_bindgen]
+pub fn player_set_fullscreen(enabled: bool) {
+    reserve_player_mut(|player| {
+        player.wants_fullscreen = enabled;
+    });
 }
 
 /// Mouse move with delta values (for pointer lock mode).
@@ -1527,14 +1604,18 @@ pub fn update_flash_frame(sprite_num: i32, width: u32, height: u32, rgba_data: &
                 if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                     if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                         if let Some(scene) = w3d.scene_mut() {
-                            // Only bump the content version when the pixels actually
-                            // change size (cheap static-SWF guard mirroring the
-                            // renderer's length-based incremental check).
+                            // A static SWF re-renders identical pixels every frame,
+                            // and bumping the version for those would re-decode and
+                            // re-upload the texture each frame for nothing. Compare
+                            // the PIXELS, not their length: these are raw RGBA
+                            // buffers already in hand, so the comparison is exact
+                            // and far cheaper than the upload it avoids. Length
+                            // alone would call a changed frame unchanged whenever
+                            // the dimensions held steady — which is every frame.
                             let changed = scene.texture_images.get(&Symbol::from_str(&tex_name))
-                                .map_or(true, |old| old.len() != tex_data.len());
-                            scene.texture_images.insert(Symbol::from_str(&tex_name.clone()), tex_data);
+                                .map_or(true, |old| old.as_slice() != tex_data.as_slice());
                             if changed {
-                                scene.texture_content_version += 1;
+                                scene.put_texture_image(Symbol::from_str(&tex_name.clone()), tex_data);
                             }
                         }
                     }
@@ -1962,6 +2043,7 @@ pub fn set_glyph_preference(mode: &str) {
         "bitmap" => GlyphPreference::Bitmap,
         "native" => GlyphPreference::Native,
         "outline" => GlyphPreference::Outline,
+        "hinted" => GlyphPreference::Hinted,
         _ => GlyphPreference::Auto,
     };
     set_pref(pref);
@@ -1976,6 +2058,7 @@ pub fn get_glyph_preference() -> String {
         GlyphPreference::Bitmap => "bitmap".to_string(),
         GlyphPreference::Native => "native".to_string(),
         GlyphPreference::Outline => "outline".to_string(),
+        GlyphPreference::Hinted => "hinted".to_string(),
     }
 }
 
@@ -2417,6 +2500,27 @@ pub fn set_pfr_font_enabled(enabled: bool) {
 #[wasm_bindgen]
 pub fn get_pfr_font_enabled() -> bool {
     reserve_player_ref(|player| player.font_manager.pfr_enabled)
+}
+
+/// Snap a scaled stage (fullscreen, or `swStretchStyle = meet`) to a whole-number
+/// magnification instead of the exact aspect fit. See `compute_stage_layout`.
+#[wasm_bindgen]
+pub fn set_stage_scale_snap_integer(enabled: bool) {
+    reserve_player_mut(|player| {
+        player.stage_scale_snap_integer = enabled;
+        // Same invalidation as a stage RESIZE: the canvas keeps its size, but
+        // the draw rect moves and every sprite's render rect (and the size text
+        // is rasterised at) is derived from it, so the frame has to be rebuilt
+        // rather than just repositioned.
+        crate::player::stage::apply_stage_draw_rect(player);
+        let (w, h) = crate::player::stage::stage_css_dims(player);
+        crate::js_api::JsApi::dispatch_stage_size_changed(w, h, player.center_stage);
+    });
+}
+
+#[wasm_bindgen]
+pub fn get_stage_scale_snap_integer() -> bool {
+    reserve_player_ref(|player| player.stage_scale_snap_integer)
 }
 
 #[wasm_bindgen(start)]

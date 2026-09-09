@@ -1,0 +1,19 @@
+[movie]
+# Gamevial / Petesland "Fly Like A Bird" (Director 8.5, Shockwave 3D).
+# Xtras declared by the movie: Shockwave 3D Asset, Flash Asset, Text /
+# TextXtra / Font Xtra, the sound Xtras and the net Xtras -- there is NO Havok
+# and NO AGEIA PhysX here. All the "physics" is Lingo arithmetic plus
+# `modelsUnderRay` against the city mesh.
+path = "dcr_misc/flylikeabird.dcr"
+
+[external_params]
+# `on startMovie` opens with a domain gate:
+#     if the moviePath contains "www.gamevial.com" then ... else gotoNetPage(..)
+# It does not stop the world from being built, but without a matching path the
+# movie navigates away on the very first frame, so keep it satisfied.
+_moviePath = "http://www.gamevial.com/flylikeabird.dcr"
+
+[test]
+suite = "misc"
+tags = ["3d", "flash"]
+default_timeout = 300.0

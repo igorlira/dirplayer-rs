@@ -18,6 +18,37 @@ use super::{
     palette_map::PaletteMap,
 };
 
+/// Re-express a sprite's foreColor/backColor for a draw of `src`.
+///
+/// A sprite colour held as a palette INDEX is an index into the movie palette
+/// — the one the score's palette (effects) channel is currently holding — not
+/// into whatever palette the source member carries. That distinction only bites
+/// for a DIRECT-COLOUR source: an indexed source wants its own palette, so that
+/// a background-transparent key against index N matches source index N exactly,
+/// but a >8bpp bitmap has no palette of its own and the `palette_ref` it reports
+/// is leftover authoring metadata. Resolving through that stale palette made
+/// Fish's 32-bit "Line" key backColor 231 to (0,85,0) instead of the movie
+/// palette's (16,66,206) — the colour actually filling the bitmap — so nothing
+/// keyed out and the fishing line drew as a solid blue bar.
+///
+/// Returns an RGB `ColorRef` in that case and the colour unchanged otherwise,
+/// so downstream index-based logic (the `bg_index` transparency rule, which only
+/// applies to indexed sources) is untouched.
+pub fn sprite_color_for_source(
+    palettes: &PaletteMap,
+    color: &ColorRef,
+    src: &Bitmap,
+    movie_palette: &PaletteRef,
+) -> ColorRef {
+    match color {
+        ColorRef::PaletteIndex(_) if src.original_bit_depth > 8 => {
+            let (r, g, b) = resolve_color_ref(palettes, color, movie_palette, src.original_bit_depth);
+            ColorRef::Rgb(r, g, b)
+        }
+        _ => color.clone(),
+    }
+}
+
 pub struct CopyPixelsParams<'a> {
     pub blend: i32,
     pub ink: u32,
@@ -45,6 +76,13 @@ pub struct CopyPixelsParams<'a> {
     /// (mask_reg - src_reg). Director allows mask bitmaps to be larger or
     /// smaller than the source — alignment is by registration point.
     pub ink9_mask_offset: (i32, i32),
+    /// True when the ink reached us as an explicit `#ink: 2` / `#ink: 6`
+    /// (Reverse / Not Reverse) in a Lingo `copyPixels` param list, which has to
+    /// XOR (see `blend_pixel`). Sprite rendering also reaches this code with
+    /// `ink == 2`, but there it is long-standing shorthand for the colour-key
+    /// path shared with ink 36, so the two cases are kept apart rather than
+    /// changing how every ink-2 sprite in every movie draws.
+    pub reverse_ink: bool,
     /// Sample a shrunk source at floor(d * src / dst), as Director does for
     /// an authored bitmap (measured on klods.dcr's ruler). Off for text, field
     /// and shape blits, which keep the pixel-centre rule; see the shader's
@@ -70,6 +108,7 @@ impl CopyPixelsParams<'_> {
             original_dst_rect: None,
             ink9_mask_bitmap: None,
             ink9_mask_offset: (0, 0),
+            reverse_ink: false,
             floor_rule: false,
         }
     }
@@ -136,6 +175,7 @@ fn blend_pixel(
     src_indexed: bool, // an indexed (1 to 8 bit) source keeps its colours under Lighten
     blend_alpha: f32, // This is params.blend / 100.0
     src_alpha: f32,   // Alpha from the source pixel (0.0 to 1.0)
+    reverse_ink: bool, // params.reverse_ink — see the `2 | 6` arm below
 ) -> (u8, u8, u8) {
     // Calculate the effective alpha: combination of native source alpha and blend parameter
     let effective_alpha = src_alpha * blend_alpha;
@@ -153,6 +193,37 @@ fn blend_pixel(
                 }
             } else {
                 director_blend_ink0(dst, src, src_alpha, blend_alpha)
+            }
+        }
+        // 2 = Reverse, 6 = Not Reverse (Scripting Dictionary, "ink").
+        // Director's Reverse is QuickDraw's `srcXor`, and QuickDraw XORs in BIT
+        // space, where a SET bit is black — so a black source pixel inverts the
+        // destination and a white one leaves it untouched. Per RGB channel that
+        // is `dst ^ (255 - src)`, which agrees with both ends of that rule and
+        // interpolates between them; Not Reverse is the same with the source
+        // inverted first, i.e. plain `dst ^ src`.
+        //
+        // This is how a movie draws a selection highlight without owning the
+        // art underneath: Coke Studios' jukebox fills a row-sized image with
+        // black and `copyPixels`es it over the rendered list with `[#ink: 2]`,
+        // expecting the song name to come back as white-on-black. Copying it
+        // straight (the old fallback) painted the row solid black instead and
+        // took the song title with it.
+        2 | 6 if reverse_ink => {
+            let xor_src = if ink == 2 {
+                (255 - src.0, 255 - src.1, 255 - src.2)
+            } else {
+                src
+            };
+            let reversed = (
+                dst.0 ^ xor_src.0,
+                dst.1 ^ xor_src.1,
+                dst.2 ^ xor_src.2,
+            );
+            if effective_alpha >= 0.999 {
+                reversed
+            } else {
+                blend_color_alpha(dst, reversed, effective_alpha)
             }
         }
         // ... (other ink modes use effective_alpha too, just like 'Copy')
@@ -475,6 +546,35 @@ impl Bitmap {
                 }
             }
         }
+    }
+
+    /// Write RGBA at (x, y) on a 32-bit bitmap, alpha included.
+    ///
+    /// `set_pixel` takes an opaque RGB triple and forces alpha to 0xFF, which is
+    /// right for a `rgb()` colour object but wrong for Director's INTEGER pixel
+    /// form: on a 32-bit image that integer is the full AARRGGBB value, and
+    /// movies build one specifically to write transparency. Falls back to
+    /// `set_pixel` on any other depth, where there is no alpha channel to write.
+    pub fn set_pixel_rgba(
+        &mut self,
+        x: i32,
+        y: i32,
+        color: (u8, u8, u8, u8),
+        palettes: &PaletteMap,
+    ) {
+        if self.bit_depth != 32 {
+            self.set_pixel(x, y, (color.0, color.1, color.2), palettes);
+            return;
+        }
+        if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+            return;
+        }
+        self.matte = None; // TODO draw on matte instead
+        let index = (y as usize * self.width as usize + x as usize) * 4;
+        self.data[index] = color.0;
+        self.data[index + 1] = color.1;
+        self.data[index + 2] = color.2;
+        self.data[index + 3] = color.3;
     }
 
     /// Write a raw palette index at (x, y) for indexed (<=8-bit) bitmaps, with
@@ -1635,6 +1735,10 @@ impl Bitmap {
             params.insert("ink".into(), Datum::Int(sprite.ink as i32));
             params.insert("color".into(), Datum::ColorRef(sprite.color.clone()));
             params.insert("bgColor".into(), Datum::ColorRef(sprite.bg_color.clone()));
+            // This ink is a SPRITE ink, not a Lingo `copyPixels` one, so it
+            // keeps the colour-key reading of ink 2 the rest of sprite
+            // rendering uses (see `CopyPixelsParams::reverse_ink`).
+            params.insert("sprite_ink".into(), Datum::Int(1));
 
             self.copy_pixels(
                 palettes,
@@ -1902,6 +2006,9 @@ impl Bitmap {
             original_dst_rect,
             ink9_mask_bitmap: None,
             ink9_mask_offset: (0, 0),
+            reverse_ink: !is_text_rendering
+                && !param_list.contains_key("sprite_ink")
+                && (ink == 2 || ink == 6),
             floor_rule: false,
         };
         self.copy_pixels_with_params(palettes, src, dst_rect, src_rect, &params);
@@ -2261,6 +2368,63 @@ impl Bitmap {
         // Check for skew-based flip (skew=±180° combined with rotation produces a mirror)
         let has_skew_flip = is_skew_flip(params.skew);
 
+        // Fast path — the INVERSE of the 32 -> 8 grayscale copy directly below:
+        // an 8-bit GRAYSCALE source into a 32-bit destination writes the stored
+        // byte as the grey level (N -> (N, N, N), opaque), not through the CLUT.
+        //
+        // These two have to agree, and until now only one of them was raw. An
+        // 8-bit #grayscale bitmap in dirplayer holds a RAW ALPHA/luminance byte:
+        // `extractAlpha()` writes the source alpha into it verbatim, `setAlpha()`
+        // reads it back verbatim, and the 32 -> 8 path below writes luminance
+        // verbatim. But READING one as colour resolved it through the built-in
+        // #grayscale CLUT, which is REVERSED (index 0 is white, 255 is black), so
+        // a value round-tripped 8 -> 32 -> 8 came back INVERTED: 0x00 -> 0xFF,
+        // 0xAA -> 0x55.
+        //
+        // Movies do exactly that round trip to scroll an alpha channel, because
+        // there is no other way to shift an 8-bit image: build a 32-bit scratch,
+        // copy the mask into it, copy it back at an offset. Tetris' line clear
+        // (BehaviorScript 5) shifts the board's alpha that way --
+        //     temp_alpha = image(10 * block_size, (ylist[num] - 2) * block_size, 32)
+        //     temp_alpha.copyPixels(alpha_image, temp_alpha.rect, temp_alpha.rect)
+        //     alpha_image.copyPixels(temp_alpha, temp_alpha.rect.offset(0, block_size), temp_alpha.rect)
+        // -- so from the first cleared row the board's alpha inverted, and the
+        // white sheet the board is filled with (`image.fill(rect, rgb(1,1,1) * 240 * 2)`)
+        // turned opaque over the play area, hiding the falling piece behind it.
+        if ink == 0
+            && !has_sprite_rotation
+            && !has_skew_flip
+            && self.bit_depth == 32
+            && src.bit_depth == 8
+            && matches!(src.palette_ref, PaletteRef::BuiltIn(BuiltInPalette::GrayScale))
+        {
+            let dw = self.width as usize;
+            let sw = src.width as usize;
+            for dy in min_dst_y..max_dst_y {
+                if dy < 0 || dy >= self.height as i32 { continue; }
+                for dx in min_dst_x..max_dst_x {
+                    if dx < 0 || dx >= self.width as i32 { continue; }
+                    let rel_x = if flip_x { (max_dst_x - 1 - dx) - min_dst_x } else { dx - min_dst_x } as f64;
+                    let rel_y = if flip_y { (max_dst_y - 1 - dy) - min_dst_y } else { dy - min_dst_y } as f64;
+                    let sx = (src_left_f + rel_x * scale_x).floor() as i32;
+                    let sy = (src_top_f + rel_y * scale_y).floor() as i32;
+                    if sx < 0 || sy < 0 || sx >= src.width as i32 || sy >= src.height as i32 { continue; }
+                    let si = (sy as usize) * sw + sx as usize;
+                    if si >= src.data.len() { continue; }
+                    let v = src.data[si];
+                    let di = ((dy as usize) * dw + dx as usize) * 4;
+                    if di + 3 < self.data.len() {
+                        self.data[di] = v;
+                        self.data[di + 1] = v;
+                        self.data[di + 2] = v;
+                        self.data[di + 3] = 255;
+                    }
+                }
+            }
+            self.matte = None;
+            return;
+        }
+
         // Fast path — copy a 32-bit RGBA source into an 8-bit GRAYSCALE destination
         // for Director's text→alpha-mask→texture HUD pattern
         // (`grayImage.copyPixels(textImage)` then `rgba.setAlpha(grayImage)`): the
@@ -2484,6 +2648,7 @@ impl Bitmap {
                 && matte_mask.is_none()
                 && no_colorize
                 && (ink == 0 || ink == 2 || ink == 36)
+                && !params.reverse_ink
             {
                 // For color-key inks, precompute which source indices resolve to
                 // the transparent background color (mirrors the per-pixel
@@ -2789,7 +2954,7 @@ impl Bitmap {
                 }
 
                 // Indexed bitmap (1-8 bit) ink 36 color-key transparency
-                if (ink == 2 || ink == 36) && is_indexed {
+                if (ink == 2 || ink == 36) && is_indexed && !params.reverse_ink {
                     let color_ref = src.get_pixel_color_ref(sx, sy);
                     let ColorRef::PaletteIndex(i) = color_ref else {
                         let (sr, sg, sb) = match &color_ref {
@@ -2882,7 +3047,7 @@ impl Bitmap {
 
                 // 16-bit bitmap ink 36 color-key transparency
                 // 16-bit is stored as 32-bit RGB, so compare RGB values directly
-                if (ink == 2 || ink == 36) && src.original_bit_depth == 16 {
+                if (ink == 2 || ink == 36) && src.original_bit_depth == 16 && !params.reverse_ink {
                     let (r, g, b, _) = src.get_pixel_color_with_alpha(palettes, sx, sy);
 
                     // Skip pixel if it matches the sprite's bgColor (with tolerance
@@ -2909,7 +3074,7 @@ impl Bitmap {
 
                 // 32-bit bitmap ink 36 color-key transparency
                 // PFR font bitmaps are decoded to 32-bit RGBA; background is white, glyphs are black.
-                if (ink == 2 || ink == 36) && src.original_bit_depth == 32 {
+                if (ink == 2 || ink == 36) && src.original_bit_depth == 32 && !params.reverse_ink {
                     let (r, g, b, a) = src.get_pixel_color_with_alpha(palettes, sx, sy);
 
                     // Skip fully transparent pixels (use_alpha bitmaps like text member images)
@@ -3318,7 +3483,7 @@ impl Bitmap {
                 // ----------------------------------------------------------
                 // Director ink 36 (Blend) alpha semantics
                 // ----------------------------------------------------------
-                if (ink == 2 || ink == 36) && sa == 0 && src.original_bit_depth == 32 {
+                if (ink == 2 || ink == 36) && sa == 0 && src.original_bit_depth == 32 && !params.reverse_ink {
                     if (sr, sg, sb) == bg_color_resolved {
                         continue;
                     }
@@ -3332,6 +3497,7 @@ impl Bitmap {
                 if !params.is_text_rendering
                     && sa == 255
                     && (ink == 2 || ink == 36)
+                    && !params.reverse_ink
                     && (sr, sg, sb) == bg_color_resolved
                 {
                     continue; // This pixel is background → transparent
@@ -3487,6 +3653,7 @@ impl Bitmap {
                             is_indexed,
                             alpha,
                             sa as f32 / 255.0,
+                            params.reverse_ink,
                         );
                         self.set_pixel_fast(dst_x, dst_y, blended, &dst_palette_cache);
                     }
@@ -3545,6 +3712,7 @@ impl Bitmap {
                     is_indexed,
                     alpha,
                     src_alpha,
+                    params.reverse_ink,
                 );
 
                 self.set_pixel_fast(dst_x, dst_y, blended, &dst_palette_cache);
@@ -3569,6 +3737,9 @@ impl Bitmap {
         let mut params = HashMap::new();
         params.insert("blend".to_owned(), Datum::Int((alpha * 100.0) as i32));
         params.insert("ink".to_owned(), Datum::Int(ink as i32));
+        // A SPRITE ink, not a Lingo `copyPixels` one — see
+        // `CopyPixelsParams::reverse_ink`.
+        params.insert("sprite_ink".to_owned(), Datum::Int(1));
         params.insert(
             "bgColor".to_owned(),
             Datum::ColorRef(ColorRef::Rgb(bg_color.0, bg_color.1, bg_color.2)),
@@ -4277,6 +4448,9 @@ impl Bitmap {
             params.insert("ink".into(), Datum::Int(sprite.ink as i32));
             params.insert("color".into(), Datum::ColorRef(sprite.color.clone()));
             params.insert("bgColor".into(), Datum::ColorRef(sprite.bg_color.clone()));
+            // A SPRITE ink, not a Lingo `copyPixels` one — see
+            // `CopyPixelsParams::reverse_ink`.
+            params.insert("sprite_ink".into(), Datum::Int(1));
 
             self.copy_pixels(
                 palettes,
@@ -4356,24 +4530,24 @@ mod ink_colour_tests {
     #[test]
     fn lighten_adds_the_fore_colour() {
         let src = (100, 100, 100);
-        assert_eq!(blend_pixel((0, 0, 0), src, 40, WHITE, (50, 25, 0), false, 1.0, 1.0), (150, 125, 100));
-        assert_eq!(blend_pixel((0, 0, 0), src, 40, WHITE, BLACK, false, 1.0, 1.0), src, "the default foreColor changes nothing");
-        assert_eq!(blend_pixel((0, 0, 0), (250, 250, 250), 40, WHITE, (50, 25, 0), false, 1.0, 1.0), (255, 255, 250), "pinned at 255");
-        assert_eq!(blend_pixel((0, 0, 0), src, 40, WHITE, (50, 25, 0), true, 1.0, 1.0), src, "an indexed bitmap keeps its palette colours");
+        assert_eq!(blend_pixel((0, 0, 0), src, 40, WHITE, (50, 25, 0), false, 1.0, 1.0, false), (150, 125, 100));
+        assert_eq!(blend_pixel((0, 0, 0), src, 40, WHITE, BLACK, false, 1.0, 1.0, false), src, "the default foreColor changes nothing");
+        assert_eq!(blend_pixel((0, 0, 0), (250, 250, 250), 40, WHITE, (50, 25, 0), false, 1.0, 1.0, false), (255, 255, 250), "pinned at 255");
+        assert_eq!(blend_pixel((0, 0, 0), src, 40, WHITE, (50, 25, 0), true, 1.0, 1.0, false), src, "an indexed bitmap keeps its palette colours");
     }
 
     #[test]
     fn lighten_still_keys_the_background_colour() {
         let dst = (7, 8, 9);
-        assert_eq!(blend_pixel(dst, WHITE, 40, WHITE, (50, 25, 0), false, 1.0, 1.0), dst);
+        assert_eq!(blend_pixel(dst, WHITE, 40, WHITE, (50, 25, 0), false, 1.0, 1.0, false), dst);
     }
 
     #[test]
     fn darken_remaps_black_to_fore_and_white_to_back() {
         let fg = (50, 25, 0);
         let bg = (200, 220, 240);
-        assert_eq!(blend_pixel((0, 0, 0), (0, 0, 0), 41, bg, fg, false, 1.0, 1.0), fg);
-        assert_eq!(blend_pixel((0, 0, 0), (255, 255, 255), 41, bg, fg, false, 1.0, 1.0), bg);
-        assert_eq!(blend_pixel((0, 0, 0), (100, 100, 100), 41, WHITE, BLACK, false, 1.0, 1.0), (100, 100, 100), "defaults are the identity");
+        assert_eq!(blend_pixel((0, 0, 0), (0, 0, 0), 41, bg, fg, false, 1.0, 1.0, false), fg);
+        assert_eq!(blend_pixel((0, 0, 0), (255, 255, 255), 41, bg, fg, false, 1.0, 1.0, false), bg);
+        assert_eq!(blend_pixel((0, 0, 0), (100, 100, 100), 41, WHITE, BLACK, false, 1.0, 1.0, false), (100, 100, 100), "defaults are the identity");
     }
 }

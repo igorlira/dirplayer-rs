@@ -771,9 +771,56 @@ impl BuiltInHandlerManager {
             return player_call_datum_handler(&receiver_ref, handler_name, &args).await;
         }
         let instance_refs = instance_ids.unwrap();
+        // Only a LIST receiver can shrink under us; the single-instance form has
+        // nothing to re-check.
+        let receiver_ref_for_liveness = Some(receiver_ref.clone());
 
         let mut result = player_alloc_datum(Datum::Null);
         for instance_ref in instance_refs {
+            // Do NOT message an instance that has left the list since the
+            // snapshot was taken. `call(#handler, aList)` dispatches to the items
+            // that are in the list, and Lingo's standard teardown idiom removes
+            // the instance from that very list from inside the handler:
+            //
+            //   on delete me                       -- [PS] Robot Bonus
+            //     ...
+            //     p = [:]
+            //     gGame.scriptList.deleteOne(me)
+            //
+            // AreaZero drives its actors with `call(#enterFrame, gGame.scriptList)`,
+            // so a robot destroyed part-way through a pass — by a bullet's own
+            // enterFrame earlier in the same list — was still sent its enterFrame
+            // afterwards, with `p` already emptied. It then ran on an empty
+            // property list, rebuilt a few keys out of VOID
+            // (`p.WalkTime = p.WalkTime - gGame.TimeMP` = -1.0) and died on
+            // `abs(tVector.x)` with tVector = 0.
+            //
+            // The length check keeps this free in the common case where nothing
+            // mutated the list; only a pass that actually removed something pays
+            // for the membership rebuild.
+            if let Some(recv) = receiver_ref_for_liveness.as_ref() {
+                let wanted = instance_ref.id();
+                let still_live = reserve_player_mut(|player| {
+                    let current: Vec<DatumRef> = match player.get_datum(recv) {
+                        Datum::List(_, items, _) => items.iter().cloned().collect(),
+                        Datum::PropList(pairs, _) => {
+                            pairs.iter().map(|(_, v)| v.clone()).collect()
+                        }
+                        _ => return true, // not a list any more; leave it alone
+                    };
+                    if current.len() == list_count {
+                        return true;
+                    }
+                    current.iter().any(|value_ref| {
+                        get_datum_script_instance_ids(value_ref, player)
+                            .map(|ids| ids.iter().any(|r| r.id() == wanted))
+                            .unwrap_or(false)
+                    })
+                });
+                if !still_live {
+                    continue;
+                }
+            }
             let handler = reserve_player_ref(|player| {
                 ScriptInstanceUtils::get_script_instance_handler(
                     handler_name,
@@ -798,12 +845,21 @@ impl BuiltInHandlerManager {
     /// method-form `member.importFileInto(...)` (forwarded from
     /// `CastMemberRefHandlers::call_async` with the receiver prepended).
     ///
-    /// v1 only handles bitmap members: PNG/JPG/GIF/etc. (anything the
-    /// `image` crate decodes) → a 32-bit RGBA Bitmap that replaces the
-    /// existing BitmapRef. The fetch goes through `NetManager`, so URLs
-    /// are resolved against `base_path` and respect any `override_base_path`
-    /// (the fake-movie-root used by tests). Returns Director's documented
-    /// integer status: 0 = success, negative = failure.
+    /// Handles bitmap, sound and TEXT/FIELD members. Bitmaps: PNG/JPG/GIF/etc.
+    /// (anything the `image` crate decodes) → a 32-bit RGBA Bitmap that replaces
+    /// the existing BitmapRef. The fetch goes through `NetManager`, so URLs are
+    /// resolved against `base_path` and respect any `override_base_path` (the
+    /// fake-movie-root used by tests).
+    ///
+    /// Return value: NON-ZERO on success, negative on failure. The 11.5
+    /// dictionary documents no return for `importFileInto()`, and this used to
+    /// answer 0 for success — but every shipped caller reads it the other way
+    /// round. Burnin' Rubber 3's `[M] Loader.LoadTxt` and its `[PS] Preload
+    /// Data.DownloadDone` both do
+    ///     tImported = tmember.importFileInto(tFile)
+    ///     if tImported <> 0 then HandleTxt(tmember, …) else EraseMember(tmember)
+    /// so a 0 means "erase what you just imported", which cannot be what real
+    /// Director returns for a file that imported fine.
     ///
     /// propertyList properties honored:
     ///   #trimWhiteSpace — non-zero stores `trim_white_space = true` on the
@@ -863,12 +919,23 @@ impl BuiltInHandlerManager {
         enum ImportTarget {
             Bitmap(crate::player::bitmap::manager::BitmapRef),
             Sound,
+            /// Text or field. "Use it to import both RTF and HTML documents into
+            /// text cast members" (Director 11.5 Scripting Dictionary,
+            /// `importFileInto()`) — and plain text likewise. Burnin' Rubber 3
+            /// streams every track's event and data tables this way: each
+            /// `Data/Tracks/<World>/Data/*.txt` lands in a `new(#text)` member
+            /// that `HandleTxt` then parses into `gData.Events`. Without a text
+            /// arm the member stayed empty, so no track ever built its world
+            /// (`"CityTrack1Build does not exist."`) and no car was spawned.
+            Text { is_field: bool },
         }
         let import_target = reserve_player_ref(|player| {
             let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
             match member.map(|m| &m.member_type) {
                 Some(CastMemberType::Bitmap(b)) => Some(ImportTarget::Bitmap(b.image_ref)),
                 Some(CastMemberType::Sound(_)) => Some(ImportTarget::Sound),
+                Some(CastMemberType::Text(_)) => Some(ImportTarget::Text { is_field: false }),
+                Some(CastMemberType::Field(_)) => Some(ImportTarget::Text { is_field: true }),
                 _ => None,
             }
         });
@@ -876,7 +943,7 @@ impl BuiltInHandlerManager {
             Some(t) => t,
             None => {
                 warn!(
-                    "importFileInto: member ({}, {}) is not a bitmap or sound (v1 scope)",
+                    "importFileInto: member ({}, {}) is not a bitmap, sound or text member",
                     member_ref.cast_lib, member_ref.cast_member
                 );
                 return reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(-2))));
@@ -915,6 +982,38 @@ impl BuiltInHandlerManager {
         // defaults until the browser decodes the buffer at play time.
         let existing_bitmap_ref = match import_target {
             ImportTarget::Bitmap(r) => r,
+            ImportTarget::Text { is_field } => {
+                // Director stores CR-delimited lines; a file saved on any
+                // platform must read back as Lingo `line`s, so normalise
+                // CRLF/LF to CR. Text files here are 8-bit: try UTF-8 and fall
+                // back to Mac Roman, the encoding Director authored them in.
+                let text = crate::io::encoding::decode_text_auto_macroman(&bytes);
+                let text = text.replace("\r\n", "\r").replace('\n', "\r");
+                let byte_len = bytes.len();
+                return reserve_player_mut(|player| {
+                    if let Some(member) =
+                        player.movie.cast_manager.find_mut_member_by_ref(&member_ref)
+                    {
+                        match &mut member.member_type {
+                            CastMemberType::Text(t) => {
+                                t.text = text;
+                                t.html_source.clear();
+                                t.rtf_source.clear();
+                            }
+                            CastMemberType::Field(f) => { f.text = text; }
+                            _ => {}
+                        }
+                    }
+                    let _ = is_field;
+                    name_member_after_file(player, &member_ref, &file_or_url);
+                    debug!(
+                        "importFileInto: imported '{}' ({} bytes) into text member ({}, {})",
+                        file_or_url, byte_len, member_ref.cast_lib, member_ref.cast_member
+                    );
+                    JsApi::dispatch_cast_member_changed(member_ref.clone());
+                    Ok(player.alloc_datum(Datum::Int(1)))
+                });
+            }
             ImportTarget::Sound => {
                 use crate::director::chunks::sound::SoundChunk;
                 let byte_len = bytes.len();
@@ -926,12 +1025,13 @@ impl BuiltInHandlerManager {
                             s.sound = SoundChunk::new(bytes);
                         }
                     }
+                    name_member_after_file(player, &member_ref, &file_or_url);
                     debug!(
                         "importFileInto: imported '{}' ({} bytes) into sound member ({}, {})",
                         file_or_url, byte_len, member_ref.cast_lib, member_ref.cast_member
                     );
                     JsApi::dispatch_cast_member_changed(member_ref.clone());
-                    Ok(player.alloc_datum(Datum::Int(0)))
+                    Ok(player.alloc_datum(Datum::Int(1)))
                 });
             }
         };
@@ -993,8 +1093,9 @@ impl BuiltInHandlerManager {
                 member.reg_point = (w as i32 / 2, h as i32 / 2);
             }
             player.bitmap_manager.replace_bitmap(existing_bitmap_ref, bitmap);
+            name_member_after_file(player, &member_ref, &file_or_url);
             JsApi::dispatch_cast_member_changed(member_ref.clone());
-            Ok(player.alloc_datum(Datum::Int(0)))
+            Ok(player.alloc_datum(Datum::Int(1)))
         })
     }
 
@@ -1112,6 +1213,29 @@ impl BuiltInHandlerManager {
                                 player.movie.score.get_sprite_mut(sn as i16).flash_asserted_frame = None;
                             });
                             ruffle_play(sn);
+                        } else if reserve_player_ref(|player| {
+                            matches!(player.get_datum(&args[0]), Datum::CastMember(_))
+                        }) {
+                            // `play member("x")` — queue and play a sound member on
+                            // channel 1. Director documents `member("Real").play()`
+                            // for RealMedia / SWA (streaming audio) members, and the
+                            // bare command form means the same thing.
+                            //
+                            // This silently did NOTHING before: the branch returned
+                            // Void for anything that was not a Flash sprite, and the
+                            // sound implementation that existed over in the SYNC
+                            // dispatcher could never run — `play` is registered in
+                            // `is_async_handler`, so it never reaches that match at
+                            // all. No error, no sound, nothing to see.
+                            return reserve_player_mut(|player| {
+                                let channel_datum = player.alloc_datum(Datum::SoundChannel(1));
+                                SoundChannelDatumHandlers::call(
+                                    player,
+                                    &channel_datum,
+                                    Symbol::builtin(BuiltInSymbol::Play),
+                                    args,
+                                )
+                            });
                         }
                     }
                     Ok(DatumRef::Void)
@@ -1143,11 +1267,13 @@ impl BuiltInHandlerManager {
             Some(BuiltInSymbol::PuppetTempo) => MovieHandlers::puppet_tempo(args),
             Some(BuiltInSymbol::Objectp) => TypeHandlers::objectp(args),
             Some(BuiltInSymbol::Voidp) => TypeHandlers::voidp(args),
+            Some(BuiltInSymbol::Vectorp) => TypeHandlers::vectorp(args),
             Some(BuiltInSymbol::Listp) => TypeHandlers::listp(args),
             Some(BuiltInSymbol::Symbolp) => TypeHandlers::symbolp(args),
             Some(BuiltInSymbol::Stringp) => TypeHandlers::stringp(args),
             Some(BuiltInSymbol::Integerp) => TypeHandlers::integerp(args),
             Some(BuiltInSymbol::Floatp) => TypeHandlers::floatp(args),
+            Some(BuiltInSymbol::Delete) => StringHandlers::delete_chunk_arg(args),
             Some(BuiltInSymbol::Offset) => StringHandlers::offset(args),
             Some(BuiltInSymbol::Length) => StringHandlers::length(args),
             Some(BuiltInSymbol::Script) => MovieHandlers::script(args),
@@ -1300,6 +1426,7 @@ impl BuiltInHandlerManager {
             Some(BuiltInSymbol::NetTextResult) => NetHandlers::net_text_result(args),
             Some(BuiltInSymbol::PostNetText) => NetHandlers::post_net_text(args),
             Some(BuiltInSymbol::Rgb) => TypeHandlers::rgb(args),
+            Some(BuiltInSymbol::AudioFilter) => TypeHandlers::audio_filter(args),
             Some(BuiltInSymbol::List) => TypeHandlers::list(args),
             Some(BuiltInSymbol::Image) => TypeHandlers::image(args),
             Some(BuiltInSymbol::Filter) => TypeHandlers::filter(args),
@@ -1365,49 +1492,88 @@ impl BuiltInHandlerManager {
                 })
             }
             Some(BuiltInSymbol::GetRendererServices) => {
-                // Return a prop list with renderer info stubs
+                // Director's renderer-services object, as a prop list.
+                //
+                // Shapes follow what real Director answers (measured against
+                // Rasterwerks PHOSPHOR's Video settings page, which prints the
+                // whole hardware block):
+                //   Depthbuffer: [16, 24]   Colorbuffer: [16, 32]
+                //   Texture Units: 8        Max Texture Size: [16384, 16384]
+                //   Texture Formats: [#rgba8888, #rgba8880, ...]
+                // so the ranges and the texture size are LISTS and the formats
+                // are SYMBOLS, not strings.
+                //
+                // `renderer` is a SYMBOL. The movie round-trips it through
+                // `string(getRendererServices().renderer)` into a dropdown and
+                // back out through `symbol(...)`; as a string it displayed as
+                // "#openGL" and came back as the symbol #|#openGL|.
                 reserve_player_mut(|player| {
                     let make_sym = |p: &mut DirPlayer, s: &str| p.alloc_datum(Datum::Symbol(Symbol::from_str(s)));
                     let make_str = |p: &mut DirPlayer, s: &str| p.alloc_datum(Datum::String(s.to_string()));
                     let make_int = |p: &mut DirPlayer, n: i32| p.alloc_datum(Datum::Int(n));
+                    let make_int_list = |p: &mut DirPlayer, ns: &[i32]| {
+                        let items: Vec<DatumRef> = ns.iter().map(|n| p.alloc_datum(Datum::Int(*n))).collect();
+                        p.alloc_datum(Datum::List(DatumType::List, VecDeque::from(items), false))
+                    };
+                    let make_sym_list = |p: &mut DirPlayer, ss: &[&str]| {
+                        let items: Vec<DatumRef> = ss.iter()
+                            .map(|s| p.alloc_datum(Datum::Symbol(Symbol::from_str(s))))
+                            .collect();
+                        p.alloc_datum(Datum::List(DatumType::List, VecDeque::from(items), false))
+                    };
 
-                    // rendererDeviceList
+                    // The backend really is OpenGL (WebGL2), and it is the only
+                    // one on offer — no DirectX device to switch to.
                     let rdl_key = make_sym(player, "rendererDeviceList");
-                    let device = make_str(player, "WebGL2");
-                    let rdl_val = player.alloc_datum(Datum::List(DatumType::List, VecDeque::from(vec![device]), false));
-
-                    // renderer
+                    let rdl_val = make_sym_list(player, &["openGL"]);
                     let rend_key = make_sym(player, "renderer");
-                    let rend_val = make_str(player, "#openGL");
+                    let rend_val = make_sym(player, "openGL");
 
-                    // Hardware info as nested proplist
+                    let cbd_key = make_sym(player, "colorBufferDepth");
+                    let cbd_val = make_int(player, 32);
+                    let dbd_key = make_sym(player, "depthBufferDepth");
+                    let dbd_val = make_int(player, 24);
+
                     let vendor_k = make_sym(player, "vendor");
                     let vendor_v = make_str(player, "WebGL");
                     let model_k = make_sym(player, "model");
                     let model_v = make_str(player, "WebGL2 Renderer");
                     let version_k = make_sym(player, "version");
                     let version_v = make_str(player, "2.0");
+                    let present_k = make_sym(player, "present");
+                    let present_v = make_int(player, 1);
                     let max_tex_k = make_sym(player, "maxTextureSize");
-                    let max_tex_v = make_int(player, 4096);
+                    let max_tex_v = make_int_list(player, &[4096, 4096]);
+                    // Renderer-wide default pixel format for every texture in
+                    // every 3D member (Director 11.5 Scripting Dictionary,
+                    // `textureRenderFormat`), documented default #rgba5551.
+                    // A texture's own `renderFormat` overrides it; `#default`
+                    // there means "use this".
+                    let trf_k = make_sym(player, "textureRenderFormat");
+                    let trf_v = make_sym(player, "rgba5551");
                     let tex_fmt_k = make_sym(player, "supportedTextureRenderFormats");
-                    let fmt = make_str(player, "rgba8880");
-                    let tex_fmt_v = player.alloc_datum(Datum::List(DatumType::List, VecDeque::from(vec![fmt]), false));
+                    let tex_fmt_v = make_sym_list(player, &[
+                        "rgba8888", "rgba8880", "rgba5650", "rgba5551", "rgba5550", "rgba4444",
+                    ]);
                     let tex_units_k = make_sym(player, "textureUnits");
                     let tex_units_v = make_int(player, 8);
                     let depth_k = make_sym(player, "depthBufferRange");
-                    let depth_v = make_int(player, 24);
+                    let depth_v = make_int_list(player, &[16, 24]);
                     let color_k = make_sym(player, "colorBufferRange");
-                    let color_v = make_int(player, 32);
+                    let color_v = make_int_list(player, &[16, 32]);
 
                     let hw_info = player.alloc_datum(Datum::PropList(VecDeque::from(vec![
                         (vendor_k, vendor_v), (model_k, model_v), (version_k, version_v),
-                        (max_tex_k, max_tex_v), (tex_fmt_k, tex_fmt_v), (tex_units_k, tex_units_v),
-                        (depth_k, depth_v), (color_k, color_v),
+                        (present_k, present_v), (max_tex_k, max_tex_v), (tex_fmt_k, tex_fmt_v),
+                        (trf_k, trf_v),
+                        (tex_units_k, tex_units_v), (depth_k, depth_v), (color_k, color_v),
                     ]), false));
                     let hw_key = make_sym(player, "hardwareInfo");
 
                     let result = player.alloc_datum(Datum::PropList(VecDeque::from(vec![
-                        (rdl_key, rdl_val), (rend_key, rend_val), (hw_key, hw_info),
+                        (rdl_key, rdl_val), (rend_key, rend_val),
+                        (cbd_key, cbd_val), (dbd_key, dbd_val),
+                        (hw_key, hw_info),
                     ]), false));
                     Ok(result)
                 })
@@ -1901,16 +2067,18 @@ impl BuiltInHandlerManager {
             Some(BuiltInSymbol::DontPassEvent) => Self::dont_pass_event(args),
             Some(BuiltInSymbol::FrameReady) => Self::frame_ready(args),
             Some(BuiltInSymbol::Marker) => Self::marker(args),
-            Some(BuiltInSymbol::Play) => {
-                // play member("name") - play a sound on channel 1
-                if args.is_empty() {
-                    return Ok(DatumRef::Void);
-                }
-                reserve_player_mut(|player| {
-                    let channel_datum = player.alloc_datum(Datum::SoundChannel(1));
-                    SoundChannelDatumHandlers::call(player, &channel_datum, Symbol::builtin(BuiltInSymbol::Play), args)
-                })
-            }
+            // `markerList` is a read-only Movie PROPERTY -- Director 11.5
+            // Scripting Dictionary, `markerList`: "contains a script property
+            // list of the markers in the Score", in the form
+            // `frameNumber: "markerName"`. It is already built in
+            // `DirPlayer::get_movie_prop`; what was missing is the CALL form.
+            // A movie that writes it without an explicit `the` or `_movie.`
+            // compiles to a zero-argument call, which fell through to
+            // "No built-in handler: markerlist()" -- Burnin Rubber 2's race
+            // frame does exactly that, 81 times in a single run.
+            Some(BuiltInSymbol::MarkerList) => reserve_player_mut(|player| {
+                player.get_movie_prop(Symbol::builtin(BuiltInSymbol::MarkerList))
+            }),
             Some(BuiltInSymbol::SpriteBox) => {
                 // spriteBox(sprite, left, top, right, bottom)
                 if args.len() < 5 {
@@ -1970,8 +2138,11 @@ impl BuiltInHandlerManager {
                         _ => None,
                     };
                     if let Some(info) = info {
+                        // Register the effect for the renderer, and arm the
+                        // playhead hold for the NEXT frame change rather than
+                        // starting it here — see `pending_transition_hold_ms`.
                         player.pending_transition = Some(info);
-                        player.begin_transition_hold(info.duration_ms);
+                        player.pending_transition_hold_ms = Some(info.duration_ms);
                     }
                     Ok(DatumRef::Void)
                 })
@@ -2026,15 +2197,33 @@ impl BuiltInHandlerManager {
                         .find_member_by_ref(&member_ref)
                         .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
 
-                    let (text, fixed_line_space, top_spacing, char_spacing, member_width, font_name, font_size, alignment, tab_stops, word_wrap) = match &member.member_type {
+                    // `font_style` matters as much as the name and size: a PFR
+                    // atlas is keyed by (name, size, STYLE) and bold is
+                    // synthesised into its advances with a design-space pen, so
+                    // measuring with the regular atlas returns a SHORTER x than
+                    // the one `.image` just rasterised. Coke Studios' chat
+                    // bubbles are exactly that pattern — `ChatRenderer` sizes
+                    // each bubble with `charPosToLoc(len + 1).locH` and crops
+                    // the rendered image to it, so a short measurement clipped
+                    // the bold speaker name to "Dreamcatch".
+                    let (text, fixed_line_space, top_spacing, char_spacing, member_width, font_name, font_size, font_style_bits, alignment, tab_stops, word_wrap) = match &member.member_type {
                         crate::player::cast_member::CastMemberType::Text(t) => {
-                            (t.text.clone(), t.fixed_line_space, t.top_spacing, t.char_spacing as i16, t.width as i16, t.font.clone(), t.font_size, t.alignment.clone(), t.tab_stops.clone(), t.word_wrap)
+                            let mut b = 0u8;
+                            for tag in &t.font_style {
+                                match tag.as_str() {
+                                    "bold" => b |= 0x01,
+                                    "italic" => b |= 0x02,
+                                    "underline" => b |= 0x04,
+                                    _ => {}
+                                }
+                            }
+                            (t.text.clone(), t.fixed_line_space, t.top_spacing, t.char_spacing as i16, t.width as i16, t.font.clone(), t.font_size, b, t.alignment.clone(), t.tab_stops.clone(), t.word_wrap)
                         }
                         crate::player::cast_member::CastMemberType::Field(f) => {
-                            (f.text.clone(), f.fixed_line_space, f.top_spacing, 0, f.width as i16, f.font.clone(), f.font_size, f.alignment.clone(), Vec::new(), f.word_wrap)
+                            (f.text.clone(), f.fixed_line_space, f.top_spacing, 0, f.width as i16, f.font.clone(), f.font_size, crate::player::cast_member::text_style_string_to_byte(&f.font_style), f.alignment.clone(), Vec::new(), f.word_wrap)
                         }
                         crate::player::cast_member::CastMemberType::Button(b) => {
-                            (b.field.text.clone(), b.field.fixed_line_space, b.field.top_spacing, 0, b.field.width as i16, b.field.font.clone(), b.field.font_size, b.field.alignment.clone(), Vec::new(), b.field.word_wrap)
+                            (b.field.text.clone(), b.field.fixed_line_space, b.field.top_spacing, 0, b.field.width as i16, b.field.font.clone(), b.field.font_size, crate::player::cast_member::text_style_string_to_byte(&b.field.font_style), b.field.alignment.clone(), Vec::new(), b.field.word_wrap)
                         }
                         _ => {
                             return Err(ScriptError::new(
@@ -2073,7 +2262,7 @@ impl BuiltInHandlerManager {
                             &player.movie.cast_manager,
                             &mut player.bitmap_manager,
                             font_size_opt,
-                            None,
+                            Some(font_style_bits).filter(|b| *b != 0),
                         )
                     } else {
                         None
@@ -2506,6 +2695,28 @@ impl BuiltInHandlerManager {
                     &args[0], name, &rest,
                 )
             }
+            // Verb form of the 3D vector commands: `perpendicularTo(v1, v2)`,
+            // `crossProduct(v1, v2)`, `angleBetween(v1, v2)`, `distanceTo(v1, v2)`,
+            // `normalize(v)` … The 11.5 Scripting Dictionary writes them as
+            // `vector1.command(vector2)`, but Director accepts the equivalent
+            // global form for every one of them, and movies use it — Street Sesh's
+            // `_PhysO_groundcollision` aligns the skater with
+            //   my.rotate(my.worldPosition, perpendicularTo(v1, tn), angleBetween(v1, tn), #world)
+            // Delegate to the receiver's own handler so there is one implementation.
+            Some(BuiltInSymbol::PerpendicularTo | BuiltInSymbol::CrossProduct | BuiltInSymbol::Cross
+                | BuiltInSymbol::DotProduct | BuiltInSymbol::Dot | BuiltInSymbol::AngleBetween
+                | BuiltInSymbol::DistanceTo | BuiltInSymbol::Normalize
+                | BuiltInSymbol::GetNormalized)
+                if !args.is_empty()
+                    && reserve_player_ref(|player| {
+                        Ok(matches!(player.get_datum(&args[0]), Datum::Vector(_)))
+                    })? =>
+            {
+                let rest = args[1..].to_vec();
+                crate::player::handlers::datum_handlers::vector::VectorDatumHandlers::call(
+                    &args[0], name, &rest,
+                )
+            }
             _ => {
                 // Check if first arg is an xtra instance - if so, forward to the xtra instance handler
                 if !args.is_empty() {
@@ -2533,8 +2744,36 @@ impl BuiltInHandlerManager {
                     }
                     Ok(s)
                 })?;
+                // Handlers a movie CALLS but never DEFINES. Director's contract
+                // for an undefined handler is an error alert (11.5 Scripting
+                // Dictionary, `call`), but the Shockwave PLUGIN suppresses
+                // alerts and play continues — which is why games ship with dead
+                // calls in them and still work. Raising here instead parks the
+                // player on a `break_on_error` breakpoint, turning a harmless
+                // leftover into a dead stop.
+                //
+                // Deliberately a NAME FILTER and not a blanket VOID return: the
+                // "No built-in handler:" message doubles as a control-flow
+                // signal (datum_handlers/mod.rs maps it to HandlerNotFound so
+                // callers know to keep searching, and it is how genuinely
+                // missing built-ins get noticed). Only names verified dead in a
+                // real movie are excused, and the warning is still logged.
+                //
+                // - InitializeProfileStep: Miniclip "Rifleman" (BOTH cuts) calls
+                //   it from "Frame Init Load Data" `beginSprite`; grepping every
+                //   script in both builds finds the call and no definition. The
+                //   Profiler parent script has StartProfile/EndProfile/Output
+                //   and nothing of this name — a rename that left the call site
+                //   behind. It only guards `gTestBeginTime`, which feeds a debug
+                //   `put` in "Frame Loop 3D", so skipping it costs nothing.
+                let is_known_dead_movie_handler =
+                    name.as_str().eq_ignore_ascii_case("InitializeProfileStep");
+
                 let msg = format!("No built-in handler: {}({})", name, formatted_args);
                 warn!("{msg}");
+                if is_known_dead_movie_handler {
+                    return Ok(DatumRef::Void);
+                }
                 return Err(ScriptError::new(msg));
             }
         }
@@ -3055,7 +3294,21 @@ impl BuiltInHandlerManager {
                     )))
                 }
             };
-            let chunk_type = StringChunkType::from(kind);
+            // NOT `StringChunkType::from`, which panics on anything else. This
+            // arm sees EVERY `setProp` a movie makes on a cast member, not only
+            // the chunk-write form -- Spectral Wizard makes one with another
+            // symbol, and the panic trapped the wasm instance mid-frame. An
+            // error here is what the call did before the chunk-write feature
+            // existed, so a movie that relied on catching it still can.
+            let chunk_type = match StringChunkType::from_symbol_opt(kind.clone()) {
+                Some(t) => t,
+                None => {
+                    return Err(ScriptError::new(format!(
+                        "setProp on a member: #{} is not a chunk kind (expected #char, #word, #item or #line)",
+                        kind.as_str()
+                    )))
+                }
+            };
             let first = player.get_datum(&args[1]).int_value()?;
             let (last, value_ref) = if args.len() >= 4 {
                 (player.get_datum(&args[2]).int_value()?, &args[3])
@@ -3237,4 +3490,58 @@ fn get_datum_script_instance_ids(
         }
     }
     Ok(instance_refs)
+}
+
+/// Name a member after the file `importFileInto` just put in it, when it does
+/// not already have a name.
+///
+/// Director 11.5 Scripting Dictionary, `importFileInto()`: "When downloading
+/// files from the Internet, use it to download the file at a specific URL and
+/// set the filename" — importing gives the member the file's identity, exactly
+/// as the authoring Import dialog does. An ALREADY-NAMED member keeps its name:
+/// the method's job is documented as replacing CONTENT, and a script that named
+/// a member deliberately must not have it renamed under it.
+///
+/// The movies rely on this to route what they just fetched. Burnin' Rubber 3
+/// creates an anonymous text member per downloaded file and then dispatches
+/// purely on the name:
+///     tmember = createMember(EMPTY, [#type: #text, #cast: "Internal"])
+///     tImported = tmember.importFileInto(p.url)
+///     if tImported <> 0 then HandleTxt(tmember, [#Remove: 1])
+///  …
+///     if tmember.name contains "Events" then … AddToData(tmember, …)
+/// With the member left unnamed, every track's event table downloaded and was
+/// then silently dropped — the world had no build event and no cars.
+fn name_member_after_file(
+    player: &mut crate::player::DirPlayer,
+    member_ref: &crate::player::cast_lib::CastMemberRef,
+    file_or_url: &str,
+) {
+    let base = file_or_url
+        .rsplit(|c| c == '/' || c == '\\')
+        .next()
+        .unwrap_or(file_or_url);
+    // Strip a query string before the extension, so ".../CityEvents.txt?v=2"
+    // still names the member "CityEvents".
+    let base = base.split('?').next().unwrap_or(base);
+    let stem = match base.rfind('.') {
+        Some(i) if i > 0 => &base[..i],
+        _ => base,
+    };
+    if stem.is_empty() {
+        return;
+    }
+    let renamed = {
+        let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) else {
+            return;
+        };
+        if !member.name.is_empty() {
+            return;
+        }
+        member.name = stem.to_string();
+        true
+    };
+    if renamed {
+        player.movie.cast_manager.invalidate_member_name_cache();
+    }
 }

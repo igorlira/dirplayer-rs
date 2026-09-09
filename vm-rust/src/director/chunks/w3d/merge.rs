@@ -100,6 +100,7 @@ impl W3dScene {
         let mut material_renames: HashMap<Symbol, Symbol> = HashMap::new();
         let mut texture_renames: HashMap<Symbol, Symbol> = HashMap::new();
         let mut node_renames: HashMap<Symbol, Symbol> = HashMap::new();
+        let mut motion_renames: HashMap<Symbol, Symbol> = HashMap::new();
 
         if generate_unique_names {
             // Model resources and raw meshes share one namespace: a node's
@@ -172,6 +173,51 @@ impl W3dScene {
             for mesh in &mut src.raw_meshes {
                 remap(&mut mesh.name, &model_res_renames);
             }
+            // A renamed node has to take its OBJECT keyframe clip with it.
+            // Such a clip is a single track named after the node it drives,
+            // exported as "<node>-Key"; the node is what `keyframe_motion_for_model`
+            // matches on, so leaving the old name behind silently unbinds the
+            // animation from the node that just moved.
+            //
+            // Deliberately restricted to single-track motions: a SKELETAL clip's
+            // tracks name BONES, and a rig's bones also appear in the node table as
+            // groups ("Bip01 …"), so remapping those through `node_renames` would
+            // repoint a skeleton's tracks at renamed group nodes and break the rig.
+            for motion in &mut src.motions {
+                if motion.tracks.len() != 1 {
+                    continue;
+                }
+                let old = motion.tracks[0].bone_name;
+                remap(&mut motion.tracks[0].bone_name, &node_renames);
+                let new = motion.tracks[0].bone_name;
+                if new != old && motion.name.as_str().eq_ignore_ascii_case(&format!("{}-Key", old.as_str())) {
+                    motion.name = Symbol::from_str(&format!("{}-Key", new.as_str()));
+                }
+            }
+            // Motions get their own namespace, and it has to be planned AFTER the
+            // "<node>-Key" pass above, which may already have moved a clip's name.
+            //
+            // Without this a motion-only .w3d silently OVERWROTE the clip it
+            // collided with instead of arriving alongside it, because merge_named
+            // replaces a same-named entry. Intel's ChickenChasin loads six files
+            // and reads the newest clip back as the LAST motion in the scene —
+            //     tCount = pSprite.member.motion.count
+            //     gWaveMotion = pSprite.member.motion(tCount).name
+            // with the comment "The name of the new motion is determined
+            // procedurally", i.e. Director renames the incoming clip rather than
+            // dropping the old one. kid_boy_wave.w3d and kid_boy_cheer.w3d each
+            // carry a clip named for the same rig as kid_boy.w3d, so both were
+            // swallowed: motion.count never grew, and the movie picked up the
+            // PREVIOUS file's clip ("Chicken-Key" as the wave, "Feather10-Key" as
+            // the cheer) instead of the wave and cheer animations.
+            let mut taken_motions: HashSet<Symbol> =
+                self.motions.iter().map(|m| m.name).collect();
+            let motion_names: Vec<Symbol> = src.motions.iter().map(|m| m.name).collect();
+            plan_renames(motion_names, &mut taken_motions, &mut motion_renames);
+            for motion in &mut src.motions {
+                remap(&mut motion.name, &motion_renames);
+            }
+
             // Keyed collections have to be rebuilt under the new keys.
             src.model_resources = src
                 .model_resources
@@ -225,16 +271,27 @@ impl W3dScene {
         merge_named(&mut self.skeletons, src.skeletons, |s| s.name.clone().to_string());
         merge_named(&mut self.motions, src.motions, |m| m.name.clone().to_string());
         merge_named(&mut self.raw_meshes, src.raw_meshes, |m| m.name.clone().to_string());
-        self.texture_images.extend(src.texture_images);
+        // Through `put_texture_image`, not `extend`: a merge REPLACES same-named
+        // textures, and the renderer decides what to re-upload from the PER-TEXTURE
+        // write counter. Extending the map directly left that counter untouched, so
+        // the only thing marking a merged texture dirty was the scene-wide
+        // `texture_content_version` — which forces every texture in the member to be
+        // re-decoded, not just the ones that changed.
+        for (name, data) in src.texture_images {
+            self.put_texture_image(name, data);
+        }
         self.model_resources.extend(src.model_resources);
         self.clod_meshes.extend(src.clod_meshes);
         self.clod_decoders.extend(src.clod_decoders);
         // Carry the folded biped COM across, or a merged-in skinned model would keep
         // the composed node transform while the renderer stopped stripping it.
         self.model_root_com.extend(src.model_root_com);
+        self.model_com_folded.extend(src.model_com_folded);
 
         // Force the renderer to re-upload geometry and textures.
-        self.mesh_content_version = self.mesh_content_version.wrapping_add(1);
+        // A whole scene merged in: the changed resources are not enumerated
+        // here, so this is the one bulk case (see `bump_all_meshes`).
+        self.bump_all_meshes();
         self.texture_content_version = self.texture_content_version.wrapping_add(1);
     }
 }

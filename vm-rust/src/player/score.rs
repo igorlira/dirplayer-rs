@@ -66,6 +66,49 @@ extern "C" {
     /// (== #button) — no dependency on continuous mouse routing.
     #[wasm_bindgen(js_name = "dirplayer_ruffleHitTest")]
     fn ruffle_hit_test(sprite_num: i32, x: f64, y: f64) -> i32;
+    /// Flash variable access behind the sprite dot-syntax — see
+    /// `flash_sprite_variable_name`.
+    #[wasm_bindgen(js_name = "dirplayer_ruffleGetVariable", catch)]
+    fn ruffle_get_variable(sprite_num: i32, path: &str) -> Result<JsValue, JsValue>;
+    #[wasm_bindgen(js_name = "dirplayer_ruffleSetVariable", catch)]
+    fn ruffle_set_variable(sprite_num: i32, path: &str, value: &str) -> Result<JsValue, JsValue>;
+}
+
+/// `_level0`-qualify a bare Flash variable name, matching
+/// `datum_handlers::sprite::root_flash_path`.
+fn root_flash_path(path: &str) -> String {
+    if path.is_empty()
+        || path.starts_with("_level0")
+        || path.starts_with("_root")
+        || path.starts_with("_global")
+        || path.starts_with("this")
+        || path.starts_with('/')
+    {
+        path.to_string()
+    } else {
+        format!("_level0.{}", path)
+    }
+}
+
+/// TRUE when the sprite currently displays a Flash (SWF) cast member, i.e. when
+/// an otherwise-unrecognised `sprite(N).foo` is a FLASH VARIABLE rather than a
+/// behaviour property.
+///
+/// "Director now lets you access Flash variables and execute methods directly
+/// on the Director sprite: `spriteReference.myFlashVariable = "newValue"` /
+/// `put spriteReference.myFlashVariable`" — Using Director 11.5, "Using Lingo
+/// or JavaScript syntax with Flash variables". The `setVariable()` /
+/// `getVariable()` methods are the older spelling of the same access, and
+/// dirplayer already implements those; this is the dot-syntax surface.
+fn sprite_is_flash(player: &DirPlayer, sprite_id: i16) -> bool {
+    player
+        .movie
+        .score
+        .get_sprite(sprite_id)
+        .and_then(|s| s.member.as_ref())
+        .and_then(|m| player.movie.cast_manager.find_member_by_ref(m))
+        .map(|m| matches!(m.member_type, CastMemberType::Flash(_)))
+        .unwrap_or(false)
 }
 
 #[derive(Clone, Debug)]
@@ -149,6 +192,13 @@ pub struct Score {
     /// D5 movies need per-frame sprite property updates from channel_initialization_data
     /// (since sprite properties can change every frame via delta compression)
     pub needs_per_frame_updates: bool,
+    /// D5-and-earlier score sprite scripts currently bound to a channel by the
+    /// per-frame update pass, keyed by sprite number. In D5 the sprite script is
+    /// a per-FRAME cell property, not a span property: the cell can carry script
+    /// A on one frame, script B on the next and none after that. Remembering what
+    /// we attached is what lets the pass detach it again when the cell goes empty
+    /// (see `sync_d5_sprite_script`).
+    pub d5_sprite_scripts: HashMap<i16, (CastMemberRef, ScriptInstanceRef)>,
     /// Channels that have spans from frame_intervals (not from extend_sprite_spans).
     /// Used to prevent per-frame delta initialization from showing sprites outside their span range.
     pub channels_with_frame_interval_spans: HashSet<u32>,
@@ -281,6 +331,7 @@ impl Score {
             custom_tiles: Vec::new(),
             last_sound_clear_frame: None,
             needs_per_frame_updates: false,
+            d5_sprite_scripts: HashMap::new(),
             channels_with_frame_interval_spans: HashSet::new(),
             frame_count: None,
             active_channels_cache: RefCell::new(HashMap::new()),
@@ -355,6 +406,63 @@ impl Score {
     /// `default_cast_lib` is used to resolve cast_lib when it's 65535 or -1 (which means
     /// "use the parent's cast library", commonly used in filmloops).
     /// If the script is not found in the resolved cast library, we search all cast libraries.
+    /// Bring a D5-or-earlier channel's score sprite script in line with what
+    /// the current frame's score cell says it should be: attach `desired` if it
+    /// isn't attached yet, and detach whatever this pass attached before if the
+    /// cell now names a different script or none at all.
+    ///
+    /// Only instances this pass put on the sprite are ever removed — behaviors
+    /// added from a span or by Lingo (`scriptInstanceList.add`) are left alone.
+    fn sync_d5_sprite_script(&mut self, sprite_num: i16, desired: Option<CastMemberRef>) {
+        let current = self.d5_sprite_scripts.get(&sprite_num).cloned();
+        if current.as_ref().map(|(script_ref, _)| script_ref) == desired.as_ref() {
+            return;
+        }
+
+        if let Some((_, instance_ref)) = current {
+            let stale_id = instance_ref.id();
+            self.get_sprite_mut(sprite_num)
+                .script_instance_list
+                .retain(|inst| inst.id() != stale_id);
+            self.d5_sprite_scripts.remove(&sprite_num);
+        }
+
+        let Some(script_ref) = desired else { return };
+
+        // Already there from a span / Lingo — track nothing, so we never take
+        // away a behavior we didn't add.
+        let already_attached = reserve_player_ref(|player| {
+            self.get_sprite(sprite_num).map_or(false, |s| {
+                s.script_instance_list.iter().any(|inst_ref| {
+                    player.allocator.get_script_instance(inst_ref).script == script_ref
+                })
+            })
+        });
+        if already_attached {
+            return;
+        }
+
+        let Some((instance_ref, _datum)) =
+            Self::create_behavior(script_ref.cast_lib, script_ref.cast_member, None)
+        else {
+            return;
+        };
+        reserve_player_mut(|player| {
+            let sprite_num_ref = player.alloc_datum(Datum::Int(sprite_num as i32));
+            let _ = script_set_prop(
+                player,
+                &instance_ref,
+                Symbol::from_str(&"spriteNum".to_string()),
+                &sprite_num_ref,
+                false,
+            );
+        });
+        self.get_sprite_mut(sprite_num)
+            .script_instance_list
+            .push(instance_ref.clone());
+        self.d5_sprite_scripts.insert(sprite_num, (script_ref, instance_ref));
+    }
+
     fn create_behavior(cast_lib: i32, cast_member: i32, default_cast_lib: Option<i32>) -> Option<(ScriptInstanceRef, DatumRef)> {
         // Resolve cast_lib 65535 or -1 to the default (filmloop's) cast library
         let resolved_cast_lib = if cast_lib == 65535 || cast_lib == -1 {
@@ -836,6 +944,22 @@ impl Score {
                 // don't prevent deallocation of old script instances.
                 if did_reset {
                     player.remove_script_instance_list_cache(sprite_num as i16);
+                    // The behavior lifecycle was just cleared, so drop the
+                    // D5 score-script bookkeeping with it — otherwise a
+                    // re-entered span looks like it already carries the
+                    // script and never re-attaches it.
+                    match &score_ref {
+                        ScoreRef::Stage => {
+                            player.movie.score.d5_sprite_scripts.remove(&(sprite_num as i16));
+                        }
+                        ScoreRef::FilmLoop(member_ref) => {
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
+                                if let super::cast_member::CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
+                                    film_loop.score.d5_sprite_scripts.remove(&(sprite_num as i16));
+                                }
+                            }
+                        }
+                    }
                 }
             });
         }
@@ -870,17 +994,50 @@ impl Score {
             .cloned()
             .collect();
 
-        // Get initialization data for sprites
+        // Get initialization data for sprites.
+        //
+        // Director enters a sprite from the score cell of the frame the playhead
+        // actually LANDS ON, which is not always the cell the span opened with:
+        // a `go` to a marker inside a span enters that span mid-way.
+        // "The Hills Have Eyes" is the case that shows it — `_debug_skip` runs
+        // `go("title")` from frame 12, jumping to frame 70, which is 50 frames
+        // into the menu background's 20..260 span. That span OPENS on the first
+        // frame of a fade-in (blend byte 255 = fully transparent), and the fade's
+        // blend keyframes are all long past by frame 70, so replaying the opening
+        // cell left the whole menu background invisible for good — the CONTROLS
+        // and GAME SIZE cards sat on black instead of the rock photo.
+        //
+        // So when the span is entered late, prefer the newest cell at or before
+        // the entered frame. Delta-encoded scores need not carry a record on
+        // every frame, and a record that names no member is not a cell this
+        // sprite can enter from, so both fall back to the span's opening cell.
         let span_init_data: Vec<_> = spans_to_enter
             .iter()
             .filter_map(|span| {
-                self.channel_initialization_data
+                let in_channel = |channel_index: &u16| {
+                    get_channel_number_from_index(*channel_index as u32)
+                        == span.channel_number as u32
+                };
+                let opening = self.channel_initialization_data
                     .iter()
-                    .find(|(_frame_index, channel_index, _data)| {
-                        get_channel_number_from_index(*channel_index as u32)
-                            == span.channel_number as u32
-                            && _frame_index + 1 == span.start_frame
-                    })
+                    .find(|(frame_index, channel_index, _)| {
+                        in_channel(channel_index) && frame_index + 1 == span.start_frame
+                    });
+                let entered = if frame_num > span.start_frame {
+                    self.channel_initialization_data
+                        .iter()
+                        .filter(|(frame_index, channel_index, data)| {
+                            in_channel(channel_index)
+                                && frame_index + 1 > span.start_frame
+                                && frame_index + 1 <= frame_num
+                                && data.cast_member != 0
+                        })
+                        .max_by_key(|(frame_index, _, _)| *frame_index)
+                } else {
+                    None
+                };
+                entered
+                    .or(opening)
                     .map(|(_frame_index, channel_index, data)| (span, *channel_index, data.clone()))
             })
             .collect();
@@ -1280,54 +1437,41 @@ impl Score {
                 sprite.ink = (data.ink & 0x7F) as i32;
                 sprite.blend = convert_raw_blend(data.blend, data.sprite_flags, dir_version);
 
-                // Attach a sprite-script behavior that appears mid-span. D5
-                // sprites can change member per frame and bring a scriptId with
-                // them; begin_sprites only attaches at span-enter (using the
-                // span's START frame data), so a script that shows up on a
+                // Sync the sprite-script behavior with this frame's score cell.
+                // D5 sprites can change member per frame and bring a scriptId
+                // with them; begin_sprites only attaches at span-enter (using
+                // the span's START frame data), so a script that shows up on a
                 // later frame would never bind. 'hackeys clickbutton (script 13,
-                // `on mouseDown` → click=3) appears on channel 6 at frame 2
+                // `on mouseDown` -> click=3) appears on channel 6 at frame 2
                 // when the channel switches from member 21 to member 22+script
                 // 13 — without this, clicking never registers and the kick
-                // never fires. Guarded against re-attachment because the
-                // per-frame deltas re-fire every loop of `go the frame`.
-                if dir_version < 600 && data.sprite_list_idx_lo != 0 {
-                    let script_cast_lib = if data.sprite_list_idx_hi == 0
-                        || data.sprite_list_idx_hi == 65535 {
-                        1
-                    } else {
-                        data.sprite_list_idx_hi as i32
-                    };
-                    let script_member = data.sprite_list_idx_lo as i32;
-                    let script_ref = CastMemberRef {
-                        cast_lib: script_cast_lib,
-                        cast_member: script_member,
-                    };
-                    let already_attached = reserve_player_ref(|player| {
-                        self.get_sprite(sprite_num).map_or(false, |s| {
-                            s.script_instance_list.iter().any(|inst_ref| {
-                                player.allocator.get_script_instance(inst_ref).script == script_ref
-                            })
+                // never fires.
+                //
+                // The cell is authoritative in BOTH directions: an empty
+                // scriptId means the sprite has no score script on this frame,
+                // so a previously-attached one has to come off again. Mario-7
+                // puts a "click to start" behavior (`on mouseUp go(the frame+1)`,
+                // `on mouseDown nothing()`) on the background sprites for the
+                // title frames only; leaving it attached made every background
+                // sprite swallow mouseDown for the rest of the movie, so the
+                // movie script's `on mouseDown` (which is what collects the
+                // items) never ran.
+                if dir_version < 600 {
+                    let desired = if data.sprite_list_idx_lo != 0 {
+                        let script_cast_lib = if data.sprite_list_idx_hi == 0
+                            || data.sprite_list_idx_hi == 65535 {
+                            1
+                        } else {
+                            data.sprite_list_idx_hi as i32
+                        };
+                        Some(CastMemberRef {
+                            cast_lib: script_cast_lib,
+                            cast_member: data.sprite_list_idx_lo as i32,
                         })
-                    });
-                    if !already_attached {
-                        if let Some((instance_ref, _datum)) =
-                            Self::create_behavior(script_cast_lib, script_member, None)
-                        {
-                            reserve_player_mut(|player| {
-                                let sprite_num_ref = player.alloc_datum(Datum::Int(sprite_num as i32));
-                                let _ = script_set_prop(
-                                    player,
-                                    &instance_ref,
-                                    Symbol::from_str(&"spriteNum".to_string()),
-                                    &sprite_num_ref,
-                                    false,
-                                );
-                            });
-                            self.get_sprite_mut(sprite_num)
-                                .script_instance_list
-                                .push(instance_ref);
-                        }
-                    }
+                    } else {
+                        None
+                    };
+                    self.sync_d5_sprite_script(sprite_num, desired);
                 }
             }
         }
@@ -3469,6 +3613,7 @@ impl Score {
     }
 
     pub fn reset(&mut self) {
+        self.d5_sprite_scripts.clear();
         for channel in &mut self.channels {
             // Clear script instances for ALL sprites, not just puppeted ones
             // This prevents stale ScriptInstanceRef objects from pointing to deleted instances
@@ -3900,7 +4045,31 @@ pub fn sprite_get_prop(
         // Flash (SWF) sprite properties — keyed by sprite_num because
         // each Flash sprite has its own dedicated Ruffle instance.
         Some(BuiltInSymbol::Playing) => {
-            if sprite.and_then(|s| s.member.as_ref()).is_some() {
+            if let Some(mref) = sprite.and_then(|s| s.member.as_ref()) {
+                // A Flash sprite whose Ruffle instance hasn't even been
+                // BIND-DISPATCHED yet (movie-load warm instance awaiting its
+                // first playing frame's load pass, or plain not-created-yet)
+                // must NOT read as stopped: Director has no "instance still
+                // wiring up" state — the sprite just began and is PLAYING
+                // unless the member is authored `pausedAtStart`. eds_kart_attack
+                // is the trap: its "Wait for Flash" behavior advances the
+                // INSTANT `sprite(1).playing = 0`, and a single not-yet-bound
+                // read on the first exitFrame skipped the whole intro.
+                let dispatch_key = (sprite_id, mref.cast_lib, mref.cast_member);
+                if !player.flash_sprite_loaded.contains(&dispatch_key) {
+                    if let Some(member) = player.movie.cast_manager.find_member_by_ref(mref) {
+                        if let crate::player::cast_member::CastMemberType::Flash(f) = &member.member_type {
+                            if crate::rendering::has_swf_signature(&f.data) {
+                                let paused_at_start = f
+                                    .flash_info
+                                    .as_ref()
+                                    .map(|fi| fi.paused_at_start)
+                                    .unwrap_or(false);
+                                return Ok(datum_bool(!paused_at_start));
+                            }
+                        }
+                    }
+                }
                 Ok(datum_bool(ruffle_is_playing(sprite_id as i32)))
             } else {
                 Ok(datum_bool(false))
@@ -4105,6 +4274,51 @@ pub fn sprite_get_prop(
                 }
 
                 None => {
+                    // No behaviour owns the name. On a Flash sprite the dot
+                    // syntax reads the SWF's ActionScript variable of that name
+                    // (Using Director 11.5, "Using Lingo or JavaScript syntax
+                    // with Flash variables") — the same value `getVariable()`
+                    // returns. Sewer Run's whole UI is one SWF driven this way:
+                    // `sprite(1).track`, `.challenge`, `.state`, `.skiptomenu`,
+                    // `.load_percent`, … Without this the reads answered VOID
+                    // and, worse, the paired WRITES were invented as behaviour
+                    // properties on the sprite, so the loader's
+                    // `sprite(1).load_percent = 100` never reached the SWF and
+                    // the game sat forever on "The game is loading (0%)".
+                    if reserve_player_ref(|player| sprite_is_flash(player, sprite_id)) {
+                        return match ruffle_get_variable(sprite_id as i32, &root_flash_path(&prop_name.to_string())) {
+                            // Always a STRING when the variable exists — see
+                            // `getVariable()` in the dictionary, and
+                            // `flashPlayerManager.ts::coerceFlashValue`, which
+                            // stringifies numbers and booleans on the way over.
+                            // A null/undefined answer (no such variable, or the
+                            // instance is not ready) is VOID.
+                            Ok(val) => Ok(match val.as_string() {
+                                Some(s) => Datum::String(s),
+                                None => Datum::Void,
+                            }),
+                            Err(e) => {
+                                warn!("Flash sprite variable get '{}' error: {:?}", prop_name, e);
+                                Ok(Datum::Void)
+                            }
+                        };
+                    }
+                    // `antiAliasingSupported` is a documented 3D sprite property
+                    // (Director 11.5 Scripting Dictionary): "indicates whether
+                    // anti-aliasing is supported by the current 3D renderer.
+                    // This property can be tested but not set. This property
+                    // returns either TRUE or FALSE."
+                    //
+                    // FALSE, answered honestly: the WebGL2 renderer does not do
+                    // scene anti-aliasing, and `antiAliasingEnabled` already
+                    // reports 0 on the member side. Claiming TRUE would only
+                    // invite the documented follow-up — `if
+                    // sprite(n).antiAliasingSupported then
+                    // sprite(n).antiAliasingEnabled = TRUE` — to set a flag
+                    // nothing acts on.
+                    if prop_name.eq_ignore_ascii_case("antiAliasingSupported") {
+                        return Ok(Datum::Int(0));
+                    }
                     // Unknown sprite props may be custom behavior properties — return VOID
                     warn!(
                         "Unknown sprite prop '{}' — returning VOID", prop_name
@@ -4985,7 +5199,9 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
                 // Pointer lock is only activated when the game also sets _mouse.mouseLoc.
                 match &cr {
                     crate::player::sprite::CursorRef::System(id) => {
-                        if *id == 200 || *id == -1 {
+                        // Only 200 is Blank; -1 and 0 are the Arrow. See the
+                        // note on the global `cursor` command in types.rs.
+                        if *id == 200 {
                             reserve_player_mut(|p| { p.cursor_is_hidden = true; });
                         } else {
                             reserve_player_mut(|p| {
@@ -5303,10 +5519,28 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
                 match first_pass {
                     Some(r) => r,
                     None => {
-                        // No behavior declares this property. Director allows dynamic
-                        // creation of behavior properties via assignment, so create it
-                        // on the first behavior (e.g. cs `sprite(N).pCustomData = ...`
-                        // on a sprite whose only behavior doesn't declare pCustomData).
+                        // No behaviour declares it. On a Flash sprite the dot
+                        // syntax WRITES the SWF's ActionScript variable of that
+                        // name — the mirror of the getter above, and the same
+                        // thing `setVariable()` does. This must come before the
+                        // dynamic-behaviour-property fallback, which would
+                        // otherwise swallow the write into a Director-side
+                        // instance the SWF can never see.
+                        if reserve_player_ref(|player| sprite_is_flash(player, sprite_id)) {
+                            let value_str = value.string_value().unwrap_or_default();
+                            if let Err(e) = ruffle_set_variable(
+                                sprite_id as i32,
+                                &root_flash_path(&prop_name.to_string()),
+                                &value_str,
+                            ) {
+                                warn!("Flash sprite variable set '{}' error: {:?}", prop_name, e);
+                            }
+                            return Ok(());
+                        }
+                        // Director allows dynamic creation of behavior properties
+                        // via assignment, so create it on the first behavior (e.g.
+                        // `sprite(N).pCustomData = ...` on a sprite whose only
+                        // behavior doesn't declare pCustomData).
                         if let Some(first_behavior) = sprite.script_instance_list.first().cloned() {
                             reserve_player_mut(|player| {
                                 let value_ref = player.alloc_datum(value.clone());
@@ -5729,7 +5963,18 @@ pub fn get_concrete_sprite_render_rect(player: &DirPlayer, sprite: &Sprite) -> I
     let rect = get_concrete_sprite_rect(player, sprite);
     let layout = crate::player::stage::stage_layout(player);
     let (sx, sy) = crate::player::stage::stage_scale(player);
-    if (sx - 1.0).abs() < 1e-6 && (sy - 1.0).abs() < 1e-6 {
+    // Fast path only when there is genuinely nothing to do — scale 1 AND the
+    // draw rect starting at the origin. Testing the scale alone was wrong: it
+    // assumed scale 1 implies no letterbox, which held only while scale 1 meant
+    // `StretchStyle::None`. With an integer-snapped stage a movie can land at
+    // EXACTLY 1.0 inside a larger canvas (an 800x600 movie fits 1080p at 1.8x,
+    // which floors to 1.0), and the offset was then dropped: sprites drew from
+    // the canvas corner while the letterbox was painted around the centred
+    // movie box, blanking most of the frame. Clicks stayed correct, because
+    // `canvas_to_movie_coords` subtracts the origin unconditionally, so the
+    // picture and the hit areas disagreed as well.
+    let no_offset = layout.draw_rect[0].abs() < 1e-6 && layout.draw_rect[1].abs() < 1e-6;
+    if no_offset && (sx - 1.0).abs() < 1e-6 && (sy - 1.0).abs() < 1e-6 {
         return rect;
     }
     IntRect::from(
@@ -6323,9 +6568,60 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             let rect_h = (field.rect_bottom - field.rect_top).max(0) as i32;
             let extras = (2 * field.border as i32)
                 + (2 * field.margin as i32);
-            // Use rect dimensions if available, otherwise fall back to sprite dimensions
-            let btn_w = if rect_w > 0 { rect_w + extras } else { sprite.width };
-            let btn_h = if rect_h > 0 { rect_h + extras } else { sprite.height };
+            // Use rect dimensions if available, otherwise fall back to sprite dimensions.
+            // Both can be NEGATIVE: Director writes -4 as the initialRect right edge
+            // of a checkBox/radioButton whose label is empty, and the score copies
+            // that straight into the sprite's width. Only the indicator sets the
+            // width then, so clamp instead of letting -4 through — unclamped it made
+            // the indicator's opaque label area run off the far side of the stage
+            // (Rasterwerks PHOSPHOR settings: Mute / Positional / Spectator each drew
+            // as a black bar across the panel).
+            // A button member carries no art of its own: Director draws the
+            // pushbutton chrome into the SPRITE's rect, and the member's stored
+            // initialRect is only the default size used when it is first dragged
+            // to the stage. Authors resize the sprite afterwards and the stored
+            // rect goes stale, so for a #pushButton the score is the authority.
+            //
+            // Measured across three movies (all four of Carousel's, both of the
+            // Havok "Properties" demo's, and Lore's), the score agrees on a
+            // uniform button height while the stored initialRects disagree
+            // wildly and are plainly stale:
+            //
+            //   Carousel  Start / Ride / Zoom in / Reset View   score 16 each,
+            //                                        initialRect 8 / 32 / 16 / 12
+            //   Havok     Friction / Restitution               score 16 each,
+            //                                        initialRect 13 / 26
+            //
+            // Director draws one row of identical buttons in both (see the
+            // Carousel reference capture); honouring the initialRect gave four
+            // different heights and clipped "Start" to a sliver of its own
+            // label. Widths agree either way in every case above.
+            //
+            // Scoped to #pushButton deliberately. A #checkBox / #radioButton
+            // box is the INDICATOR plus a label area that Director may wrap, so
+            // its score box is not a chrome rect and is not interchangeable with
+            // the member rect — those keep the existing behaviour untouched,
+            // including the negative-width case noted below.
+            //
+            // Only a POSITIVE score dimension is taken, so the -4 that Director
+            // writes for an empty-label indicator still falls through to the
+            // clamped path (Rasterwerks PHOSPHOR settings).
+            let is_push_button = matches!(
+                button_member.button_type,
+                super::cast_member::ButtonType::PushButton
+            );
+            let score_w = if is_push_button && sprite.width > 0 { Some(sprite.width) } else { None };
+            let score_h = if is_push_button && sprite.height > 0 { Some(sprite.height) } else { None };
+            let btn_w = match score_w {
+                Some(w) => w,
+                None if rect_w > 0 => rect_w + extras,
+                None => sprite.width.max(0),
+            };
+            let btn_h = match score_h {
+                Some(h) => h,
+                None if rect_h > 0 => rect_h + extras,
+                None => sprite.height.max(0),
+            };
             // For checkbox/radio, add 16px width for the indicator
             let extra_w = match button_member.button_type {
                 super::cast_member::ButtonType::CheckBox | super::cast_member::ButtonType::RadioButton => 16,
@@ -6386,22 +6682,44 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 // honor the member's word_wrap flag.
                 let force_wrap = sprite.puppet;
                 let from_bitmap = font.map(|f| {
-                    if text_member.word_wrap || force_wrap {
+                    // The cached atlas is not necessarily at the member's
+                    // authored size. `get_font_with_cast_and_bitmap` files every
+                    // atlas under a bare-name key as well as a sized one, so the
+                    // bare-name entry is whichever size was rasterised LAST — and
+                    // with a scaled stage (fullscreen, or swStretchStyle) the
+                    // renderer rasterises at `font_size * stage_scale`. This rect
+                    // is MOVIE space, so measuring straight against an enlarged
+                    // atlas inflated it by the stage scale: FurniFactory's alert
+                    // panel measured 114px instead of 36, and its single line of
+                    // text ended up pinned to the top of an over-tall box.
+                    //
+                    // Measure in the atlas's OWN units and convert the answer
+                    // back. `ratio` is 1.0 whenever the cached atlas is the
+                    // authored size, which is every unscaled movie.
+                    let ratio = if text_member.font_size > 0 && f.font_size > 0 {
+                        f.font_size as f64 / text_member.font_size as f64
+                    } else {
+                        1.0
+                    };
+                    let to_atlas = |v: i32| ((v as f64) * ratio).round() as i32;
+                    let atlas_h = if text_member.word_wrap || force_wrap {
                         measure_text_wrapped(
-                            &text_member.text, &f, text_width as u16, true,
-                            text_member.fixed_line_space,
-                            text_member.top_spacing,
-                            text_member.bottom_spacing,
+                            &text_member.text, &f,
+                            to_atlas(text_width).max(1) as u16, true,
+                            to_atlas(text_member.fixed_line_space as i32).max(0) as u16,
+                            to_atlas(text_member.top_spacing as i32) as i16,
+                            to_atlas(text_member.bottom_spacing as i32) as i16,
                             text_member.char_spacing,
                         ).1 as i32
                     } else {
                         measure_text(
                             &text_member.text, &f, None,
-                            text_member.fixed_line_space,
-                            text_member.top_spacing,
-                            text_member.bottom_spacing,
+                            to_atlas(text_member.fixed_line_space as i32).max(0) as u16,
+                            to_atlas(text_member.top_spacing as i32) as i16,
+                            to_atlas(text_member.bottom_spacing as i32) as i16,
                         ).1 as i32
-                    }
+                    };
+                    if ratio > 0.0 { ((atlas_h as f64) / ratio).round() as i32 } else { atlas_h }
                 }).filter(|h| *h > 0);
 
                 from_bitmap.or_else(|| {

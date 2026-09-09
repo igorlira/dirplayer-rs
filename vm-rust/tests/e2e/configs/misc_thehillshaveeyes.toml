@@ -1,0 +1,18 @@
+[movie]
+# "The Hills Have Eyes" (Fox Searchlight promo FPS, Director 10 + Shockwave 3D).
+#
+# A first-person shooter: `_world_manager` streams the W3D casts, `init_game`
+# clones the player/mutant/gun models into the "world" member, and `_shell`
+# builds the HUD out of overlays. No physics Xtra — movement and collision are
+# hand-rolled Lingo over `modelsUnderRay` plus a `_PathFinder` / `_Map` pair.
+#
+# It does use the Enhancer Xtra (`new(xtra("enhancer"), "AAENXP-...")` in
+# init_game's `beginSprite`), so the port of that Xtra is on the boot path.
+path = "dcr_misc/thehillshaveeyes.dcr"
+
+[test]
+suite = "misc"
+tags = ["3d"]
+# Cloning 8 W3D casts (world, player + 4 player motions, mutant + 4 mutant
+# motions) is the slow part of the boot.
+default_timeout = 300.0

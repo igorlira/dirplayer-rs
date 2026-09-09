@@ -3,3 +3,4 @@ path = "dcr_hotwheels/figure8.dcr"
 
 [test]
 suite = "hotwheels"
+tags = ["2d"]

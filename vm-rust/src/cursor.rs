@@ -7,11 +7,16 @@ use crate::player::{
 };
 
 /// Cache key for the native cursor: either a cast-member cursor
-/// (bitmap_ref, mask_bitmap_ref, reg_point) or one of Director's numbered
-/// built-ins. Kept so the CSS property is only written when it changes.
+/// (bitmap_ref, mask_bitmap_ref, reg_point, scale_factor) or one of Director's
+/// numbered built-ins. Kept so the CSS property is only written when it changes.
+///
+/// The scale factor is part of the MEMBER key because the cursor is rasterised
+/// at the stage scale — without it, going fullscreen would keep serving the
+/// cached 1x image. A system cursor is a CSS keyword, which the browser scales
+/// itself, so it needs no factor.
 #[derive(PartialEq, Clone, Debug)]
 pub enum CursorCacheKey {
-    Member(Option<u32>, Option<u32>, (i16, i16)),
+    Member(Option<u32>, Option<u32>, (i16, i16), u32),
     System(i32),
 }
 pub type NativeCursorCache = Option<CursorCacheKey>;
@@ -104,10 +109,39 @@ pub fn update_native_cursor(
         }
     };
 
+    // A custom cursor is a CSS image, so the browser draws it at device pixels
+    // and it does NOT inherit the stage's scale — on a scaled stage Habbo's
+    // cursor stayed its authored size while everything it points at grew.
+    //
+    // Integer factors only: these are pixel-art cursors and the canvas is
+    // `image-rendering: pixelated`, so a fractional resample would make the
+    // cursor the one soft thing on screen. Browsers also REFUSE a custom cursor
+    // larger than 128px in either axis (they silently fall back to the default
+    // arrow), so the factor is clamped to keep both axes inside that — better a
+    // 2x cursor than no cursor.
+    const MAX_CURSOR_PX: u32 = 128;
+    let scale_factor = {
+        // `stage_scale` is movie -> DEVICE pixels, because `stage_layout` folds
+        // in `stage_pixel_ratio`. A CSS cursor is not: the browser takes the
+        // image's intrinsic pixels as CSS pixels and applies the device ratio
+        // itself. Using the device scale therefore multiplied by the ratio
+        // twice, and on a Retina Mac (dpr 2) every custom cursor came out at
+        // double size. What is wanted is the movie -> CSS scale.
+        let (sx, sy) = crate::player::stage::stage_scale(player);
+        let dpr = crate::player::stage::stage_pixel_ratio(player).max(1.0);
+        let want = (sx.min(sy) / dpr).round().max(1.0) as u32;
+        let w = (cursor_bitmap_member.info.width as u32).max(1);
+        let h = (cursor_bitmap_member.info.height as u32).max(1);
+        let fit_w = (MAX_CURSOR_PX / w).max(1);
+        let fit_h = (MAX_CURSOR_PX / h).max(1);
+        want.min(fit_w).min(fit_h).max(1)
+    };
+
     let cache_key = CursorCacheKey::Member(
         Some(cursor_bitmap_member.image_ref),
         cursor_mask_member.as_ref().map(|m| m.image_ref),
         cursor_bitmap_member.reg_point,
+        scale_factor,
     );
     if cache.as_ref() == Some(&cache_key) {
         return;
@@ -154,13 +188,33 @@ pub fn update_native_cursor(
         }
     }
 
+    // Nearest-neighbour upscale to the stage scale. Done here rather than via a
+    // CSS size because a data-URL cursor has no CSS box to size — the browser
+    // uses the image's own pixels.
+    let (out_w, out_h, out_rgba) = if scale_factor > 1 {
+        let (nw, nh) = (w * scale_factor, h * scale_factor);
+        let mut up = vec![0u8; (nw * nh * 4) as usize];
+        for y in 0..nh {
+            let sy = y / scale_factor;
+            for x in 0..nw {
+                let sx = x / scale_factor;
+                let src = ((sy * w + sx) * 4) as usize;
+                let dst = ((y * nw + x) * 4) as usize;
+                up[dst..dst + 4].copy_from_slice(&rgba[src..src + 4]);
+            }
+        }
+        (nw, nh, up)
+    } else {
+        (w, h, rgba)
+    };
+
     let mut png_bytes: Vec<u8> = Vec::new();
     {
         use image::codecs::png::PngEncoder;
         use image::ImageEncoder;
         let encoder = PngEncoder::new(&mut png_bytes);
         if encoder
-            .write_image(&rgba, w, h, image::ExtendedColorType::Rgba8)
+            .write_image(&out_rgba, out_w, out_h, image::ExtendedColorType::Rgba8)
             .is_err()
         {
             return;
@@ -170,8 +224,9 @@ pub fn update_native_cursor(
     let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
     let data_url = format!("url(\"data:image/png;base64,{b64}\")");
 
-    let hx = cursor_bitmap_member.reg_point.0;
-    let hy = cursor_bitmap_member.reg_point.1;
+    // The hotspot is in the cursor image's own pixels, so it scales with it.
+    let hx = cursor_bitmap_member.reg_point.0 as i32 * scale_factor as i32;
+    let hy = cursor_bitmap_member.reg_point.1 as i32 * scale_factor as i32;
     let cursor_css = format!("{data_url} {hx} {hy}, auto");
 
     let _ = canvas.style().set_property("cursor", &cursor_css);

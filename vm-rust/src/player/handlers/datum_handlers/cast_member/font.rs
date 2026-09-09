@@ -1467,6 +1467,9 @@ impl FontMemberHandlers {
         bottom_spacing: i16,
         char_spacing: i32,
         tab_stops: &[crate::player::cast_member::TabStop],
+        // Render ALIASED (hard 1-bit coverage), Director's look for text whose
+        // fontSize is below the member's antiAliasThreshold (default 14).
+        aliased: bool,
     ) -> Result<(), ScriptError> {
         use crate::io::encoding::glyph_byte_for;
 
@@ -1483,22 +1486,80 @@ impl FontMemberHandlers {
             .unwrap_or([256, 0, 0, 256]);
         let matrix_sx = m[0] as f64 / 256.0;
         let matrix_sy = m[3] as f64 / 256.0;
-        let scale_x = scale * matrix_sx.abs();
-        let scale_y_mag = scale * matrix_sy.abs();
+        // A grid-fit (hinted) parse carries PIXEL-space contour coordinates
+        // already scaled to `target_em_px`; metrics (set_width, ascender) stay
+        // in orus and keep using `scale`. Unity parses use `scale` for both.
+        let coords_scaled = parsed.target_em_px > 0;
+        let contour_scale = if coords_scaled {
+            font_size as f64 / parsed.target_em_px as f64
+        } else {
+            scale
+        };
+        let scale_x = contour_scale * matrix_sx.abs();
+        let scale_y_mag = contour_scale * matrix_sy.abs();
         // Same Y orientation rule as the rasterizer: when the font matrix
         // already flips Y (m[3] < 0) the parsed coords are Y-down, so we use a
         // positive scale; otherwise flip.
         let glyph_scale_y = if matrix_sy < 0.0 { scale_y_mag } else { -scale_y_mag };
-        let baseline = (phys.metrics.ascender as f64 * scale).round();
+        // LAYOUT ascent, not the bounding-box top: Paige places the baseline at
+        // `lineTop + ascent` from the font's real ascent. The PFR carries it in
+        // the type-2 aux record's TEXTMETRIC block (Arial 1854/2048 = 0.905 em
+        // where the bbox top is ~1.0 em); the rasterizer keeps sizing its glyph
+        // cell from the bbox `metrics.ascender`. Falls back to the bbox when no
+        // type-2 record exists. REFUTED: the type-5 private record's
+        // word36/word37 are NOT (descent, ascent) in 256ths of an em; using
+        // them put the Score baseline 4px too HIGH.
+        // Integer baseline rounds UP, like the metrics Director got from the OS:
+        // GDI's shipped (VDMX-backed) Arial cell at 20 ppem is ascent 19 /
+        // descent 5 where linear scaling gives 18.1 / 4.2. Measured on the
+        // AreaZero Score strip: baseline 19 puts ink at strip rows 4-18 exactly
+        // as the projector capture; round() gave 18 and sat the text 1px high.
+        let baseline = (phys.metrics.baseline_ascender() as f64 * scale).ceil();
+        // fixedLineSpace does NOT move the baseline. It grows the LINE BOX
+        // (see `effective_line_h` below, which is where the Paige minimum
+        // belongs); the baseline stays at `lineTop + ascent` and the slack
+        // lands under the descender. This used to read
+        // `baseline.max(fixed_line_space)`, which pinned the baseline to the
+        // bottom of the box whenever fls >= ascent + descent.
+        //
+        // Rifleman's HUD is the case that exposed it. `tfFoes` is Microgramma
+        // Condensed Bold 56 with fixedLineSpace 56 against ascent ~45, so the
+        // digits were baselined at 56 in a 56-tall `.image` — flush with the
+        // bottom edge, with any descender clipped outright. That image is
+        // blitted into the 64x64 HUD texture drawn at point(450, 12), so the
+        // "15" hung across the rule of the "FOES LEFT" plate at y=64 instead
+        // of sitting above it. Same for `tfTime` (fls 38, size 38).
 
+        // The same synthetic-bold pen the atlas path applies
+        // (`rasterizer::bold_embolden_orus`), so a member's baked `.image` stays
+        // in step with the same text drawn on stage. Without it, bold text here
+        // was stepped at regular-weight advances and its letters ran together —
+        // Coke Studios' window titles are Verdana 12 bold baked through this
+        // path. See that constant for why the pen is empirical and what it is
+        // probably compensating for.
+        // Hinted (coords_scaled): no design-space pen — Director's TEXT bold
+        // leaves advances untouched (specimen-measured); the ink alone
+        // doubles via the second strike below.
+        let bold_embolden = if coords_scaled {
+            0.0
+        } else {
+            crate::director::chunks::pfr1::rasterizer::bold_embolden_orus(parsed, true) as f64
+        };
         // Per-char advance from the glyph's set_width (fractional → sub-pixel).
-        let advance_of = |code: u8| -> f64 {
-            let sw = parsed
-                .glyphs
-                .get(&code)
-                .map(|g| g.set_width as f64)
-                .unwrap_or(outline_res * 0.5);
-            sw * scale + char_spacing as f64
+        let advance_of = |code: u8, bold: bool| -> f64 {
+            let glyph = parsed.glyphs.get(&code);
+            let sw = glyph.map(|g| g.set_width as f64).unwrap_or(outline_res * 0.5);
+            // A glyph with no contour (the space) carries no ink for the pen to
+            // widen, and Shockwave leaves its advance alone.
+            let has_ink = glyph.map_or(false, |g| !g.contours.is_empty());
+            let sw = if bold && has_ink { sw + bold_embolden } else { sw };
+            // Grid-fit: Director steps the pen at whole pixels (Paige lays
+            // out from the ROUNDED per-glyph widths Director reports), so
+            // hinted stems land on the grid they were fitted to. A fractional
+            // accumulate + round-at-draw was tried and REGRESSED the specimen
+            // (8.38% -> 9.25%) — that pen belongs to the GDI path only.
+            let adv = if coords_scaled { (sw * scale).round() } else { sw * scale };
+            adv + char_spacing as f64
         };
         let style_at = |idx: usize| -> OutlineCharStyle {
             per_char.get(idx).copied().unwrap_or(default_style)
@@ -1510,20 +1571,27 @@ impl FontMemberHandlers {
         // kept inline (their glyph_byte is 9, zero ink).
         let normalised: String = text.replace("\r\n", "\n").replace('\r', "\n");
         let mut lines: Vec<Vec<(char, usize)>> = Vec::new();
+        // Which of those lines BEGIN a paragraph — i.e. line one, and any line that
+        // follows a hard return. A line produced by word wrap is a continuation and
+        // begins no paragraph, which is the distinction `topSpacing` turns on below.
+        let mut para_start: Vec<bool> = Vec::new();
         {
             let chars: Vec<char> = normalised.chars().collect();
             let wrap_w = if word_wrap && max_width > 0 { max_width as f64 } else { f64::MAX };
             let mut cur: Vec<(char, usize)> = Vec::new();
+            let mut next_is_para = true;
             let mut cur_w: f64 = 0.0;
             let mut last_space: Option<usize> = None; // index within `cur`
             let mut width_to: f64 = 0.0; // width up to last_space (exclusive of space)
             for (i, &c) in chars.iter().enumerate() {
                 if c == '\n' {
                     lines.push(std::mem::take(&mut cur));
+                    para_start.push(next_is_para);
+                    next_is_para = true;
                     cur_w = 0.0; last_space = None; width_to = 0.0;
                     continue;
                 }
-                let adv = if c == '\t' { 0.0 } else { advance_of(glyph_byte_for(c)) };
+                let adv = if c == '\t' { 0.0 } else { advance_of(glyph_byte_for(c), style_at(i).bold) };
                 let has_tab = cur.iter().any(|&(ch, _)| ch == '\t');
                 if word_wrap && !has_tab && cur_w + adv > wrap_w && !cur.is_empty() {
                     if let Some(sp) = last_space {
@@ -1531,14 +1599,18 @@ impl FontMemberHandlers {
                         let tail: Vec<(char, usize)> = cur.split_off(sp + 1);
                         cur.pop(); // drop the break space itself
                         lines.push(std::mem::take(&mut cur));
+                        para_start.push(next_is_para);
+                        next_is_para = false;
                         cur = tail;
                         cur_w = cur.iter()
-                            .map(|&(ch, _)| if ch == '\t' { 0.0 } else { advance_of(glyph_byte_for(ch)) })
+                            .map(|&(ch, ix)| if ch == '\t' { 0.0 } else { advance_of(glyph_byte_for(ch), style_at(ix).bold) })
                             .sum();
                         let _ = width_to;
                         last_space = None;
                     } else {
                         lines.push(std::mem::take(&mut cur));
+                        para_start.push(next_is_para);
+                        next_is_para = false;
                         cur_w = 0.0; last_space = None;
                     }
                 }
@@ -1547,6 +1619,7 @@ impl FontMemberHandlers {
                 cur_w += adv;
             }
             lines.push(cur);
+            para_start.push(next_is_para);
         }
 
         // --- 5× supersampled software raster buffer (straight RGBA). ---
@@ -1556,7 +1629,21 @@ impl FontMemberHandlers {
         // discontinuous underline) because it fed the browser's platform-
         // specific canvas coverage into the hard LO/HI threshold below.
         // Box-downscaled 4×→1× further down for anti-aliasing.
-        let sf = 5u32;
+        // Director's own 1-bit rule (integer-y sample lines, rounded span
+        // ends, midpoint dropout rescue) exists behind `director_binary`
+        // below — but as a PARTIAL implementation (the crossing recorder's
+        // tail, the per-row flag machinery and the vertical dropout handling
+        // are missing) it measured WORSE than the supersample+threshold
+        // approximation: hinted specimen 8.31% vs 8.19%. Disabled until it is
+        // complete; re-measure before enabling.
+        let director_binary = false;
+        // Grid-fit AA: Director's gray engine computes EXACT area coverage
+        // quantized to 64 levels and maps them through a LINEAR ramp
+        // (0,4,8,...,255 = round(v*255/63)). An 8x8 box supersample gives the
+        // same 64 coverage levels; the LO/HI "steepening" ramp below is an
+        // invention for the unity-parse path and is skipped here.
+        let director_gray = coords_scaled && !aliased;
+        let sf = if director_binary { 1u32 } else if director_gray { 8u32 } else { 5u32 };
         let cw2 = (render_width.max(1) as u32) * sf;
         let ch2 = (render_height.max(1) as u32) * sf;
         let cw2u = cw2 as usize;
@@ -1564,44 +1651,97 @@ impl FontMemberHandlers {
         let mut buf = vec![0u8; cw2u * ch2u * 4];
 
         let bold_off = (font_size as f64 * 0.04).max(0.5);
+        // A face that is ALREADY bold gains nothing from a `[#bold]` style —
+        // you can't embolden it further, and Director doesn't try (settled:
+        // PFR weight >= 600 adds no pen and no double-strike). The face weight
+        // is readable off the PFR font id (`<Family>_<Weight>_<Variant>`, e.g.
+        // `Verdana_700_0`). Without this, "Verdana Bold * 11 [#bold]" got a
+        // second strike and rendered visibly heavier than Shockwave (combo 10).
+        let face_is_bold = {
+            let id = parsed.physical_font.font_id.to_ascii_lowercase();
+            id.contains("bold")
+                || id.contains("_600")
+                || id.contains("_700")
+                || id.contains("_800")
+                || id.contains("_900")
+        };
 
-        let line_natural = (((phys.metrics.ascender - phys.metrics.descender) as f64) * scale)
-            .round()
+        // Real layout ascent/descent (type-2 aux record), same pair the
+        // baseline above uses — the bbox pair over-reported Arial's natural
+        // line by ~0.1 em and beat the movie's fixedLineSpace in the max().
+        // Director's auto line = round(asc) + round(desc) + 1, each metric
+        // rounded to pixels separately — the same rule
+        // `pfr_outline_auto_line_height` uses for `.rect`/`.height`/`.image`
+        // sizing (see the measurement note there); the two MUST agree or the
+        // box clips the last line.
+        let line_natural = ((phys.metrics.layout_ascender() as f64 * scale).round()
+            + ((-(phys.metrics.layout_descender()) as f64).max(0.0) * scale).round()
+            + 1.0)
             .max(1.0);
+        // The ADVANCE between lines is `fixedLineSpace` verbatim. 11.5 dictionary,
+        // `fixedLineSpace`: "The value itself is an integer, indicating height in
+        // absolute pixels of each line. The default value is 0, which results in
+        // natural height of lines." It really does squeeze below what the font
+        // needs — measured on Burnin' Rubber 3's challenge panel, where
+        // `[M] Burnin Rubber 3 TrackSelection` bakes the track blurb with
+        // `#fontSize: 11, #lineSpacing: 10` onto a 512x64 quad that an orthographic
+        // camera at orthoHeight 480 draws 1:1 on a 480-tall stage. The capture's
+        // lines start every 10 px — exactly the fixedLineSpace — while Arial 11's
+        // natural line is 14, which is what the old `max()` produced. Three lines at
+        // 14 overran the panel and printed the blurb over the unlock bullets.
+        //
+        // The floor belongs on the BOX, not on the advance, and that is where it
+        // still is: `text.rs` sizes `.rect`/`.height`/`.image` as
+        // `top_spacing + natural + (lines - 1) * step`, so the LAST line's ink still
+        // fits. That is what Rifleman's briefing needed (Courier New Bold 32,
+        // fixedLineSpace 34, natural 36: box 138, advance 34) — flooring the advance
+        // as well was over-correction, and it drew that briefing a pixel per line
+        // looser than Director does. See [[fixedlinespace-is-a-minimum-not-a-baseline]].
         let effective_line_h = if fixed_line_space > 0 {
             fixed_line_space as f64
         } else {
             line_natural
         };
-        let line_step = effective_line_h + bottom_spacing as f64 + top_spacing as f64;
+        // `topSpacing` separates PARAGRAPHS, so it is charged only to a line that
+        // begins one — never between the wrapped lines of a single paragraph. (It is
+        // also not charged to line one; `y_top` starts at 0, see the note below.)
+        // Burnin' Rubber 3's track blurb is one wrapped paragraph with topSpacing 2,
+        // so paying it per line put the lines 12 px apart where the capture has 10.
+        let line_advance = |next_line: usize| -> f64 {
+            effective_line_h
+                + bottom_spacing as f64
+                + if para_start.get(next_line).copied().unwrap_or(false) {
+                    top_spacing as f64
+                } else {
+                    0.0
+                }
+        };
 
         let seg_width = |seg: &[(char, usize)]| -> f64 {
-            seg.iter().map(|&(c, _)| advance_of(glyph_byte_for(c))).sum()
+            seg.iter().map(|&(c, ix)| advance_of(glyph_byte_for(c), style_at(ix).bold)).sum()
         };
         let has_right_tab = tab_stops.iter().any(|t| t.tab_type == BuiltInSymbol::Right);
 
-        // Director places a line by its baseline at `lineTop + fixedLineSpace`.
-        // For an ordinary member fixedLineSpace is at least the font's ascent, so
-        // that is just the natural ascender and nothing changes. But a
-        // fixedLineSpace SMALLER than the ascent is a deliberate squeeze — the
-        // line box cannot hold the glyph, and Director lets the glyph overflow
-        // UPWARD out of it rather than pushing it down by a full ascender.
+        // The baseline sits at `lineTop + ascent`, full stop — PGTEXT.C stores it as
+        // `starts->baseline = leading + descent` measured up from the line's BOTTOM,
+        // which is `ascent` from the top. fixedLineSpace grows the line box (above)
+        // but never moves the baseline.
         //
-        // AreaZero's `[M] Text Director` bakes every 3D UI string that way:
-        // `topSpacing = 10, fixedLineSpace = 1` on a 32px strip pulls the
-        // copyright line hard against the top, because the quad sampling it is
-        // authored hanging 13px off the bottom of the stage. Using the full
-        // ascender put the baseline at 22 and the ink at rows 13-24, so the
-        // stage edge cut the line in half; clamping it to fixedLineSpace puts
-        // the baseline at 11 and the ink at ~0-14, inside the visible band.
-        let baseline = if fixed_line_space > 0 {
-            baseline.min(fixed_line_space as f64)
-        } else {
-            baseline
-        };
+        // This replaces a `baseline.min(fixedLineSpace)` heuristic that read a small
+        // fixedLineSpace as "a deliberate squeeze, let the glyph overflow upward".
+        // It was compensating for the topSpacing bug below rather than for anything
+        // Director does: with both corrected, AreaZero's Score strip puts its ink at
+        // rows 4-18 of the 20-row bake, matching the projector capture exactly, and
+        // 18 is Arial's true hhea ascender (0.905 em at fontSize 20).
 
-        let mut y_top = top_spacing as f64;
-        for line in &lines {
+        // `topSpacing` is documented as a chunkExpression (paragraph) property whose
+        // effect is "more/less spacing BETWEEN paragraphs" — it does not indent the
+        // FIRST paragraph away from the top of the box. AreaZero's [M] Text Director
+        // sets `member.topSpacing = height/2` on every baked strip as its "alignV"
+        // idiom; applied to line one that pushed a fontSize-20 line 10px down a
+        // 20px-tall box and clipped its bottom rows off the quad.
+        let mut y_top = 0.0f64;
+        for (line_index, line) in lines.iter().enumerate() {
             if y_top >= render_height as f64 { break; }
             let baseline_y = y_top + baseline;
 
@@ -1672,25 +1812,32 @@ impl FontMemberHandlers {
                 for &(c, idx) in seg {
                     let code = glyph_byte_for(c);
                     let st = style_at(idx);
-                    let adv = advance_of(code);
+                    let adv = advance_of(code, st.bold);
                     // Draw at the *fractional* cursor (not x.round()). The 5×
                     // supersample buffer has the sub-pixel resolution to place
                     // each glyph exactly, so inter-letter spacing matches the
                     // accumulated advance (and the underline). Per-glyph integer
                     // snapping added ±1px jitter that read as uneven gaps —
                     // "You" → "Y o", "create" → "cre ate", "here" → "he re".
-                    let draw_x = x;
+                    //
+                    // EXCEPT grid-fit (hinted) glyphs: their stems are snapped
+                    // to the pixel grid, so the glyph must land on it too.
+                    // Director rounds each glyph's pen position from the
+                    // fractional accumulation (`+0x8000 >> 16`).
+                    let draw_x = if coords_scaled { x.round() } else { x };
                     if c != ' ' {
                         if let Some(glyph) = parsed.glyphs.get(&code) {
                             if !glyph.contours.is_empty() {
                                 Self::raster_glyph_outline(
                                     &mut buf, cw2u, ch2u, sf as f64, glyph,
                                     draw_x, baseline_y, scale_x, glyph_scale_y, st.italic, st.color,
+                                    director_binary,
                                 );
-                                if st.bold {
+                                if st.bold && !face_is_bold {
                                     Self::raster_glyph_outline(
                                         &mut buf, cw2u, ch2u, sf as f64, glyph,
                                         draw_x + bold_off, baseline_y, scale_x, glyph_scale_y, st.italic, st.color,
+                                        director_binary,
                                     );
                                 }
                             }
@@ -1711,7 +1858,7 @@ impl FontMemberHandlers {
                 }
             }
 
-            y_top += line_step;
+            y_top += line_advance(line_index + 1);
         }
 
         // --- Alpha-weighted 4×→1× box downscale into the destination bitmap. ---
@@ -1746,7 +1893,18 @@ impl FontMemberHandlers {
                 // instead of the soft grey a plain box-average/gamma produces.
                 const LO: f32 = 45.0;
                 const HI: f32 = 135.0;
-                let out_a = if (avg_a as f32) <= LO {
+                let out_a = if aliased {
+                    // Director does NOT anti-alias text below the member's
+                    // antiAliasThreshold: a pixel is ink iff (approximately) its
+                    // center falls inside the outline. Majority coverage of the
+                    // 5×5 supersample is the closest equivalent.
+                    if avg_a >= 128 { 255 } else { 0 }
+                } else if director_gray {
+                    // Director's gray ramp: coverage quantized to 64 levels,
+                    // mapped linearly; >= 64/64 is solid.
+                    let cov = (avg_a as u32 * 64 + 127) / 255;
+                    if cov >= 64 { 255 } else { ((cov * 255 + 31) / 63).min(255) as u8 }
+                } else if (avg_a as f32) <= LO {
                     0
                 } else if (avg_a as f32) >= HI {
                     255
@@ -1786,6 +1944,7 @@ impl FontMemberHandlers {
         glyph_scale_y: f64,
         italic: bool,
         color: (u8, u8, u8),
+        director_binary: bool,
     ) {
         use crate::director::chunks::pfr1::types::PfrCmdType;
         const SLANT: f64 = 0.21;
@@ -1851,7 +2010,11 @@ impl FontMemberHandlers {
         }
         if edges.is_empty() { return; }
 
-        // Scanline fill, non-zero winding, sampling each row at its center.
+        // Scanline fill, non-zero winding. Default: sample each row at its
+        // center (the supersampled AA path). `director_binary`: Director's
+        // 1-bit rule — sample lines at INTEGER y, span ends rounded to the
+        // pixel grid, and a span that rounds away plots its midpoint
+        // (dropout rescue).
         let mut ymin = f64::MAX;
         let mut ymax = f64::MIN;
         for &(_, y0, _, y1) in &edges {
@@ -1859,10 +2022,10 @@ impl FontMemberHandlers {
             ymax = ymax.max(y0.max(y1));
         }
         let row0 = ymin.floor().max(0.0) as usize;
-        let row1 = (ymax.ceil().max(0.0) as usize).min(ch);
+        let row1 = (ymax.ceil().max(0.0) as usize + 1).min(ch);
         let mut xs: Vec<(f64, i32)> = Vec::new();
         for row in row0..row1 {
-            let yc = row as f64 + 0.5;
+            let yc = if director_binary { row as f64 } else { row as f64 + 0.5 };
             xs.clear();
             for &(x0, y0, x1, y1) in &edges {
                 if (y0 <= yc && y1 > yc) || (y1 <= yc && y0 > yc) {
@@ -1873,18 +2036,38 @@ impl FontMemberHandlers {
             if xs.len() < 2 { continue; }
             xs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
             let mut wind = 0;
+            let base = row * cw;
+            let mut plot = |px: i64, buf: &mut [u8]| {
+                if px < 0 || px as usize >= cw {
+                    return;
+                }
+                let di = (base + px as usize) * 4;
+                buf[di] = color.0;
+                buf[di + 1] = color.1;
+                buf[di + 2] = color.2;
+                buf[di + 3] = 255;
+            };
             for i in 0..xs.len() - 1 {
                 wind += xs[i].1;
-                if wind != 0 {
+                if wind == 0 {
+                    continue;
+                }
+                if director_binary {
+                    let xa = (xs[i].0 + 0.5).floor() as i64;
+                    let xb = (xs[i + 1].0 + 0.5).floor() as i64;
+                    if xa >= xb {
+                        // Dropout rescue: keep thin spans as one pixel.
+                        plot(((xs[i].0 + xs[i + 1].0) * 0.5 + 0.5).floor() as i64, buf);
+                    } else {
+                        for px in xa.max(0)..xb.min(cw as i64) {
+                            plot(px, buf);
+                        }
+                    }
+                } else {
                     let xa = (xs[i].0 - 0.5).ceil().max(0.0) as i64;
                     let xb = (xs[i + 1].0 - 0.5).ceil().max(0.0).min(cw as f64) as i64;
-                    let base = row * cw;
                     for px in xa..xb {
-                        let di = (base + px as usize) * 4;
-                        buf[di] = color.0;
-                        buf[di + 1] = color.1;
-                        buf[di + 2] = color.2;
-                        buf[di + 3] = 255;
+                        plot(px, buf);
                     }
                 }
             }
@@ -2331,7 +2514,9 @@ impl FontMemberHandlers {
                         original_dst_rect: None,
                         bg_color_explicit: false,
                         fore_color_explicit: false,
-                        ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+                        ink9_mask_bitmap: None,
+                        ink9_mask_offset: (0, 0),
+                        reverse_ink: false,
                         floor_rule: false,
                     };
 
@@ -2502,7 +2687,9 @@ impl FontMemberHandlers {
                                     original_dst_rect: None,
                                     bg_color_explicit: false,
                                     fore_color_explicit: false,
-                                    ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+                                    ink9_mask_bitmap: None,
+                                    ink9_mask_offset: (0, 0),
+                                    reverse_ink: false,
                                     floor_rule: false,
                                 };
 

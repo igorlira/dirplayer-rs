@@ -10,7 +10,7 @@ use crate::{
     director::lingo::datum::{datum_bool, Datum},
     player::{
         allocator::{DatumAllocator, DatumAllocatorTrait},
-        compare::{datum_equals, datum_less_than},
+        compare::{datum_equals, datum_equals_member, datum_less_than},
         handlers::types::TypeUtils,
         player_duplicate_datum, reserve_player_mut, reserve_player_ref, DatumRef, DirPlayer,
         ScriptError,
@@ -91,6 +91,16 @@ impl ListDatumHandlers {
             let datum_clone = player.get_datum(datum_ref).clone();
             let s = format_concrete_datum(&datum_clone, player);
             return Ok(player.alloc_datum(Datum::String(s)));
+        }
+        // `meshDeform.mesh[m].face[f].neighbor`. `face[f]` is a plain 3-element
+        // list (Director returns a value, and movies use it after deleting the
+        // model — see the note on FaceOrigin), so the adjacency is recovered by
+        // the identity of the datum that was handed out rather than by its type.
+        // Any other list simply has no such property and falls through.
+        if prop_name.as_str().eq_ignore_ascii_case("neighbor") {
+            if let Some(d) = super::shockwave3d_object::meshdeform_face_neighbor_of(player, datum_ref) {
+                return Ok(player.alloc_datum(d));
+            }
         }
         let list_vec = player.get_datum(datum_ref).to_list()?;
         let result = ListDatumUtils::get_prop(&list_vec, prop_name, &player.allocator)?;
@@ -341,6 +351,31 @@ impl ListDatumHandlers {
 
         let key = args[0].clone();
 
+        // `face[f].neighbor[i]` compiles to getPropRef(faceList, #neighbor, i).
+        // Resolve the property first, then index into it — the generic path below
+        // expects args[0] to be an integer subscript and would reject the symbol.
+        {
+            let handled = reserve_player_mut(|player| -> Result<Option<DatumRef>, ScriptError> {
+                let is_neighbor = matches!(player.get_datum(&key),
+                    Datum::Symbol(s) if s.as_str().eq_ignore_ascii_case("neighbor"));
+                if !is_neighbor { return Ok(None); }
+                let Some(d) = super::shockwave3d_object::meshdeform_face_neighbor_of(player, datum)
+                    else { return Ok(None) };
+                let nref = player.alloc_datum(d);
+                match args.get(1) {
+                    Some(i) => {
+                        let idx = player.get_datum(i).int_value()?;
+                        let items = player.get_datum(&nref).to_list()?;
+                        let at = if idx >= 1 { (idx - 1) as usize } else { 0 };
+                        Ok(Some(items.get(at).cloned()
+                            .unwrap_or_else(|| player.alloc_datum(Datum::Void))))
+                    }
+                    None => Ok(Some(nref)),
+                }
+            })?;
+            if let Some(r) = handled { return Ok(r); }
+        }
+
         let result = reserve_player_mut(|player| {
             let items = player.get_datum(datum).to_list()?;
             let index = player.get_datum(&key).int_value()?;
@@ -392,7 +427,7 @@ impl ListDatumHandlers {
             let list_vec = player.get_datum(datum).to_list()?;
             let position = list_vec
                 .iter()
-                .position(|x| datum_equals(player.get_datum(&x), find, &player.allocator).unwrap())
+                .position(|x| datum_equals_member(player.get_datum(&x), find, &player.allocator).unwrap())
                 .map(|x| x as i32);
 
             Ok(player.alloc_datum(Datum::Int(position.unwrap_or(-1) + 1)))
@@ -406,7 +441,7 @@ impl ListDatumHandlers {
             let list_vec = player.get_datum(datum).to_list()?;
             let position = list_vec
                 .iter()
-                .position(|x| datum_equals(player.get_datum(&x), find, &player.allocator).unwrap())
+                .position(|x| datum_equals_member(player.get_datum(&x), find, &player.allocator).unwrap())
                 .map(|x| x as i32);
             let result = position.unwrap_or(-1) + 1;
 
@@ -424,7 +459,7 @@ impl ListDatumHandlers {
                 let find = player.get_datum(&args[0]);
                 let position = list_vec
                     .iter()
-                    .position(|x| datum_equals(player.get_datum(&x), find, &player.allocator).unwrap())
+                    .position(|x| datum_equals_member(player.get_datum(&x), find, &player.allocator).unwrap())
                     .map(|x| x as i32);
                 let result = position.unwrap_or(-1) + 1;
                 Ok(player.alloc_datum(Datum::Int(result)))
@@ -533,7 +568,7 @@ impl ListDatumHandlers {
 
                 // Fallback to value equality for other types
                 let list_item = player.get_datum(list_item_ref);
-                if datum_equals(list_item, item, &player.allocator).unwrap_or(false) {
+                if datum_equals_member(list_item, item, &player.allocator).unwrap_or(false) {
                     Some(i)
                 } else {
                     None

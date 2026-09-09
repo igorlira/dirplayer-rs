@@ -182,32 +182,59 @@ impl CastMemberRefHandlers {
                 return crate::player::handlers::datum_handlers::cast_member::shockwave3d::
                     Shockwave3dMemberHandlers::load_file(&member_ref, args).await;
             }
-            // Run the full physics step via the monolithic sync path.
-            // This does: Euler integrate (full_dt) + Rapier substeps + readback + W3D sync + clear forces.
-            let (step_result, step_cbs, collision_cbs) = HavokPhysicsMemberHandlers::step_with_callbacks(datum, args)?;
-
-            // After the step, invoke step callbacks (async, post-step). A step
-            // callback may apply per-sub-step forces (age-of-speed applies gravity
-            // this way); mark that context so applyForce routes to the full-strength
-            // `step_force` accumulator rather than the force_scale-attenuated one.
-            // The gravity callback runs synchronously (a plain applyForce loop), so
-            // the flag can't leak across an await.
+            // Run the physics step with step callbacks fired BETWEEN substeps,
+            // which is when the Xtra fires them ("called at each sub step").
             //
-            // NB the Xtra actually fires these per SUB-STEP (Havok Xtra Lingo
-            // Reference: "called at each sub step"), so post-step invocation leaves
-            // the applied force one frame stale. Moving it BEFORE the step was
-            // tried: it did NOT fix Age of Speed's loop and it REGRESSED
-            // SuperSonic (supersonic.rs:231). Don't repeat it without also
-            // reworking how `step_force` is accumulated.
+            // This matters for any callback whose result depends on body state.
+            // Rifleman's character controller computes a hover spring from its
+            // CURRENT distance to the ground; firing once per step gave it
+            // 1/subSteps of the support it asks for and the character sank
+            // through the floor (z 140.7 spawn → ~19.8), which put it off the
+            // navmesh and deadlocked every NPC's cover pathing. Cheaper fixes
+            // were tried and are dead ends: firing the callback N times AFTER
+            // the step multiplies an applyForce callback by N (breaks
+            // age_of_speed's gravity), and banking the impulse for replay
+            // diverges because the spring is state-dependent, not constant.
             use super::cast_member::havok_physics::IN_STEP_CALLBACK;
-            for (cb_handler, cb_instance, dt_value) in &step_cbs {
-                let dt_ref = reserve_player_mut(|player| {
-                    player.alloc_datum(Datum::Float(*dt_value))
-                });
-                IN_STEP_CALLBACK.with(|c| c.set(true));
-                let _ = super::player_call_datum_handler(cb_instance, *cb_handler, &vec![dt_ref]).await;
-                IN_STEP_CALLBACK.with(|c| c.set(false));
+            let (hv_member_ref, prep, time_increment, sim_time_at_start, step_cb_targets) =
+                HavokPhysicsMemberHandlers::begin_interleaved_step(datum, args)?;
+
+            for sub in 0..prep.n_subs {
+                // Callback FIRST, then integrate. The Xtra's callback exists to
+                // set up the forces for the substep that follows — age_of_speed's
+                // `applyGravityForce` is the whole reason its cars fall onto the
+                // road. Integrating first and calling back afterwards leaves the
+                // first substep with no gravity and (because `step_finish`
+                // cleared the accumulator at the end of the previous step) the
+                // rest of them too.
+                //
+                // `simTime` is the accumulated clock; a script derives its own
+                // timestep from the difference between successive callbacks
+                // (`lTimeStep = kSimTime - pOldSimTime`), so it advances by one
+                // substep each time.
+                let sim_time = sim_time_at_start + prep.sub_dt * (sub + 1) as f64;
+                // `applyForce` accumulates, so clear before each substep's
+                // callbacks — otherwise the per-substep contributions pile up
+                // across the step instead of applying once each.
+                if !step_cb_targets.is_empty() {
+                    HavokPhysicsMemberHandlers::clear_step_forces(&hv_member_ref)?;
+                }
+                for (cb_handler, cb_instance) in &step_cb_targets {
+                    let t_ref = reserve_player_mut(|player| {
+                        player.alloc_datum(Datum::Float(sim_time))
+                    });
+                    // Mark the context so applyForce routes to the full-strength
+                    // `step_force` accumulator rather than the attenuated one.
+                    IN_STEP_CALLBACK.with(|c| c.set(true));
+                    let _ = super::player_call_datum_handler(cb_instance, *cb_handler, &vec![t_ref]).await;
+                    IN_STEP_CALLBACK.with(|c| c.set(false));
+                }
+
+                HavokPhysicsMemberHandlers::interleaved_substep(&hv_member_ref, &prep)?;
             }
+
+            let (step_result, collision_cbs) =
+                HavokPhysicsMemberHandlers::finish_interleaved_step(&hv_member_ref, time_increment)?;
 
             // Invoke collision interest callbacks (async, post-step).
             for (cb_handler, cb_instance, collision_info_ref) in &collision_cbs {
@@ -229,8 +256,34 @@ impl CastMemberRefHandlers {
             // setProp(member, #char, a, b, v). Director writes just that range
             // of the member's text and leaves the rest; without this the call
             // errored and the member kept whatever the author had typed.
+            //
+            // But setProp is the GENERIC objcall, not a chunk-write opcode: a
+            // VectorShape vertex write is setProp(member, #vertex, ...), and
+            // Spectral Wizard's `resetTalkBox` makes one. Taking the chunk path
+            // for every symbol sent #vertex into `StringChunkType::from`, which
+            // panics -- and a panic on wasm is a trap that takes the player
+            // down mid-frame rather than something the handler can report.
+            //
+            // So dispatch on the symbol: a chunk kind takes the new path, and
+            // anything else goes where it went before this arm existed, to the
+            // member-type dispatch that has always handled it.
             Some(BuiltInSymbol::SetProp) => {
-                crate::player::handlers::manager::BuiltInHandlerManager::set_member_chunk(datum, args)
+                let is_chunk_write = reserve_player_ref(|player| {
+                    args.first().is_some_and(|a| match player.get_datum(a) {
+                        Datum::Symbol(sym) => {
+                            crate::director::lingo::datum::StringChunkType::from_symbol_opt(
+                                sym.clone(),
+                            )
+                            .is_some()
+                        }
+                        _ => false,
+                    })
+                });
+                if is_chunk_write {
+                    crate::player::handlers::manager::BuiltInHandlerManager::set_member_chunk(datum, args)
+                } else {
+                    Self::call_member_type(datum, handler_name_str, args)
+                }
             }
             Some(BuiltInSymbol::Duplicate) => Self::duplicate(datum, args),
             Some(BuiltInSymbol::Erase) => Self::erase(datum, args),
@@ -556,6 +609,10 @@ impl CastMemberRefHandlers {
                 }
                 CastMemberType::VectorShape(_) => {
                     VectorShapeMemberHandlers::call(player, datum, handler_name, args)
+                }
+                CastMemberType::Mixer(_) => {
+                    crate::player::handlers::datum_handlers::cast_member::mixer::MixerMemberHandlers
+                        ::call(datum, handler_name, args)
                 }
                 _ => Err(ScriptError::new(format!(
                     "No handler {} for member type {:?}",
@@ -895,6 +952,10 @@ impl CastMemberRefHandlers {
             CastMemberTypeId::Shockwave3d => Shockwave3dMemberHandlers::get_prop(player, cast_member_ref, prop),
             CastMemberTypeId::HavokPhysics => HavokPhysicsMemberHandlers::get_prop(player, cast_member_ref, prop_str),
             CastMemberTypeId::PhysXPhysics => PhysXPhysicsMemberHandlers::get_prop(player, cast_member_ref, prop),
+            CastMemberTypeId::Mixer => {
+                crate::player::handlers::datum_handlers::cast_member::mixer::MixerMemberHandlers
+                    ::get_prop(player, cast_member_ref, prop_str)
+            }
             CastMemberTypeId::Script => {
                 let cast_member = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
                     .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
@@ -1099,6 +1160,45 @@ impl CastMemberRefHandlers {
                         Some(BuiltInSymbol::Width) => Ok(Datum::Int((r - l) as i32)),
                         Some(BuiltInSymbol::Height) => Ok(Datum::Int((b - t) as i32)),
                         Some(BuiltInSymbol::Rect) => Ok(Datum::Rect([l as f64, t as f64, r as f64, b as f64], 0)),
+                        // Director 11.5 Scripting Dictionary, `state (Flash, SWA)`
+                        // — for a FLASH cast member:
+                        //   0  not in memory      1  header loading
+                        //   2  header loaded      3  media loading
+                        //   4  media finished loading
+                        //  -1  an error occurred
+                        // "This property can be tested but not set."
+                        //
+                        // This used to fall through to a generic SWA/streaming
+                        // default of 0, i.e. "never in memory" — forever. A movie
+                        // waiting the DOCUMENTED way (`repeat while
+                        // member(x).state < 4`) would hang on that.
+                        //
+                        // Reported from the real Ruffle instance: this member is
+                        // ready when some sprite showing it has an instance that
+                        // has loaded AND finished AS init. The bytes themselves
+                        // are always resident (they come out of the .dcr), so the
+                        // header is never the thing in flight — the distinction
+                        // that matters to a caller is 3 (still coming) vs 4
+                        // (usable).
+                        Some(BuiltInSymbol::State) => {
+                            let (cl, cm) = (cast_member_ref.cast_lib, cast_member_ref.cast_member);
+                            let channels: Vec<i16> = player
+                                .flash_sprite_loaded
+                                .iter()
+                                .filter(|(_, l, m)| *l == cl && *m == cm)
+                                .map(|(ch, _, _)| *ch)
+                                .collect();
+                            let state = if channels.is_empty() {
+                                0
+                            } else if channels.iter().any(|ch| {
+                                crate::player::handlers::datum_handlers::sprite::is_flash_sprite_ready(*ch)
+                            }) {
+                                4
+                            } else {
+                                3
+                            };
+                            Ok(Datum::Int(state))
+                        }
                         Some(BuiltInSymbol::RegPoint) => {
                             let rp = flash.reg_point;
                             Ok(Datum::Point([rp.0 as f64, rp.1 as f64], 0))
@@ -1328,6 +1428,10 @@ impl CastMemberRefHandlers {
             }),
             CastMemberTypeId::Bitmap => BitmapMemberHandlers::set_prop(member_ref, prop, value),
             CastMemberTypeId::Sound => SoundMemberHandlers::set_prop(member_ref, prop, value),
+            CastMemberTypeId::Mixer => reserve_player_mut(|player| {
+                crate::player::handlers::datum_handlers::cast_member::mixer::MixerMemberHandlers
+                    ::set_prop(player, member_ref, prop_str, &value)
+            }),
             CastMemberTypeId::Palette => reserve_player_mut(|player| {
                 PaletteMemberHandlers::set_prop(player, member_ref, prop, value)
             }),
@@ -1630,6 +1734,31 @@ impl CastMemberRefHandlers {
             }
             Some(BuiltInSymbol::Type) => Ok(Datum::Symbol(Symbol::from_str(member_type.symbol_string()?))),
             Some(BuiltInSymbol::CastLibNum) => Ok(Datum::Int(cast_member_ref.cast_lib as i32)),
+            // `member.cast` — UNDOCUMENTED: the 11.5 Scripting Dictionary has
+            // `castLibNum` but no `cast` cast-member property. Director answers
+            // it with the MEMBER itself, so `member.cast.name` is the member's
+            // own name, NOT its cast library's. Measured in Director 11.5 on
+            // Burnin' Rubber, with castLib "Garage" linked to GarageData.cct:
+            //
+            //     put member("GarageMenu").cast.name
+            //     -- "GarageMenu"
+            //
+            // This matters because Burnin' Rubber's Event Manager defaults its
+            // cast argument from it — `if pCast = VOID then pCast =
+            // pMember.cast.name` — and then does
+            // `texture.member = member(fileName, pCast)`. Under Director that
+            // qualifies with "GarageMenu", which is not a cast library name at
+            // all, so the cast argument is unresolvable and the lookup degrades
+            // to the ordinary movie-wide by-name search — which is how the
+            // garage panel finds its bitmaps over in castLib "Main".
+            //
+            // Answering with the cast library instead handed the movie the REAL
+            // cast name ("Garage"), which correctly restricts the search (a
+            // qualified miss is VOID — verified in Director:
+            // `put member("MainMenu_Texture", "Garage")` → `<Void>`), so the
+            // panel's textures came back empty and its full-screen quads
+            // painted the whole showroom opaque white.
+            Some(BuiltInSymbol::Cast) => Ok(Datum::CastMember(cast_member_ref.clone())),
             Some(BuiltInSymbol::Color) => Ok(Datum::ColorRef(color)),
             Some(BuiltInSymbol::BgColor) => Ok(Datum::ColorRef(bg_color)),
             Some(BuiltInSymbol::Loaded) => Ok(Datum::Int(1)),

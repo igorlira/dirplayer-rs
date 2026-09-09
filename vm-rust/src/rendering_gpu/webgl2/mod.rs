@@ -564,7 +564,47 @@ impl WebGL2Renderer {
             return;
         }
 
+        // Composite ONLY the region a script actually drew into. The stage
+        // framebuffer is opaque, so blitting all of it pastes a frozen snapshot
+        // over every live 2D sprite beneath — Splat draws a lives strip and an
+        // ad banner into the bottom of the stage, and that was covering its
+        // score field a few pixels to the left, which then read 000000 forever
+        // while `member("thescore").text` was updating correctly.
+        // No recorded region (an op whose destination we could not determine)
+        // keeps the original full-stage behaviour.
         let (width, height) = self.size;
+        let (dl, dt, dr, db) = match player.stage_image_dirty_rect {
+            Some(r) if !player.stage_image_dirty_full => {
+                let l = r[0].clamp(0, sw as i32) as f32;
+                let t = r[1].clamp(0, sh as i32) as f32;
+                let rr = r[2].clamp(0, sw as i32) as f32;
+                let bb = r[3].clamp(0, sh as i32) as f32;
+                if rr <= l || bb <= t { return; }
+                (l, t, rr, bb)
+            }
+            _ => (0.0, 0.0, sw as f32, sh as f32),
+        };
+        // Stage pixels -> screen pixels. The stage image is authored at the
+        // movie's own resolution and the canvas may be larger, but the mapping
+        // is the stage LAYOUT's, not a plain canvas/image ratio: under
+        // `swStretchStyle = meet` (and fullscreen) the movie is letterboxed
+        // inside the canvas, so scaling by canvas/image would stretch the
+        // overlay across the bars and leave it misaligned with the sprites
+        // underneath, which go through `draw_rect`.
+        let layout = crate::player::stage::stage_layout(player);
+        let draw_w = (layout.draw_rect[2] - layout.draw_rect[0]) as f32;
+        let draw_h = (layout.draw_rect[3] - layout.draw_rect[1]) as f32;
+        let (ox, oy, sx, sy) = if draw_w > 0.0 && draw_h > 0.0 {
+            (
+                layout.draw_rect[0] as f32,
+                layout.draw_rect[1] as f32,
+                draw_w / sw as f32,
+                draw_h / sh as f32,
+            )
+        } else {
+            (0.0, 0.0, width as f32 / sw as f32, height as f32 / sh as f32)
+        };
+        let _ = (width, height);
         let effective_ink = self.shader_manager.use_program(&self.context, InkMode::Copy);
         let program = match self.shader_manager.get_program(effective_ink) {
             Some(p) => p,
@@ -579,11 +619,52 @@ impl WebGL2Renderer {
         if let Some(ref loc) = program.u_texture {
             gl.uniform1i(Some(loc), 0);
         }
+        // Upload the projection. Every OTHER draw through this program sets it,
+        // so the overlay used to inherit whatever the last sprite left behind —
+        // which is correct right up until the stage is resized and this is the
+        // FIRST draw afterwards. That is exactly the case for an imaging-Lingo
+        // engine like Spectral Wizard, where the visible frame IS the stage
+        // image and there may be no sprite draw at all to refresh it: after
+        // leaving fullscreen the overlay kept drawing through the old 1920x1080
+        // projection into a 640x480 viewport, so the whole game rendered at
+        // 640/1920 by 480/1080 — a 213x213 picture in the corner.
+        if let Some(ref loc) = program.u_projection {
+            gl.uniform_matrix4fv_with_f32_array(Some(loc), false, &self.projection_matrix);
+        }
         if let Some(ref loc) = program.u_sprite_rect {
-            gl.uniform4f(Some(loc), 0.0, 0.0, width as f32, height as f32);
+            // (x, y, WIDTH, HEIGHT) — not right/bottom edges. The old call read
+            // correctly only because it always started at the origin, where
+            // `dr * sx` doubles as the width; with a letterbox offset (or a
+            // dirty sub-rect that does not start at 0) passing the far edge
+            // stretched the quad by exactly the offset. Spectral Wizard drew
+            // from x=240 with width 1680 instead of 1440, so the frame ran off
+            // the right of the screen and every click landed short of the
+            // control it looked like it was over — `canvas_to_movie_coords`
+            // maps against the real 1440-wide drawRect.
+            gl.uniform4f(
+                Some(loc),
+                ox + dl * sx,
+                oy + dt * sy,
+                (dr - dl) * sx,
+                (db - dt) * sy,
+            );
         }
         if let Some(ref loc) = program.u_tex_rect {
-            gl.uniform4f(Some(loc), 0.0, 0.0, 1.0, 1.0);
+            // Matching sub-rect of the stage bitmap, in normalised texture
+            // space. Like `u_sprite_rect` above this is (x, y, WIDTH, HEIGHT)
+            // — the vertex shader does `u_tex_rect.xy + tc * u_tex_rect.zw` —
+            // and passing the far EDGES instead was invisible only while the
+            // dirty rect started at the origin, where right/bottom happen to
+            // equal width/height. Splat draws its lives/drinks strip into
+            // rect(130, 430, 630, 470), which gave v a span of 470/480 across
+            // a 40-row quad: the whole bottom half of the stage was crushed
+            // into the strip's first ~4 rows and the rest clamped to the very
+            // last texture row — the "collapsed graphics" at the bottom.
+            gl.uniform4f(
+                Some(loc),
+                dl / sw as f32, dt / sh as f32,
+                (dr - dl) / sw as f32, (db - dt) / sh as f32,
+            );
         }
         if let Some(ref loc) = program.u_flip {
             gl.uniform2f(Some(loc), 0.0, 0.0);
@@ -770,6 +851,9 @@ impl WebGL2Renderer {
 
     pub fn draw_frame(&mut self, player: &mut DirPlayer) {
         self.frame_count += 1;
+        // Cleared here, raised by the 3D pass in `render_sprite`, latched into
+        // `w3d_any_rendered` at the end of the frame.
+        player.w3d_rendered_this_frame = false;
         // Increment sprite debug frame counter
         let df = SPRITE_DEBUG_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -857,18 +941,30 @@ impl WebGL2Renderer {
         // Render each sprite.
         //
         // directToStage Shockwave3D sprites are drawn DIRECTLY to the screen, on
-        // top of the 2D layer (Director: directToStage ignores ink/blend and
-        // composites last). When a script has drawn into `(the stage).image`
-        // (`stage_image_dirty`), draw_stage_image_overlay blits that OPAQUE
-        // full-stage bitmap over the sprite output below — which would paste a
-        // frozen snapshot over the live, animating 3D (Splat draws a lives/score
-        // HUD into the stage image, freezing the maze view). Defer such sprites
-        // until after the overlay so the live 3D shows through; the HUD (drawn
-        // into a non-overlapping region) still composites underneath.
-        let overlay_active = player.stage_image_dirty && player.stage_image.is_some();
+        // top of the 2D layer. Director 11.5 Scripting Dictionary,
+        // `directToStage`: "No other cast member can appear in front of a
+        // directToStage sprite. Also, ink effects do not affect the appearance
+        // of a directToStage sprite." — so they composite LAST, whatever their
+        // channel number, and whatever is layered above them in the score.
+        //
+        // TRECH is what forced this to be unconditional: its game frames put the
+        // 3D member in channel 1 and a full-stage 775x585 border bitmap
+        // (`borderOutside`, 32-bit but `useAlpha` FALSE, ink 0) in channel 2, so
+        // drawing in channel order painted an opaque grey sheet over the whole
+        // live game. The 3D was rendering correctly the entire time; it was
+        // simply buried.
+        //
+        // The same deferral also covers the `(the stage).image` case: when a
+        // script has drawn into it (`stage_image_dirty`),
+        // draw_stage_image_overlay blits that OPAQUE full-stage bitmap over the
+        // sprite output below, which would paste a frozen snapshot over the
+        // live, animating 3D (Splat draws a lives/score HUD into the stage
+        // image, freezing the maze view). Drawing the 3D after the overlay keeps
+        // it live; the HUD, drawn into a non-overlapping region, still
+        // composites underneath.
         let mut deferred_dts_3d: Vec<i16> = Vec::new();
         for (channel_num, _) in &sorted_channels {
-            if overlay_active && self.is_direct_to_stage_3d(player, *channel_num) {
+            if self.is_direct_to_stage_3d(player, *channel_num) {
                 deferred_dts_3d.push(*channel_num);
                 continue;
             }
@@ -946,6 +1042,47 @@ impl WebGL2Renderer {
             self.shader_manager.clear_active();
         }
 
+        // Letterbox. When the stage is scaled with the aspect preserved (our
+        // fullscreen, and `swStretchStyle = meet`) the movie occupies only
+        // `draw_rect` of the canvas, but nothing clips sprites to it — a sprite
+        // whose movie-space rect runs past the movie edge is normally clipped by
+        // the canvas edge, and once the canvas is wider than the movie that
+        // overflow simply becomes visible. Habbo v26's hotel backdrop is wider
+        // than its 720px stage, so the right-hand bar filled with scene while
+        // the left stayed black, which reads as the whole picture being
+        // off-centre.
+        //
+        // Painted at the END rather than clipped with a GL scissor on the way
+        // in: the scissor is global state and the 3D passes render into their
+        // own FBOs mid-frame, so leaving one armed would clip those too.
+        {
+            let layout = crate::player::stage::stage_layout(player);
+            let (cw, ch) = self.size;
+            let (l, t) = (layout.draw_rect[0] as i32, layout.draw_rect[1] as i32);
+            let (r, b) = (layout.draw_rect[2] as i32, layout.draw_rect[3] as i32);
+            let (cw_i, ch_i) = (cw as i32, ch as i32);
+            if l > 0 || t > 0 || r < cw_i || b < ch_i {
+                let bg = self.get_stage_bg_color(player);
+                let gl = self.context.gl();
+                gl.enable(WebGl2RenderingContext::SCISSOR_TEST);
+                gl.clear_color(bg.0, bg.1, bg.2, 1.0);
+                // GL's origin is bottom-left, so the vertical bars are flipped.
+                let bars: [(i32, i32, i32, i32); 4] = [
+                    (0, 0, l.max(0), ch_i),                       // left
+                    (r.min(cw_i), 0, (cw_i - r).max(0), ch_i),    // right
+                    (0, (ch_i - t).min(ch_i), cw_i, t.max(0)),    // top
+                    (0, 0, cw_i, (ch_i - b).max(0)),              // bottom
+                ];
+                for (x, y, w, h) in bars {
+                    if w > 0 && h > 0 {
+                        gl.scissor(x, y, w, h);
+                        gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
+                    }
+                }
+                gl.disable(WebGl2RenderingContext::SCISSOR_TEST);
+            }
+        }
+
         // Update native CSS cursor (no per-frame draw needed)
         self.update_native_cursor(player);
 
@@ -1003,6 +1140,19 @@ impl WebGL2Renderer {
         // nested `#movie` sub-player is rendering into the host framebuffer.
         if unsafe { crate::player::ACTIVE_PLAYER_ID } == 0 {
             self.copy_framebuffer_to_prev();
+        }
+
+        // Latch "3D is on screen" for the frame that just finished. Losing the
+        // last 3D sprite also drops any mouselook pointer lock: a movie that
+        // cuts from the 3D world to a 2D menu (Rifleman's pause/level menus,
+        // AreaZero's) never asks for the cursor back, so without this the
+        // pointer stays captured and the menu is unclickable. The frontend
+        // releases the real lock the next time it sees `wants_pointer_lock()`
+        // go false.
+        let had_3d = player.w3d_any_rendered;
+        player.w3d_any_rendered = player.w3d_rendered_this_frame;
+        if had_3d && !player.w3d_any_rendered {
+            player.wants_pointer_lock = false;
         }
     }
 
@@ -1146,10 +1296,14 @@ impl WebGL2Renderer {
     /// Get stage background color as normalized floats
     fn get_stage_bg_color(&self, player: &DirPlayer) -> (f32, f32, f32) {
         let palettes = player.movie.cast_manager.palettes();
+        // `the stageColor` is a palette INDEX into the movie palette the score's
+        // palette channel is currently holding — not into the system palette.
+        // 15 Love sets stageColor 31, blue in its movie palette (member 166) and a
+        // hot orange in the system one, so its whole intro drew orange.
         let (r, g, b) = resolve_color_ref(
             &palettes,
             &player.bg_color,
-            &PaletteRef::BuiltIn(get_system_default_palette()),
+            &player.current_movie_palette(),
             8, // bit depth
         );
         (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
@@ -1210,7 +1364,9 @@ impl WebGL2Renderer {
             original_dst_rect: None,
             bg_color_explicit: false,
             fore_color_explicit: false,
-            ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+            ink9_mask_bitmap: None,
+            ink9_mask_offset: (0, 0),
+            reverse_ink: false,
             floor_rule: false,
         };
 
@@ -1701,6 +1857,13 @@ impl WebGL2Renderer {
                 /// displayComputer uses -2). Already factored into
                 /// `measure_text_wrapped`.
                 char_spacing: i32,
+                /// True when this text comes from a FIELD member, whose
+                /// `lineHeight` Director derives from the font rather than
+                /// taking as authored leading. The PFR line layout uses it to
+                /// decide whether the slack over the point size is leading to
+                /// add above the glyph, or just the font's own line box (see
+                /// the leading rationale in the bitmap draw loop).
+                is_field: bool,
             },
             FilmLoop {
                 initial_rect: IntRect,
@@ -1756,7 +1919,12 @@ impl WebGL2Renderer {
         struct Shockwave3dPass {
             member_key: (i32, i32),
             scene: std::rc::Rc<crate::director::chunks::w3d::types::W3dScene>,
-            runtime_state: crate::player::cast_member::Shockwave3dRuntimeState,
+            /// Shared, not owned. Every camera pass on the same member reads the
+            /// SAME state, and that struct is a couple of dozen HashMaps that grow
+            /// with everything the movie spawns — deep-copying it per pass per
+            /// frame was 11% of an AreaZero frame at higher waves
+            /// (`Shockwave3dRuntimeState::clone` plus `RawTable::clone`).
+            runtime_state: std::rc::Rc<crate::player::cast_member::Shockwave3dRuntimeState>,
             /// `None` = let the renderer pick its default view.
             camera: Option<Symbol>,
         }
@@ -1812,17 +1980,45 @@ impl WebGL2Renderer {
                                 .get_sprite(channel_num)
                                 .and_then(|s| s.flash_asserted_frame)
                                 .unwrap_or(-1);
-                            JsApi::dispatch_flash_member_loaded(
-                                channel_num as i32,
-                                member_ref.cast_lib,
-                                member_ref.cast_member,
-                                &data,
-                                w,
-                                h,
-                                paused_at_start,
-                                asserted_frame,
-                            );
-                            player.flash_sprite_loaded.insert(dispatch_key);
+                            if !player.is_playing {
+                                // The movie is NOT playing yet — this render is the
+                                // load-time `begin_all_sprites` stage preview. A LOAD
+                                // here would bind + autoplay the SWF ahead of the
+                                // Director playhead: rifleman's intro ran its whole
+                                // 3-frame timeline (sound included) before PLAY was
+                                // ever clicked, and the frame-1 gate then waited
+                                // forever on an `isLoaded` nothing could re-raise —
+                                // permanent black screen. Create it WARM instead
+                                // (parked at frame 1, unbound, silent); the first
+                                // PLAYING frame's load pass binds it fresh, so the
+                                // SWF starts when Director starts. Deliberately NOT
+                                // inserted into `flash_sprite_loaded` — the bind
+                                // dispatch must still happen.
+                                if !player.flash_sprite_warmed.contains(&dispatch_key) {
+                                    JsApi::dispatch_flash_member_warm(
+                                        channel_num as i32,
+                                        member_ref.cast_lib,
+                                        member_ref.cast_member,
+                                        &data,
+                                        w,
+                                        h,
+                                        paused_at_start,
+                                    );
+                                    player.flash_sprite_warmed.insert(dispatch_key);
+                                }
+                            } else {
+                                JsApi::dispatch_flash_member_loaded(
+                                    channel_num as i32,
+                                    member_ref.cast_lib,
+                                    member_ref.cast_member,
+                                    &data,
+                                    w,
+                                    h,
+                                    paused_at_start,
+                                    asserted_frame,
+                                );
+                                player.flash_sprite_loaded.insert(dispatch_key);
+                            }
                         }
                     }
                 }
@@ -1917,8 +2113,7 @@ impl WebGL2Renderer {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                             if let Some(scene) = w3d.scene_mut() {
                                 for (name, data) in resolved {
-                                    scene.texture_images.insert(name, data);
-                                    scene.texture_content_version += 1;
+                                    scene.put_texture_image(name, data);
                                 }
                             }
                         }
@@ -1938,7 +2133,11 @@ impl WebGL2Renderer {
                         w3d.runtime_state.animation_start_time = next.start_time;
                         w3d.runtime_state.animation_end_time = next.end_time;
                         w3d.runtime_state.animation_scale = next.scale;
-                        w3d.runtime_state.animation_time = if next.offset >= 0.0 { next.offset } else { 0.0 };
+                        // No offset given => start at the entry's OWN startTime, not at 0.
+                        // Same contract as the per-model queue in events.rs; a queued
+                        // slice of a long combined clip must not rewind to frame 0.
+                        w3d.runtime_state.animation_time =
+                            if next.offset >= 0.0 { next.offset } else { next.start_time };
                         w3d.runtime_state.animation_playing = true;
                         w3d.runtime_state.motion_ended = false;
                         self.scene3d.motion_ended = false;
@@ -1975,16 +2174,46 @@ impl WebGL2Renderer {
                                 .collect()
                         }).unwrap_or_default();
                         let any_skinned = !skinned.is_empty();
-                        for model in &skinned {
-                            let bp = w3d.runtime_state.bones_player_mut(Symbol::from_str(model));
-                            if bp.current_motion.is_none() && !bp.animation_playing {
-                                bp.current_motion = Some(Symbol::from_str(&motion_name.clone().to_string()));
-                                bp.animation_playing = true;
-                                bp.animation_loop = loops;
+                        // "The first motion in the member" only identifies THE member's
+                        // animation while there is one rig, or one clip, to talk about.
+                        // A game member that scripts fill at runtime has neither: AreaZero
+                        // clones every robot rig and all ~40 of their clips into Level1, so
+                        // `motions.first()` is RobotGunIdle1_Animation — and this loop was
+                        // handing that looping clip to every freshly spawned model
+                        // (RobotTank, its shadow, its hitbox, its muzzle flashes...).
+                        //
+                        // `[PS] Robot Tank.new` empties its playlist on purpose
+                        // (`play(spawn, 0); playNext()`) and leaves #Spawn only once
+                        // `bonesPlayer.currentTime` stops advancing at the end of its
+                        // non-looping spawn clip. With the intruder seeded underneath, the
+                        // spawn clip ended straight back into it (Director's play() keeps
+                        // the interrupted motion next in the playlist) and the clock never
+                        // settled — the wave-5 tank stood at the C spawner outside the
+                        // hangar gate forever, which reads exactly like "it is too big to
+                        // fit through the gate".
+                        //
+                        // Single rig (the dino test) or single clip: unambiguous, seed it.
+                        let unambiguous = skinned.len() == 1
+                            || w3d.parsed_scene.as_ref().map(|s| s.motions.len() == 1).unwrap_or(false);
+                        if unambiguous {
+                            for model in &skinned {
+                                let bp = w3d.runtime_state.bones_player_mut(Symbol::from_str(model));
+                                if bp.current_motion.is_none() && !bp.animation_playing {
+                                    bp.current_motion = Some(Symbol::from_str(&motion_name.clone().to_string()));
+                                    bp.animation_playing = true;
+                                    bp.animation_loop = loops;
+                                }
                             }
                         }
+                        // Per-node object-keyframe auto-play is seeded at member LOAD
+                        // (`Shockwave3dRuntimeState::from_info`), so that it precedes any
+                        // script call — see the note there. `auto_play_seeded` records
+                        // whether it claimed this member.
+                        let seeded_any = w3d.runtime_state.auto_play_seeded;
+
                         // Legacy member-level auto-play for non-skinned (keyframe) content.
                         if !any_skinned
+                            && !seeded_any
                             && !w3d.runtime_state.animation_playing
                             && w3d.runtime_state.current_motion.is_none()
                         {
@@ -2070,6 +2299,33 @@ impl WebGL2Renderer {
                     // member): resolve the source bitmap + region to tile.
                     let custom_tile = {
                         let pat = shape_member.shape_info.pattern;
+                        // The phase the tile pattern starts on. It is a MOVIE
+                        // coordinate, because the shape below is rasterized at
+                        // the sprite's movie size (`sprite_width` x
+                        // `sprite_height`) and the quad magnifies that texture.
+                        // `sprite_rect` is the RENDER rect (see the aliased
+                        // import at the top of the file), so it only agrees with
+                        // the movie grid at scale 1; on a scaled stage it is
+                        // `drawRect.left + left * scale`, and every tiled shape
+                        // then started its pattern at a phase of its own, so
+                        // neighbouring regions stopped lining up. Summer
+                        // Resort's map is a mosaic of adjacent tiled shapes, so
+                        // in fullscreen the whole room came apart even though
+                        // every sprite rect was exactly where it belonged.
+                        //
+                        // Recomputed here rather than carried alongside
+                        // `sprite_rect`: `get_concrete_sprite_rect` is not free
+                        // and only tiled shapes need the unscaled answer.
+                        let tile_origin = if pat >= 57 && pat <= 64 {
+                            player.movie.score.get_sprite(channel_num)
+                                .map(|s| {
+                                    let r = crate::player::score::get_concrete_sprite_rect(player, s);
+                                    (r.left, r.top)
+                                })
+                                .unwrap_or((sprite_rect.left, sprite_rect.top))
+                        } else {
+                            (0, 0)
+                        };
                         if pat >= 57 && pat <= 64 {
                             player.movie.score.custom_tiles
                                 .get((pat - 57) as usize)
@@ -2084,7 +2340,7 @@ impl WebGL2Renderer {
                                         .and_then(|ir| player.bitmap_manager.get_bitmap(ir).cloned())
                                         .map(|src| (src, crate::player::geometry::IntRect::from(
                                             t.left as i32, t.top as i32, t.right as i32, t.bottom as i32),
-                                            (sprite_rect.left, sprite_rect.top)))
+                                            tile_origin))
                                 })
                         } else { None }
                     };
@@ -2192,6 +2448,7 @@ impl WebGL2Renderer {
                         par_infos: Vec::new(),
                         par_runs: Vec::new(),
                         char_spacing: 0,
+                        is_field: false,
                     }
                 }
                 CastMemberType::Text(text_member) => {
@@ -2210,10 +2467,24 @@ impl WebGL2Renderer {
                     let long_wrapped_text = effective_word_wrap && text.len() > 80;
 
                     // Keep mixed source sizing behavior stable to avoid regressions in small labels/buttons.
+                    // `sprite_rect` here is the RENDER rect, already multiplied
+                    // by the stage scale (get_concrete_sprite_render_rect), while
+                    // `text_member.width` / `.height` are authored MOVIE units.
+                    // Mixing the two silently breaks whenever the stage is scaled:
+                    // fullscreen took the width from the scaled rect and the
+                    // height from the unscaled member, so FurniFactory's HUD boxes
+                    // rasterised two 21px lines into a 24px-tall texture — the
+                    // second line ("Twisters", "0", "10 of 10") landed outside it
+                    // and vanished, leaving a box with only its label. Scale the
+                    // member-authored values so both axes are in the same space.
+                    let (stage_sx, stage_sy) = crate::player::stage::stage_scale(player);
+                    let scale_member_w = |v: i32| ((v as f64) * stage_sx).round() as i32;
+                    let scale_member_h = |v: i32| ((v as f64) * stage_sy).round() as i32;
+
                     let width = if long_wrapped_text {
                         sprite_rect.width().max(1) as u32
                     } else if text_member.width > 0 {
-                        (text_member.width as i32).max(sprite_rect.width()).max(1) as u32
+                        scale_member_w(text_member.width as i32).max(sprite_rect.width()).max(1) as u32
                     } else {
                         sprite_rect.width().max(1) as u32
                     };
@@ -2288,11 +2559,12 @@ impl WebGL2Renderer {
                         let mh = text_member.height as i32;
                         let fls = text_member.fixed_line_space as i32;
                         let strides = fls.max(1) * _line_count;
-                        if fls > 0 && mh > 0 && mh + 2 < strides {
+                        // Both are movie units — see `scale_member_h` above.
+                        scale_member_h(if fls > 0 && mh > 0 && mh + 2 < strides {
                             strides
                         } else {
                             mh.max(1)
-                        }
+                        })
                     } else {
                         sprite_rect.height().max(1)
                     };
@@ -2328,7 +2600,12 @@ impl WebGL2Renderer {
                         .max(1);
                     let wrap_estimate = (text.chars().count() as i32 / chars_per_line).max(0);
                     let visual_line_estimate = source_line_count + wrap_estimate + 2;
-                    let content_estimate = max_stride * visual_line_estimate + spacing_pad;
+                    // Movie units, like `max_stride` and `spacing_pad` it is built
+                    // from — but it is compared against `base_height`, which comes
+                    // from the already-scaled render rect. Scale it so the max()
+                    // below compares like with like. No-op at scale 1.
+                    let content_estimate =
+                        scale_member_h(max_stride * visual_line_estimate + spacing_pad);
                     // For #adjust text without explicit \r/\n breaks, score.rs
                     // already grew sprite_rect.height to fit the laid-out
                     // content (its 70% rule covers wrapped single paragraphs
@@ -2383,7 +2660,6 @@ impl WebGL2Renderer {
                         (base_height.max(content_estimate)).max(1) as u32
                     };
                     let _ = has_explicit_breaks;
-
                     // Extract font properties from first styled span if available
                     let (font_name, font_size, font_style) = if !text_member.html_styled_spans.is_empty() {
                         let first_style = &text_member.html_styled_spans[0].style;
@@ -2650,8 +2926,23 @@ impl WebGL2Renderer {
                     // texture on every scroll. keep_authored_height is already
                     // forced below for non-#adjust box types, so the bitmap stays
                     // at the box height instead of growing with the content.
-                    let text_scroll_top =
-                        text_member.info.as_ref().map(|i| i.scroll_top as i32).unwrap_or(0);
+                    //
+                    // …but only for a box type that HAS a scrolling box. The
+                    // dictionary defines scrollTop as "the distance from the top
+                    // of a field cast member to the top of the field that is
+                    // currently visible IN THE SCROLLING BOX"; a #adjust member
+                    // grows to fit its content, so nothing is ever out of view and
+                    // there is nothing to scroll to. Fly Like A Bird's WELCOME
+                    // panel (member "introtextscreen", #adjust 297x272) carries a
+                    // stale scroll_top of 69 in its XMED header — Lingo's own
+                    // `member.scrollTop` getter reports 0 for it — and applying it
+                    // lifted the whole panel 69 px, clipping the first paragraph
+                    // off the top of the sprite.
+                    let text_scroll_top = if text_member.box_type == BuiltInSymbol::Adjust {
+                        0
+                    } else {
+                        text_member.info.as_ref().map(|i| i.scroll_top as i32).unwrap_or(0)
+                    };
                     let effective_top_spacing = (text_member.top_spacing as i32 - text_scroll_top)
                         .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
 
@@ -2839,6 +3130,7 @@ impl WebGL2Renderer {
                         par_infos: text_member.par_infos.clone(),
                         par_runs: text_member.par_runs.clone(),
                         char_spacing: text_member.char_spacing,
+                        is_field: false,
                     }
                 }
                 CastMemberType::Field(field_member) => {
@@ -2857,8 +3149,19 @@ impl WebGL2Renderer {
                     // sprite width fit "Goombahs, Ghosts or Bowser --" on
                     // one line, while Director correctly wraps after
                     // "Ghosts or".
+                    //
+                    // `field_member.width` is the AUTHORED text width in movie
+                    // units; `width` is the sprite's render width and is already
+                    // multiplied by the stage scale. Taking the min of the two
+                    // raw meant that on a scaled stage the movie-space value
+                    // always won, so the text was rasterised at
+                    // `font_size * stage_scale` but folded at the UNSCALED width
+                    // — Mario Net Quest's help panel wrapped after two or three
+                    // words per line inside a box three times that wide. Scale it
+                    // first so both sides of the min() are in render units.
+                    let (field_sx, _) = crate::player::stage::stage_scale(player);
                     let wrap_width = if field_member.width > 0 {
-                        (field_member.width as u32).min(width)
+                        (((field_member.width as f64) * field_sx).round() as u32).min(width)
                     } else {
                         width
                     };
@@ -3218,6 +3521,7 @@ impl WebGL2Renderer {
                         par_infos: Vec::new(),
                         par_runs: Vec::new(),
                         char_spacing: 0,
+                        is_field: true,
                     }
                 }
                 CastMemberType::Button(button_member) => {
@@ -3338,17 +3642,37 @@ impl WebGL2Renderer {
                         cam_list.extend(w3d_extra_cams.iter().cloned());
 
                         let mut passes: Vec<Shockwave3dPass> = Vec::new();
+                        // One clone of a member's runtime state per FRAME, shared by
+                        // every camera pass that reads it, instead of one per pass.
+                        let mut state_cache: Vec<((i32, i32), std::rc::Rc<crate::player::cast_member::Shockwave3dRuntimeState>)> = Vec::new();
                         for cam in &cam_list {
                             let key = cam.member.unwrap_or(own_key);
-                            let resolved = if key == own_key {
-                                Some((parsed_scene.clone(), w3d.runtime_state.clone()))
+                            let cached = state_cache.iter()
+                                .find(|(k, _)| *k == key).map(|(_, v)| v.clone());
+                            let resolved = if let Some(state) = cached {
+                                let scene = if key == own_key {
+                                    Some(parsed_scene.clone())
+                                } else {
+                                    let other = CastMemberRef { cast_lib: key.0, cast_member: key.1 };
+                                    player.movie.cast_manager.find_member_by_ref(&other)
+                                        .and_then(|m| m.member_type.as_shockwave3d())
+                                        .and_then(|o| o.parsed_scene.clone())
+                                };
+                                scene.map(|sc| (sc, state))
+                            } else if key == own_key {
+                                Some((parsed_scene.clone(), std::rc::Rc::new(w3d.runtime_state.clone())))
                             } else {
                                 let other = CastMemberRef { cast_lib: key.0, cast_member: key.1 };
                                 player.movie.cast_manager.find_member_by_ref(&other)
                                     .and_then(|m| m.member_type.as_shockwave3d())
                                     .and_then(|o| o.parsed_scene.as_ref()
-                                        .map(|sc| (sc.clone(), o.runtime_state.clone())))
+                                        .map(|sc| (sc.clone(), std::rc::Rc::new(o.runtime_state.clone()))))
                             };
+                            if let Some((_, ref st)) = resolved {
+                                if !state_cache.iter().any(|(k, _)| *k == key) {
+                                    state_cache.push((key, st.clone()));
+                                }
+                            }
                             let (pass_scene, pass_state) = match resolved {
                                 Some(v) => v,
                                 // Owning member isn't loaded (or isn't 3D) yet — skip
@@ -3375,7 +3699,7 @@ impl WebGL2Renderer {
                             passes.push(Shockwave3dPass {
                                 member_key: own_key,
                                 scene: parsed_scene.clone(),
-                                runtime_state: w3d.runtime_state.clone(),
+                                runtime_state: std::rc::Rc::new(w3d.runtime_state.clone()),
                                 camera: w3d_camera.as_ref().map(|c| Symbol::from_str(&c.name)),
                             });
                         }
@@ -3408,11 +3732,26 @@ impl WebGL2Renderer {
                 if should_override {
                     let reg_x = w / 2;
                     let reg_y = h / 2;
+                    // Built from `raw_loc` (the registration point) and the film
+                    // loop's authored size — BOTH movie units, while the
+                    // `sprite_rect` being replaced came from
+                    // `get_concrete_sprite_render_rect` and is already scaled.
+                    // Writing movie units straight back dropped the stage scale,
+                    // so on a scaled stage every overriding film loop drew at its
+                    // authored size in the top-left region instead of filling its
+                    // quad: Mario Net Quest's torches and Mario himself stayed
+                    // small while the room around them grew. Map it the same way
+                    // sprite rects are mapped. No-op at scale 1 with a zero
+                    // drawRect origin.
+                    let layout = crate::player::stage::stage_layout(player);
+                    let (sx, sy) = crate::player::stage::stage_scale(player);
+                    let map_x = |v: i32| (layout.draw_rect[0] + v as f64 * sx).round() as i32;
+                    let map_y = |v: i32| (layout.draw_rect[1] + v as f64 * sy).round() as i32;
                     sprite_rect = IntRect::from(
-                        raw_loc.0 as i32 - reg_x,
-                        raw_loc.1 as i32 - reg_y,
-                        raw_loc.0 as i32 - reg_x + w,
-                        raw_loc.1 as i32 - reg_y + h,
+                        map_x(raw_loc.0 as i32 - reg_x),
+                        map_y(raw_loc.1 as i32 - reg_y),
+                        map_x(raw_loc.0 as i32 - reg_x + w),
+                        map_y(raw_loc.1 as i32 - reg_y + h),
                     );
                 }
 
@@ -3430,7 +3769,23 @@ impl WebGL2Renderer {
             TextureSource::Bitmap { image_ref, .. } => {
                 match player.bitmap_manager.get_bitmap(*image_ref) {
                     Some(bitmap) => {
-                        (bitmap.palette_ref.clone(), bitmap.original_bit_depth, bitmap.use_alpha)
+                        // Which palette the SPRITE's foreColor/backColor indices are
+                        // read through. For an indexed source that is the bitmap's
+                        // own palette, so an index keys against the identical index
+                        // in the pixels. A direct-colour source (>8bpp) has no
+                        // palette of its own — whatever `palette_ref` it carries is
+                        // leftover authoring metadata — so its sprite colours are
+                        // indices into the MOVIE palette, like every other
+                        // sprite-level colour. Fish's 32-bit "Line" keys its blue
+                        // out with backColor 231: (16,66,206) in the movie palette,
+                        // (0,85,0) in the SystemMac palette the member happens to
+                        // name, so the key missed and the line drew as a solid bar.
+                        let sprite_color_palette = if bitmap.original_bit_depth > 8 {
+                            player.current_movie_palette()
+                        } else {
+                            bitmap.palette_ref.clone()
+                        };
+                        (sprite_color_palette, bitmap.original_bit_depth, bitmap.use_alpha)
                     }
                     None => (PaletteRef::BuiltIn(get_system_default_palette()), 8, false),
                 }
@@ -3604,6 +3959,8 @@ impl WebGL2Renderer {
         // averaged (mipmapped) sampling instead of point sampling.
         let mut tex_source_size: Option<(u32, u32)> = None;
 
+        let is_w3d_scene = matches!(texture_source, TextureSource::Shockwave3dScene { .. });
+
         let tex = match texture_source {
             TextureSource::Bitmap { image_ref, is_flash } => {
                 // Pass sprite's bgColor for matte/transparency computation for inks that need it
@@ -3660,9 +4017,16 @@ impl WebGL2Renderer {
                 ref par_infos,
                 ref par_runs,
                 char_spacing,
+                is_field,
             } => {
+                // Investigation probe for tab-stop layout, not a gap report:
+                // it fires on every render of any text that merely CONTAINS a
+                // tab. Rasterwerks alone emitted 280 of these in one corpus
+                // sweep, which is the volume that buries the warnings that do
+                // mean something. Kept at debug so it can be turned back on
+                // when tab layout is being worked on.
                 if text.contains('\t') || !tab_stops.is_empty() {
-                    warn!(
+                    debug!(
                         "[webgl2 RenderedText] member={}:{} tabs={} has_tab={} text='{}'",
                         cache_key.member_ref.cast_lib, cache_key.member_ref.cast_member,
                         tab_stops.len(), text.contains('\t'),
@@ -3725,6 +4089,7 @@ impl WebGL2Renderer {
                         par_infos.as_slice(),
                         par_runs.as_slice(),
                         char_spacing,
+                        is_field,
                     ) {
                         Some((tex, _actual_w, actual_h)) => {
                             // Update sprite_rect to match actual rendered dimensions.
@@ -3763,6 +4128,9 @@ impl WebGL2Renderer {
                     ink: ink as i32,
                     colorize: None,
                     sprite_bg_color: None,
+                    // Film-loop offscreens are composited by the renderer, not
+                    // by imaging Lingo, so they never carry a hi-res twin.
+                    hi_res_milli: 0,
                 };
 
                 if !self.texture_cache.needs_update(&cache_key, filmloop_frame) {
@@ -3819,6 +4187,29 @@ impl WebGL2Renderer {
 
                 let w = width as i32;
                 let h = height as i32;
+
+                // `width`/`height` come from the sprite's RENDER rect, so on a
+                // scaled stage this bitmap is already enlarged — but every piece
+                // of chrome below was authored as a literal pixel count (a 10px
+                // check box, an 11px radio circle, a 3px gap, 1px frame lines)
+                // and the label used the member's unscaled font size. The result
+                // was a full-size button box holding a 1:1 indicator and 1:1
+                // text, which is how Lore's quiz answers kept their authored size
+                // while the rows holding them tripled apart.
+                //
+                // `ind` is the indicator box / circle diameter and `t` its line
+                // thickness. At scale 1 both are exactly the old constants, so
+                // unscaled rendering is unchanged.
+                let btn_scale = {
+                    let (sx, sy) = crate::player::stage::stage_scale(player);
+                    sx.min(sy)
+                };
+                let btn_scaled = (btn_scale - 1.0).abs() > 0.01;
+                let ind = ((10.0 * btn_scale).round() as i32).max(4);
+                let ind_r = ((11.0 * btn_scale).round() as i32).max(5);
+                let t = (btn_scale.round() as i32).max(1);
+                let gap = ((3.0 * btn_scale).round() as i32).max(1);
+                let font_size = ((font_size as f64) * btn_scale).round().max(1.0) as u16;
 
                 // Create a 32-bit RGBA bitmap for the button
                 let mut btn_bitmap = Bitmap::new(
@@ -3878,16 +4269,17 @@ impl WebGL2Renderer {
                     }
                     ButtonType::CheckBox => {
                         let box_y = 0;
+                        let e = ind; // outer edge
                         // Box outline
-                        btn_bitmap.fill_rect(0, box_y, 10, box_y + 1, (0,0,0), &palettes, 1.0);
-                        btn_bitmap.fill_rect(0, box_y + 9, 10, box_y + 10, (0,0,0), &palettes, 1.0);
-                        btn_bitmap.fill_rect(0, box_y, 1, box_y + 10, (0,0,0), &palettes, 1.0);
-                        btn_bitmap.fill_rect(9, box_y, 10, box_y + 10, (0,0,0), &palettes, 1.0);
+                        btn_bitmap.fill_rect(0, box_y, e, box_y + t, (0,0,0), &palettes, 1.0);
+                        btn_bitmap.fill_rect(0, box_y + e - t, e, box_y + e, (0,0,0), &palettes, 1.0);
+                        btn_bitmap.fill_rect(0, box_y, t, box_y + e, (0,0,0), &palettes, 1.0);
+                        btn_bitmap.fill_rect(e - t, box_y, e, box_y + e, (0,0,0), &palettes, 1.0);
                         // White fill inside
-                        btn_bitmap.fill_rect(1, box_y + 1, 9, box_y + 9, (255,255,255), &palettes, 1.0);
+                        btn_bitmap.fill_rect(t, box_y + t, e - t, box_y + e - t, (255,255,255), &palettes, 1.0);
                         // Make the text area opaque
                         for y in 0..h {
-                            for x in 12..w {
+                            for x in (e + 2 * t).min(w)..w {
                                 let idx = ((y * w + x) * 4) as usize;
                                 if idx + 3 < btn_bitmap.data.len() && btn_bitmap.data[idx + 3] == 0 {
                                     btn_bitmap.data[idx + 3] = 1; // minimal alpha so it's not cut
@@ -3895,9 +4287,12 @@ impl WebGL2Renderer {
                             }
                         }
                         if hilite {
-                            for i in 1..9 {
-                                btn_bitmap.fill_rect(i, box_y + i, i + 1, box_y + i + 1, (0,0,0), &palettes, 1.0);
-                                btn_bitmap.fill_rect(9 - i, box_y + i, 10 - i, box_y + i + 1, (0,0,0), &palettes, 1.0);
+                            // The X, as two diagonals of thickness `t`.
+                            let mut i = t;
+                            while i < e - t {
+                                btn_bitmap.fill_rect(i, box_y + i, i + t, box_y + i + t, (0,0,0), &palettes, 1.0);
+                                btn_bitmap.fill_rect(e - t - i, box_y + i, e - i, box_y + i + t, (0,0,0), &palettes, 1.0);
+                                i += 1;
                             }
                         }
                     }
@@ -3918,24 +4313,52 @@ impl WebGL2Renderer {
                             (3,9),(7,9),
                             (4,10),(5,10),(6,10),
                         ];
-                        for &(px, py) in circle_points {
-                            btn_bitmap.fill_rect(base_x + px, base_y + py, base_x + px + 1, base_y + py + 1, (0,0,0), &palettes, 1.0);
-                        }
-                        if hilite {
-                            // Filled inner circle (radius 2, center 5,5)
-                            btn_bitmap.fill_rect(base_x + 4, base_y + 3, base_x + 7, base_y + 4, (0,0,0), &palettes, 1.0);
-                            btn_bitmap.fill_rect(base_x + 3, base_y + 4, base_x + 8, base_y + 5, (0,0,0), &palettes, 1.0);
-                            btn_bitmap.fill_rect(base_x + 3, base_y + 5, base_x + 8, base_y + 6, (0,0,0), &palettes, 1.0);
-                            btn_bitmap.fill_rect(base_x + 3, base_y + 6, base_x + 8, base_y + 7, (0,0,0), &palettes, 1.0);
-                            btn_bitmap.fill_rect(base_x + 4, base_y + 7, base_x + 7, base_y + 8, (0,0,0), &palettes, 1.0);
+                        if !btn_scaled {
+                            // 1:1 — keep the hand-tuned midpoint circle exactly as
+                            // it was, so unscaled output stays bit-identical.
+                            for &(px, py) in circle_points {
+                                btn_bitmap.fill_rect(base_x + px, base_y + py, base_x + px + 1, base_y + py + 1, (0,0,0), &palettes, 1.0);
+                            }
+                            if hilite {
+                                // Filled inner circle (radius 2, center 5,5)
+                                btn_bitmap.fill_rect(base_x + 4, base_y + 3, base_x + 7, base_y + 4, (0,0,0), &palettes, 1.0);
+                                btn_bitmap.fill_rect(base_x + 3, base_y + 4, base_x + 8, base_y + 5, (0,0,0), &palettes, 1.0);
+                                btn_bitmap.fill_rect(base_x + 3, base_y + 5, base_x + 8, base_y + 6, (0,0,0), &palettes, 1.0);
+                                btn_bitmap.fill_rect(base_x + 3, base_y + 6, base_x + 8, base_y + 7, (0,0,0), &palettes, 1.0);
+                                btn_bitmap.fill_rect(base_x + 4, base_y + 7, base_x + 7, base_y + 8, (0,0,0), &palettes, 1.0);
+                            }
+                        } else {
+                            // Scaled: a fixed point list cannot grow, so draw the
+                            // ring and the dot from the radius instead.
+                            let _ = circle_points;
+                            let d = ind_r;
+                            let r = d as f64 / 2.0;
+                            let inner = (r - t as f64).max(0.0);
+                            let dot = (r * 0.4).max(1.0);
+                            for y in 0..d {
+                                for x in 0..d {
+                                    let dx = x as f64 + 0.5 - r;
+                                    let dy = y as f64 + 0.5 - r;
+                                    let dist = (dx * dx + dy * dy).sqrt();
+                                    let on_ring = dist <= r && dist >= inner;
+                                    let in_dot = hilite && dist <= dot;
+                                    if on_ring || in_dot {
+                                        btn_bitmap.fill_rect(
+                                            base_x + x, base_y + y,
+                                            base_x + x + 1, base_y + y + 1,
+                                            (0, 0, 0), &palettes, 1.0,
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
                 }
 
                 // Draw text label
                 let chrome_offset_x = match button_type {
-                    ButtonType::CheckBox => 13, // 10px box + 3px gap
-                    ButtonType::RadioButton => 14, // 11px circle + 3px gap
+                    ButtonType::CheckBox => ind + gap,      // box + gap
+                    ButtonType::RadioButton => ind_r + gap, // circle + gap
                     _ => 0,
                 };
 
@@ -3984,7 +4407,9 @@ impl WebGL2Renderer {
                             original_dst_rect: None,
                             bg_color_explicit: false,
                             fore_color_explicit: false,
-                            ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+                            ink9_mask_bitmap: None,
+                            ink9_mask_offset: (0, 0),
+                            reverse_ink: false,
                             floor_rule: false,
                         };
                         btn_bitmap.draw_text_wrapped(
@@ -4090,6 +4515,8 @@ impl WebGL2Renderer {
                             // VWTL custom tile (a bitmap region) takes precedence.
                             // The shape is a local texture (0,0,w,h), so phase the
                             // tile by the sprite's stage origin.
+                            // That origin is in MOVIE units — see `tile_origin`
+                            // where the custom tile is resolved.
                             if let Some((src, tile_rect, origin)) = custom_tile.as_ref() {
                                 shape_bitmap.fill_rect_custom_tile(
                                     &palettes, src, tile_rect.clone(),
@@ -4282,6 +4709,19 @@ impl WebGL2Renderer {
                 // camera's `colorBuffer.clearAtRender`, which is how a movie layers a
                 // skybox, the 3D world and an orthographic UI pass into one sprite.
                 let member_key = passes.first().map(|p| p.member_key).unwrap_or((0, 0));
+                // Backdrops and overlays are authored in movie pixels but drawn
+                // into this sprite's already-enlarged render rect, so the 3D
+                // renderer needs the factor to divide its 2D ortho by. 1.0 for
+                // every unscaled movie. See `Scene3dRenderer::stage_scale`.
+                // Background-transparent ink (36) on a 3D sprite: Director does not
+                // paint the member background, it composites only what the scene drew.
+                // Fly Like A Bird's WELCOME screen layers the bird's 3D sprite over a
+                // half-blended cityscape bitmap and the title banner this way.
+                self.scene3d.transparent_clear = ink == 36;
+                self.scene3d.stage_scale = {
+                    let (sx, sy) = crate::player::stage::stage_scale(player);
+                    sx.min(sy) as f32
+                };
                 for (i, pass) in passes.iter().enumerate() {
                     let clear = if i == 0 {
                         true
@@ -4292,6 +4732,47 @@ impl WebGL2Renderer {
                                 .get(c)
                                 .copied())
                             .unwrap_or(true)
+                    };
+                    // `sprite(n).camera(i).rect` — the sprite-relative rectangle
+                    // this camera renders into (Director 11.5 Scripting Dictionary,
+                    // "rect (camera)"). Only cameras AFTER the first can narrow the
+                    // view: the dictionary is explicit that "when sprite.camera(1) is
+                    // rendered, its rect is reset to rect(0, 0, sprite.width,
+                    // sprite.height) so that the camera fills the screen", and
+                    // Rasterwerks' Phosphor leaves an authored rect on camera(1) that
+                    // would otherwise shrink its whole FPS view into one corner.
+                    //
+                    // Fly Like A Bird is the case the rect matters for: its second
+                    // camera is a 100x100 poo-cam inset at rect(530, 270, 630, 370)
+                    // with clearAtRender = 0. Rendered full-viewport it drew its
+                    // underground view over the entire game.
+                    //
+                    // Coordinates are authored in movie pixels, so they scale by the
+                    // same factor backdrops and overlays use.
+                    self.scene3d.pass_viewport = if i == 0 {
+                        None
+                    } else {
+                        pass.camera.as_ref()
+                            .and_then(|c| pass.runtime_state.camera_rects.get(c).copied())
+                            // Only an INSET rect narrows the view. A rect anchored at
+                            // the sprite origin is the "fill the view" value Director
+                            // itself writes — the dictionary says camera(1) has its rect
+                            // reset to rect(0, 0, sprite.width, sprite.height) on every
+                            // render, and that any later camera's rect.top/rect.left must
+                            // be >= camera(1)'s, i.e. >= 0. Rasterwerks' Phosphor leaves
+                            // a stale rect(0, 0, 320, 240) on the camera that draws its
+                            // whole FPS view, and Director still renders it full-sprite;
+                            // honouring that rect shrank the game into one corner.
+                            .filter(|(l, t, r, b)| r > l && b > t && (*l > 0 || *t > 0))
+                            .map(|(l, t, r, b)| {
+                                // Movie pixels -> FBO pixels. The FBO is the sprite at
+                                // render resolution, which on a scaled stage is several
+                                // times the sprite's movie size.
+                                let sx = if sprite_width > 0 { width as f32 / sprite_width as f32 } else { 1.0 };
+                                let sy = if sprite_height > 0 { height as f32 / sprite_height as f32 } else { 1.0 };
+                                ((l as f32 * sx).round() as i32, (t as f32 * sy).round() as i32,
+                                 (r as f32 * sx).round() as i32, (b as f32 * sy).round() as i32)
+                            })
                     };
                     self.scene3d.active_camera = pass.camera.clone();
                     if let Err(e) = self.scene3d.render_scene_with_state_ex(
@@ -4309,6 +4790,13 @@ impl WebGL2Renderer {
                     }
                 }
 
+                // An inset camera pass left its viewport/scissor narrowed;
+                // overlays and the readback below cover the whole sprite.
+                {
+                    let gl = self.context.gl();
+                    gl.disable(WebGl2RenderingContext::SCISSOR_TEST);
+                    gl.viewport(0, 0, width as i32, height as i32);
+                }
 
                 // Render overlays on top of everything
                 for pass in &passes {
@@ -4332,7 +4820,10 @@ impl WebGL2Renderer {
 
                 // "3D has rendered" — drives the pointer-lock heuristic, which used
                 // to infer this from `w3d_frame_buffers` being non-empty.
-                player.w3d_any_rendered = true;
+                // Per-frame: `draw_frame` folds this into `w3d_any_rendered` once
+                // the frame is complete, so leaving the 3D sprite for a 2D menu
+                // drops the flag and releases the mouselook pointer lock.
+                player.w3d_rendered_this_frame = true;
 
                 // Capture FBO pixels for world.image access — ONLY if a script has
                 // actually asked for this member's image. The readback is a
@@ -4374,12 +4865,16 @@ impl WebGL2Renderer {
         // the BackgroundTransparent shader's color-key discard which would incorrectly
         // hide content pixels that match bgColor.
         let is_ink36_alpha_baked = ink == 36 && bitmap_bit_depth == 32 && bitmap_use_alpha;
+        // A 3D scene rendered with a transparent clear carries its own alpha —
+        // the color-key shader would instead test the CLEARED pixels against the
+        // sprite's backColor and keep them.
+        let is_ink36_w3d = ink == 36 && is_w3d_scene;
         let text_needs_alpha = is_rendered_text && (ink == 36 || ink == 2 || bg_color_rgb == (255, 255, 255));
         let ink_mode = if text_needs_alpha {
             InkMode::Copy
         } else if is_button_alpha_matte {
             InkMode::Copy
-        } else if is_ink36_indexed_baked || is_ink36_alpha_baked {
+        } else if is_ink36_indexed_baked || is_ink36_alpha_baked || is_ink36_w3d {
             // Transparency baked into texture — use Copy shader for reliable discard
             InkMode::Copy
         } else if ink == 9 {
@@ -4545,9 +5040,23 @@ impl WebGL2Renderer {
             gl.uniform1f(Some(loc), (rotation as f32).to_radians());
         }
 
-        // Set rotation center (sprite's registration point: loc_h, loc_v)
+        // Set rotation center (sprite's registration point: loc_h, loc_v).
+        //
+        // Mapped through the stage layout FIRST. The quad's vertices come from
+        // `get_concrete_sprite_render_rect`, which is already scaled and offset
+        // by the drawRect; feeding the raw movie-space registration point as the
+        // centre made the shader rotate scaled geometry about an unscaled pivot,
+        // so the sprite swung away from where it belongs — by roughly
+        // `loc * (scale - 1)`. FurniFactory's clock (rot 25, skew 337, loc
+        // 523,95) landed in the middle of the factory floor instead of on the
+        // computer screen. A no-op at scale 1 with a zero drawRect origin, i.e.
+        // for ordinary unscaled playback.
         if let Some(ref loc) = u_rotation_center {
-            gl.uniform2f(Some(loc), raw_loc.0 as f32, raw_loc.1 as f32);
+            let layout = crate::player::stage::stage_layout(player);
+            let (sx, sy) = crate::player::stage::stage_scale(player);
+            let cx = layout.draw_rect[0] + raw_loc.0 as f64 * sx;
+            let cy = layout.draw_rect[1] + raw_loc.1 as f64 * sy;
+            gl.uniform2f(Some(loc), cx as f32, cy as f32);
         }
 
         // Set blend (0-100 -> 0.0-1.0)
@@ -5644,10 +6153,24 @@ impl WebGL2Renderer {
             let needs_matte = player.bitmap_manager.get_bitmap(image_ref)
                 .map(|b| b.matte.is_none() && !(b.original_bit_depth == 32 && b.use_alpha))
                 .unwrap_or(false);
-            if needs_matte {
+            // Same question for the hi-res twin, which is uploaded in the
+            // bitmap's place below and so needs its own matte computed from its
+            // own pixels.
+            let twin_needs_matte = player.bitmap_manager.get_bitmap(image_ref)
+                .and_then(|b| b.hi_res.image.as_deref())
+                .map(|h| h.matte.is_none() && !(h.original_bit_depth == 32 && h.use_alpha))
+                .unwrap_or(false);
+            if needs_matte || twin_needs_matte {
                 let palettes = player.movie.cast_manager.palettes();
                 if let Some(bitmap) = player.bitmap_manager.get_bitmap_mut(image_ref) {
-                    bitmap.create_matte(&palettes);
+                    if needs_matte {
+                        bitmap.create_matte(&palettes);
+                    }
+                    if twin_needs_matte {
+                        if let Some(hi) = bitmap.hi_res.image.as_deref_mut() {
+                            hi.create_matte(&palettes);
+                        }
+                    }
                 }
             }
         }
@@ -5663,9 +6186,29 @@ impl WebGL2Renderer {
             return None;
         }
 
+        // Upload the hi-res twin in the bitmap's place when it has one (see
+        // `Bitmap::hi_res`): a Lingo-COMPOSED picture that carries text stays
+        // as sharp as the text sprites around it on a scaled stage, instead of
+        // being magnified. The quad is the sprite's already-scaled render rect
+        // either way, so only the texture's resolution changes — at the stage
+        // scale the twin is very nearly 1:1 with the destination pixels.
+        //
+        // NOT for ink 9 (Mask): that ink pairs the bitmap with the NEXT cast
+        // member's bitmap as a mask, in movie units, and there is no twin of
+        // the mask to pair the twin with.
+        let source: &crate::player::bitmap::bitmap::Bitmap = match bitmap.hi_res.image.as_deref() {
+            Some(hi) if ink != 9 && !hi.data.is_empty() && hi.width > 0 && hi.height > 0 => hi,
+            _ => bitmap,
+        };
+        let hi_res_milli = if std::ptr::eq(source, bitmap) {
+            0
+        } else {
+            (bitmap.hi_res.scale * 1000.0).round().max(0.0) as u32
+        };
+
         let bitmap_version = bitmap.version;
-        let width = bitmap.width as u32;
-        let height = bitmap.height as u32;
+        let width = source.width as u32;
+        let height = source.height as u32;
 
         // Create cache key including ink, colorize, and sprite_bg_color for inks that use bgColor matte
         // These inks use bgColor for matte/transparency computation:
@@ -5693,6 +6236,7 @@ impl WebGL2Renderer {
             ink,
             colorize,
             sprite_bg_color: cache_key_bg_color,
+            hi_res_milli,
         };
 
         // Check cache - return cached texture if version matches
@@ -5750,7 +6294,7 @@ impl WebGL2Renderer {
             (None, (0, 0))
         };
 
-        let rgba_data = Self::bitmap_to_rgba(bitmap, &palettes, ink, colorize, sprite_bg_color, mask_bitmap_ref.as_ref(), mask_offset, is_flash_bitmap);
+        let rgba_data = Self::bitmap_to_rgba(source, &palettes, ink, colorize, sprite_bg_color, mask_bitmap_ref.as_ref(), mask_offset, is_flash_bitmap);
 
         // Validate data size
         let expected_size = (width * height * 4) as usize;
@@ -5898,6 +6442,7 @@ impl WebGL2Renderer {
         par_infos_for_native: &[crate::director::chunks::xmedia_styled_text::ParInfo],
         par_runs_for_native: &[crate::director::chunks::xmedia_styled_text::ParRun],
         char_spacing: i32,
+        is_field: bool,
     ) -> Option<(web_sys::WebGlTexture, u32, u32)> {
         // Whether to keep the bitmap at the authored height (no shrink-to-
         // content, no fill-scaling). True when the sprite carries a skew or
@@ -5914,11 +6459,54 @@ impl WebGL2Renderer {
         // non-uniformity.
         let (scale_x, scale_y) = crate::player::stage::stage_scale(player);
         let scale = scale_x.min(scale_y);
+        // Member-authored size, before stage scaling — the antiAliasThreshold
+        // rule below compares against THIS (Director's rule is in member units).
+        let member_font_size = font_size;
         let font_size = ((font_size as f64) * scale).round().max(1.0) as u16;
+        // The underline is the one length here that is a literal pixel count
+        // rather than a scaled metric, so it stayed a single row while the type
+        // around it grew — a hairline under 2x text, and thinner still on a
+        // hi-DPI display, where `stage_scale` also carries the device ratio.
+        let underline_rows: i32 = (scale.round() as i32).max(1);
         let line_spacing = ((line_spacing as f64) * scale).round() as u16;
         let top_spacing = ((top_spacing as f64) * scale).round() as i16;
         let member_top_spacing = ((member_top_spacing as f64) * scale).round() as i16;
         let bottom_spacing = ((bottom_spacing as f64) * scale).round() as i16;
+        // Chrome thicknesses are authored in movie units too, but everything they
+        // are drawn against below (`render_width` / `render_height`, and the
+        // content area derived from them) is in the scaled bitmap's space. Left
+        // raw, a 2px border and a 5px drop shadow stayed 2px and 5px inside a
+        // 3.16x-larger box — a hairline around a panel whose art had tripled.
+        // `.max(1)` keeps a scaled-down border from rounding away to nothing
+        // while an unscaled 0 stays 0.
+        let border = if border > 0 {
+            (((border as f64) * scale).round() as u16).max(1)
+        } else {
+            0
+        };
+        let box_drop_shadow = if box_drop_shadow > 0 {
+            (((box_drop_shadow as f64) * scale).round() as u16).max(1)
+        } else {
+            0
+        };
+        // Per-line strides from the member's XMED par_runs. These are AUTHORED
+        // pixel values and they take priority over `line_spacing` in the draw
+        // loop below, so leaving them raw meant the glyphs grew with the stage
+        // while the stride between lines did not — the lines closed up and
+        // overlapped. WorldBuilder's "MISSION 1 / TUTORIAL" label printed both
+        // lines on top of each other; Junkbot's level.num / level.name columns
+        // are driven by the same table.
+        //
+        // `.max(1)` for the same reason as the border: a scaled-DOWN stride must
+        // not collapse to zero and stack every line at the same y. A 0 entry
+        // means "no authored stride" and has to stay 0, since the draw loop
+        // filters on `> 0` to decide whether to use it at all.
+        let per_line_spacings_scaled: Vec<u16> = per_line_spacings
+            .iter()
+            .map(|&s| if s > 0 { (((s as f64) * scale).round() as u16).max(1) } else { 0 })
+            .collect();
+        let per_line_spacings: &[u16] = &per_line_spacings_scaled;
+
         let styled_spans_scaled: Option<Vec<StyledSpan>> = styled_spans.map(|spans| {
             spans.iter().map(|s| {
                 let mut style = s.style.clone();
@@ -6203,7 +6791,7 @@ impl WebGL2Renderer {
         // registered in the browser, so Canvas2D fillText would fall back to a system font.
         let use_native_for_pfr = match glyph_pref {
             GlyphPreference::Native => true,  // Force native even for PFR
-            GlyphPreference::Bitmap | GlyphPreference::Outline => false,  // Force bitmap atlas
+            GlyphPreference::Bitmap | GlyphPreference::Outline | GlyphPreference::Hinted => false,  // Force bitmap atlas
             GlyphPreference::Auto => {
                 if is_pfr_font {
                     if font.char_widths.is_some() {
@@ -6276,7 +6864,9 @@ impl WebGL2Renderer {
             original_dst_rect: None,
             bg_color_explicit: false,
             fore_color_explicit: false,
-            ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+            ink9_mask_bitmap: None,
+            ink9_mask_offset: (0, 0),
+            reverse_ink: false,
             floor_rule: false,
         };
 
@@ -6490,6 +7080,35 @@ impl WebGL2Renderer {
                         );
                     }
 
+                    // NOTE: a fractional 16.16 pen accumulation was tried
+                    // here and REGRESSED the hinted specimen 8.38% -> 9.25%:
+                    // that pen belongs to Director's GDI screen-font path.
+                    // Paige lays TEXT out from the ROUNDED per-glyph widths
+                    // Director reports — keep integers.
+                    // Hinted bold: Director's FIELD path (the GDI-style
+                    // engine) advances every inked glyph one extra pixel —
+                    // the classic tmOverhang of a synthetic double-strike.
+                    // TEXT members gain nothing (measured in the specimen:
+                    // charPosToLoc is byte-identical plain vs bold). The
+                    // non-hinted path keeps the legacy design-space pen
+                    // baked into char_widths instead.
+                    // A face that is already bold gains nothing (settled:
+                    // PFR weight >= 600). The atlas font name carries the
+                    // weight ("Verdana Bold *" / "Verdana_700_0").
+                    let face_already_bold = {
+                        let n = font.font_name.to_ascii_lowercase();
+                        n.contains("bold") || n.contains("_600") || n.contains("_700") || n.contains("_800")
+                    };
+                    let bold_overhang: i32 = if bold
+                        && is_field
+                        && is_pfr_font
+                        && !face_already_bold
+                        && glyph_pref == GlyphPreference::Hinted
+                    {
+                        1
+                    } else {
+                        0
+                    };
                     let mut x = start_x;
                     let mut char_i: usize = 0;
                     for ch in line.chars() {
@@ -6648,14 +7267,22 @@ impl WebGL2Renderer {
                             ),
                         };
                         draw_glyph(bitmap, x);
-                        if bold {
+                        // Synthetic bold's INK: a second strike one pixel over.
+                        // Its matching ADVANCE comes from the design-space pen
+                        // baked into `char_widths` (see `bold_embolden_orus`) —
+                        // widening the ink here without widening the pen there is
+                        // what used to run bold PFR text a pixel per glyph short.
+                        // A face that is ALREADY bold gains nothing (Director's
+                        // settled rule): a second strike on "Verdana Bold *
+                        // [#bold]" rendered visibly heavier than Shockwave.
+                        if bold && !face_already_bold {
                             draw_glyph(bitmap, x + 1);
                         }
                         // Apply member-level charSpacing between glyphs.
                         // Negative tightens (FurniFactory displayComputer
                         // uses -2). Already factored into measure_text_wrapped
                         // so sprite_rect width matches.
-                        x += adv + char_spacing;
+                        x += adv + char_spacing + bold_overhang;
                         char_i += 1;
                     }
 
@@ -6667,8 +7294,10 @@ impl WebGL2Renderer {
                         8,
                     );
                     let underline_y = y_pos + line_height - 1;
-                    for ux in start_x..(start_x + line_width).max(start_x) {
-                        bitmap.set_pixel(ux, underline_y, (r, g, b), &palettes);
+                    for row in 0..underline_rows {
+                        for ux in start_x..(start_x + line_width).max(start_x) {
+                            bitmap.set_pixel(ux, underline_y + row, (r, g, b), &palettes);
+                        }
                     }
                 }
             };
@@ -7079,7 +7708,9 @@ impl WebGL2Renderer {
                             original_dst_rect: params.original_dst_rect.clone(),
                             bg_color_explicit: false,
                             fore_color_explicit: false,
-                            ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+                            ink9_mask_bitmap: None,
+                            ink9_mask_offset: (0, 0),
+                            reverse_ink: false,
                             floor_rule: false,
                         };
 
@@ -7170,8 +7801,10 @@ impl WebGL2Renderer {
                                 &PaletteRef::BuiltIn(get_system_default_palette()),
                                 8,
                             );
-                            for ux in run_start_x..x {
-                                text_bitmap.set_pixel(ux, underline_y, (r, g, b), &palettes);
+                            for row in 0..underline_rows {
+                                for ux in run_start_x..x {
+                                    text_bitmap.set_pixel(ux, underline_y + row, (r, g, b), &palettes);
+                                }
                             }
                         }
                     }
@@ -7369,21 +8002,43 @@ impl WebGL2Renderer {
                                 line_height
                             }
                         });
-                    // Director-style leading: when the line cell is taller
-                    // than the glyph cell (effective_lh > native char_height),
-                    // the extra space is leading at the TOP of the line. The
-                    // glyph baseline sits in the lower portion of the cell —
-                    // not flush against the top. This matches Junkbot v1
-                    // level.num where each line is 21 px but the 04b_08 *
-                    // glyphs are only ~16 px tall: Director draws the "1"
-                    // ~5 px below the cell top, so the visible text rows
-                    // sit "inside" each row rather than crowding the top.
-                    let glyph_cell_h = if font.font_size > 0 {
+                    // Director-style leading: when the line box is taller than
+                    // the glyph box, the extra space is leading at the TOP of
+                    // the line, so the text sits inside its row instead of
+                    // crowding the top. Junkbot v1's level list pins it — each
+                    // row is 21 px for a 12 pt 04b_08 *, and Director draws the
+                    // number 9 px below the row top; Worldbuilder's tutorial
+                    // dialog is the same shape (Arial * 12 on a 14 px line).
+                    //
+                    // A FIELD is the exception. Its `lineHeight` is not authored
+                    // leading — Director derives it from the font, so the value
+                    // already IS the font's line box and there is no slack to
+                    // distribute. The atlas cell says the same thing from the
+                    // other side: its blank rows above the ink (`cap_top`) are
+                    // that same ascent gap, so adding the difference over the
+                    // point size on top applies it twice. Coke Studios'
+                    // navigator tabs are PFR Verdana 11 (3 px gap above the
+                    // caps) in a lineHeight-14 field: that put the labels 3 px
+                    // below Director's baseline, far enough for the 13 px field
+                    // box to cut their bottom rows off. Netting the gap out
+                    // lands them on Director exactly.
+                    //
+                    // Clamped at zero either way: leading is slack, never a
+                    // debt. A cell gap wider than the slack must not lift the
+                    // glyph above its line — that is what put Volter's login
+                    // text above its box.
+                    let glyph_box_h = if font.font_size > 0 {
                         font.font_size as i32
                     } else {
                         font.char_height as i32
                     };
-                    let leading_top = (effective_lh - glyph_cell_h).max(0);
+                    let cell_gap_above_ink = if is_field {
+                        pfr_cap_top.unwrap_or(0).max(0)
+                    } else {
+                        0
+                    };
+                    let leading_top =
+                        ((effective_lh - glyph_box_h).max(0) - cell_gap_above_ink).max(0);
                     render_line(line, y + leading_top, &mut text_bitmap);
                     // Track the max glyph extent (including descender). The
                     // PFR atlas's `font.char_height` includes ascender +
@@ -7452,6 +8107,42 @@ impl WebGL2Renderer {
         // Studios' `nav_vego_search_field` v-ego search box uses ink 0 Copy and
         // needs its white bg drawn — preserved here.
         let has_bg_fill = ink == 0;
+
+        // GlyphPreference::Hinted — Director's aliasing rule, now that grid-fit
+        // stems survive a 50% coverage threshold (they are at least 1px wide):
+        //   TEXT member: anti-aliased only when `antiAlias` is set AND the
+        //   member's fontSize >= antiAliasThreshold (a stored threshold of 0 is
+        //   honoured literally: nothing is below it, so always smooth).
+        //   FIELD member: always 1-bit (Director never anti-aliases fields).
+        // Applied only to the PFR bitmap-atlas path — native Canvas2D text
+        // (system fonts) keeps its browser rendering.
+        if get_glyph_preference() == GlyphPreference::Hinted
+            && spans_for_native.is_none()
+            && is_pfr_font
+        {
+            let binary = if is_field {
+                true
+            } else {
+                let (aa, thr) = player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(&cache_key.member_ref)
+                    .and_then(|m| m.member_type.as_text())
+                    .map(|t| {
+                        (
+                            t.anti_alias,
+                            t.info.as_ref().map(|i| i.anti_alias_threshold).unwrap_or(14),
+                        )
+                    })
+                    .unwrap_or((true, 14));
+                !aa || (member_font_size as u32) < thr
+            };
+            if binary {
+                for i in (3..text_bitmap.data.len()).step_by(4) {
+                    text_bitmap.data[i] = if text_bitmap.data[i] >= 128 { 255 } else { 0 };
+                }
+            }
+        }
 
         // After drawing text, handle background pixels.
         // The bitmap was pre-filled with alpha=0 (transparent).

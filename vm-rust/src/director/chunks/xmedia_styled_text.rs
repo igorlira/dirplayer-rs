@@ -134,6 +134,20 @@ pub struct XmedStyledText {
     /// style is style[3] = Verdana 9. `None` when char-run sections
     /// don't point at a parsed style.
     pub default_font_name: Option<String>,
+    /// Member-level "default" foreground colour, from the same char-run →
+    /// Section 7 lookup as `default_font_size` / `default_font_name`.
+    ///
+    /// `member.color` normally comes from `styled_spans[0]`, but a text member
+    /// authored EMPTY has no spans at all — its authored style survives only in
+    /// the Section 7 style table. Rasterwerks' `txtArialBold12_512` is exactly
+    /// that: an empty 512x16 scratch member the kill feed writes a line into and
+    /// blits out through `member.image`. With no span to read, the colour fell
+    /// back to palette 255 (black) and every kill/chat line was drawn in black
+    /// on a dark panel instead of the authored light grey.
+    ///
+    /// `None` when Section 7 declares no styles — the consumer should keep its
+    /// existing fallback.
+    pub default_fore_color: Option<(u8, u8, u8)>,
     /// Hyperlink ranges from Section 0x0129 (`hyperlink_key`), as 1-based
     /// inclusive `[startChar, endChar]` pairs (Director's `the hyperlinks of
     /// member` format). Empty when the member has no links. Each XMED record
@@ -759,6 +773,28 @@ pub fn parse_xmed(data: &[u8]) -> Result<XmedStyledText, String> {
     let default_font_name = lookup_font_via(&section4_char_runs)
         .or_else(|| lookup_font_via(&section5_char_runs));
 
+    // Parallel lookup for the default FORE COLOUR — same char-run → style path,
+    // so the (font, size, colour) triple all describe one authored style. This
+    // is the only route to the colour of a member authored with no text.
+    let lookup_color_via = |runs: &[CharRun]| -> Option<(u8, u8, u8)> {
+        if declared_count == 0 {
+            return None;
+        }
+        let run = runs.first()?;
+        let style = style_data.styles.get(run.style_index as usize)?;
+        let c = style.color?;
+        Some((((c >> 16) & 0xFF) as u8, ((c >> 8) & 0xFF) as u8, (c & 0xFF) as u8))
+    };
+    let default_fore_color = lookup_color_via(&section4_char_runs)
+        .or_else(|| lookup_color_via(&section5_char_runs))
+        // Neither char-run table resolved (an empty member may have no runs at
+        // all): take the first declared style outright.
+        .or_else(|| {
+            if declared_count == 0 { return None; }
+            let c = style_data.styles.first()?.color?;
+            Some((((c >> 16) & 0xFF) as u8, ((c >> 8) & 0xFF) as u8, (c & 0xFF) as u8))
+        });
+
     // When Section 7 declares 0 styles AND no char-run path produced a
     // size, fall back to the HTML `<font size=N>` attribute Director
     // captures in Section 1 at index [42] (verified empirically by
@@ -821,6 +857,7 @@ pub fn parse_xmed(data: &[u8]) -> Result<XmedStyledText, String> {
         bg_color: section1_data.bg_color,
         default_font_size,
         default_font_name,
+        default_fore_color,
         hyperlinks,
     })
 }

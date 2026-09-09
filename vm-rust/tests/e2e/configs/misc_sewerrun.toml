@@ -1,0 +1,24 @@
+[movie]
+# Miniclip "Sewer Run" (Director 10.0, Shockwave 3D + Havok + Flash).
+#
+# The whole UI is one Flash sprite (`interface_miniclip.swf` in channel 1); it
+# drives the movie by calling `getURL("event:<handler>")`, and Lingo reads its
+# state back through `sprite(1).<property>` (getFlashProperty). Channel 2 is the
+# Shockwave 3D sprite, which also carries the Havok Physics behavior.
+#
+# Markers: 1 loading, 5 menu, 9 restart, 10 game, 15 over, 20 hs.
+path = "dcr_misc/sewerrun.dcr"
+
+[external_params]
+# `gotoMiniclip` / the highscore behavior guard their `gotoNetPage` on
+# `the moviePath contains "miniclip.com"`. Not a boot gate, but it keeps the
+# test from trying to navigate away.
+_moviePath = "http://www.miniclip.com/"
+
+[test]
+suite = "misc"
+tags = ["3d", "havok", "flash"]
+# The loader frame streams a 6 MB .dcr, then the menu builds a 3D character
+# chooser (5 W3D casts, cloned motions, backdrop + two overlays) before
+# gameplay can start.
+default_timeout = 300.0

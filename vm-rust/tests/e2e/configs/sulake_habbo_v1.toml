@@ -3,6 +3,11 @@ path = "dcr_sulake/habbo_v1/loader.dcr"
 
 [test]
 suite = "sulake"
+# Live multiuser: this movie logs a REAL account into the Habbo server, shared
+# across every habbo test. Pin them to one shard so they run in sequence --
+# concurrently they fight over the same user and one of them hangs.
+shard_group = "habbo"
+tags = ["2d"]
 
 [external_params]
 swText = "localhost:37121"

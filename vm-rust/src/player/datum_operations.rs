@@ -135,11 +135,44 @@ fn symbol_as_arithmetic_operand(datum: &Datum) -> Option<Datum> {
     }
 }
 
+/// An OBJECT operand in arithmetic counts as 0 — the same "coerce, don't raise"
+/// rule `symbol_as_arithmetic_operand` documents, applied to the reference
+/// datums (3D nodes, Havok/PhysX/Flash handles, script instances, …). The
+/// Scripting Dictionary defines the arithmetic operators over "numerical
+/// expressions" only and never says an object operand is an error; Director
+/// quietly yields 0, which is why movies ship with expressions like this.
+///
+/// Sewer Run's MenuBehaviour is one: `setupCharacter` builds
+///
+///   #ftWheels: (board * 2) - 1, #bkWheels: board * 2
+///
+/// where `board` is the MODEL returned by `cloneModelFromCastmember`, not the
+/// wheel-set index the author meant (`changeWheels` writes the same two keys
+/// from an integer). Both values are overwritten by the `changeWheels(1)` two
+/// lines later, so in Director the mistake is invisible — but raising on it
+/// aborted `beginSprite` and left the character chooser with no boarder at all.
+fn object_as_arithmetic_operand(datum: &Datum) -> Option<Datum> {
+    match datum {
+        Datum::Shockwave3dObjectRef(_)
+        | Datum::HavokObjectRef(_)
+        | Datum::PhysXObjectRef(_)
+        | Datum::FlashObjectRef(_)
+        | Datum::ScriptInstanceRef(_) => Some(Datum::Int(0)),
+        _ => None,
+    }
+}
+
 pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<Datum, ScriptError> {
     if let Some(left) = symbol_as_arithmetic_operand(&left) {
         return add_datums(left, right, player);
     }
     if let Some(right) = symbol_as_arithmetic_operand(&right) {
+        return add_datums(left, right, player);
+    }
+    if let Some(left) = object_as_arithmetic_operand(&left) {
+        return add_datums(left, right, player);
+    }
+    if let Some(right) = object_as_arithmetic_operand(&right) {
         return add_datums(left, right, player);
     }
     match (&left, &right) {
@@ -419,6 +452,12 @@ pub fn subtract_datums(
     if let Some(right) = symbol_as_arithmetic_operand(&right) {
         return subtract_datums(left, right, player);
     }
+    if let Some(left) = object_as_arithmetic_operand(&left) {
+        return subtract_datums(left, right, player);
+    }
+    if let Some(right) = object_as_arithmetic_operand(&right) {
+        return subtract_datums(left, right, player);
+    }
     match (&left, &right) {
         (Datum::Void, Datum::Void) => Ok(Datum::Int(0)),
         (Datum::Void, Datum::Int(r)) => Ok(Datum::Int(-r)),
@@ -677,9 +716,11 @@ pub fn multiply_datums(
 ) -> Result<Datum, ScriptError> {
     let left = player.get_datum(&left_ref).clone();
     let right = player.get_datum(&right_ref).clone();
-    // See `symbol_as_arithmetic_operand`.
+    // See `symbol_as_arithmetic_operand` / `object_as_arithmetic_operand`.
     let left = symbol_as_arithmetic_operand(&left).unwrap_or(left);
     let right = symbol_as_arithmetic_operand(&right).unwrap_or(right);
+    let left = object_as_arithmetic_operand(&left).unwrap_or(left);
+    let right = object_as_arithmetic_operand(&right).unwrap_or(right);
 
     let result = match (&left, &right) {
         (Datum::Void, Datum::Void) => Datum::Int(0),

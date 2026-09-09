@@ -3,3 +3,4 @@ path = "dcr_nintendo/mello.dcr"
 
 [test]
 suite = "nintendo"
+tags = ["2d"]

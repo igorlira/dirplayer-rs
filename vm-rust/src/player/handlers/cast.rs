@@ -25,31 +25,17 @@ impl CastHandlers {
     pub fn find_empty(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let member_ref = player.get_datum(&args[0]).to_member_ref()?;
-
-            let (c_start, c_end) = match &player.movie.file {
-                Some(file) => (file.config.min_member as u32, file.config.max_member as u32),
-                None => return Err(ScriptError::new("findEmpty: no movie file loaded".to_string())),
-            };
-
             let cast_lib = if member_ref.cast_lib > 0 {
                 member_ref.cast_lib as u32
             } else {
                 1
             };
             let cast = player.movie.cast_manager.get_cast(cast_lib)?;
-
-            let member_num = member_ref.cast_member as u32;
-            if member_num > c_end {
-                return Ok(player.alloc_datum(Datum::Int(member_num as i32)));
-            }
-
-            let start = if member_num > c_start { member_num } else { c_start };
-            for slot in start..=c_end {
-                if !cast.members.contains_key(&slot) {
-                    return Ok(player.alloc_datum(Datum::Int(slot as i32)));
-                }
-            }
-            Ok(player.alloc_datum(Datum::Int(c_end as i32 + 1)))
+            // "the position AFTER a specified cast member" — the dictionary's own
+            // example calls `findEmpty(member(100))` "the first empty cast member
+            // on or after cast member 100", so the given slot counts itself.
+            let slot = cast.find_empty_slot(member_ref.cast_member as u32);
+            Ok(player.alloc_datum(Datum::Int(slot as i32)))
         })
     }
 }

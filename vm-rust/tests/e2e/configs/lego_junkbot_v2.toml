@@ -3,6 +3,7 @@ path = "dcr_lego/ClubGames/JunkbotUndercover/NoSave/DSWMEDIA/JunkbotUndercover.d
 
 [test]
 suite = "lego"
+tags = ["2d", "flash"]
 
 # `sw1` is the URL prefix the movie's database manager pastes in front of
 # `getState` / `setState` / `getTopTen`, and the LEGO page passed it empty:

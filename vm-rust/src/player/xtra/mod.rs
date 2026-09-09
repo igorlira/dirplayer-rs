@@ -5,6 +5,8 @@ pub mod fileio;
 pub mod leechprotection;
 pub mod manager;
 pub mod multiuser;
+pub mod enhancer;
+pub mod movecursor;
 pub mod openurl;
 pub mod scene3d;
 pub mod sysmenu;

@@ -1,0 +1,21 @@
+[movie]
+# Rasterwerks "PHOSPHOR" ALPHA 4 — the earlier, self-contained build of the
+# same Shockwave 3D deathmatch FPS that `misc_rasterwerks.toml` covers as
+# beta2 043.
+#
+# Unlike beta2 this build pulls in NOTHING at runtime: the maps, sounds and
+# actors all live in internal casts, and `ReadProfileString` parses cast
+# TEXT members ("DEF._ROOT_", "DEF.ConfigFile") instead of reading .ini files
+# through FileIO. So the single .dcr is the whole game.
+path = "dcr_misc/rasterwerks/phosphor_alpha4.dcr"
+
+[external_params]
+# "Projector" skips the plugin-only streaming branches (getStreamStatus polling
+# in F_Loader, the per-member `state` wait in F_SW3DLoader).
+_runMode = "Projector"
+
+[test]
+suite = "misc"
+tags = ["3d"]
+# Building the world, the nav net and the bots from a 4 MB movie takes a while.
+default_timeout = 600.0

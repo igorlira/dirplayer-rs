@@ -3,3 +3,4 @@ path = "dcr_nintendo/RollCall.dcr"
 
 [test]
 suite = "nintendo"
+tags = ["2d"]

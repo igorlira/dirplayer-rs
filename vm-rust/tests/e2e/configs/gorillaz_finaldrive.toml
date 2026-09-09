@@ -3,3 +3,4 @@ path = "dcr_gorillaz/finaldrive/finaldrive.dcr"
 
 [test]
 suite = "gorillaz"
+tags = ["3d", "havok"]

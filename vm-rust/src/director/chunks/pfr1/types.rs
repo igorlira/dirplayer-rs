@@ -163,6 +163,22 @@ pub struct FontMetrics {
     pub std_hw: i16,
     pub ascender: i16,
     pub descender: i16,
+    /// Real LAYOUT ascent/descent, from the type-2 aux (private) record's
+    /// TEXTMETRIC-style block (payload words 5/6 = tmAscent/tmDescent in
+    /// metrics-resolution units; verified: Arial 1854/434, Courier New Bold
+    /// 1705/615, Comic Sans MS 2257/597 — all the shadowed fonts' hhea/tm
+    /// values, and HousePaint's 1083 EXCEEDS its bbox top 1049, proving it is
+    /// a stored metric, not bbox-derived). `None` when the PFR carries no
+    /// type-2 aux record. Paige places a baseline at `lineTop + ascent` from
+    /// THESE, while the rasterizer's glyph cell keeps using the bounding-box
+    /// `ascender`/`descender` above (tallest-glyph extent).
+    /// Sign convention matches ascender/descender: descent stored NEGATIVE.
+    pub layout_ascender: Option<i16>,
+    pub layout_descender: Option<i16>,
+    /// GDI `tmInternalLeading` from the same type-2 record: the blank band
+    /// INSIDE `layout_ascender`, above the caps. It comes off the BASELINE but
+    /// NOT off the line height -- see `baseline_ascender()`.
+    pub layout_internal_leading: Option<i16>,
     pub x_min: i16,
     pub y_min: i16,
     pub x_max: i16,
@@ -179,6 +195,9 @@ impl FontMetrics {
             std_hw: 0,
             ascender: 0,
             descender: 0,
+            layout_ascender: None,
+            layout_descender: None,
+            layout_internal_leading: None,
             x_min: 0,
             y_min: 0,
             x_max: 0,
@@ -186,6 +205,37 @@ impl FontMetrics {
             flip_x: false,
             flip_y: false,
         }
+    }
+
+    /// Ascent for text LAYOUT (baseline = lineTop + this): the type-2 aux
+    /// record's real ascent when present, else the bounding-box top.
+    pub fn layout_ascender(&self) -> i16 {
+        self.layout_ascender.unwrap_or(self.ascender)
+    }
+
+    /// Descent for text LAYOUT (negative, like `descender`): the type-2 aux
+    /// record's real descent when present, else the bounding-box bottom.
+    pub fn layout_descender(&self) -> i16 {
+        self.layout_descender.unwrap_or(self.descender)
+    }
+
+    /// Ascent for placing the BASELINE inside the line box.
+    ///
+    /// This is NOT `layout_ascender()`. That value is GDI `tmAscent`, which
+    /// includes `tmInternalLeading` -- the blank band above the caps that makes
+    /// `tmHeight` a full cell. The line HEIGHT wants the raw sum (verified:
+    /// Rifleman's Courier New Bold 32 must advance 36 = (tmAsc+tmDesc)/em x 32,
+    /// and `fixedLineSpace` 34 is only a minimum), but the BASELINE sits at the
+    /// typographic ascent, with the internal leading left above it as slack.
+    ///
+    /// Using `tmAscent` for both pushed the baseline down by the internal
+    /// leading, so descenders ran past the bottom of the line box: PHOSPHOR's
+    /// scoreboard lost the tails of "Player Name" / "Frags" / "Ping", and
+    /// AreaZero's nine-line controls block merged into 6 runs instead of 10
+    /// because each line's descenders touched the next line's ascenders.
+    pub fn baseline_ascender(&self) -> i16 {
+        self.layout_ascender()
+            .saturating_sub(self.layout_internal_leading.unwrap_or(0))
     }
 }
 
@@ -218,6 +268,11 @@ pub struct PhysicalFontRecord {
     pub blue_values: Vec<i16>,
     pub blue_fuzz: u8,
     pub blue_scale: u8,
+    // Stem snap widths in orus, from the extra-item type-3 record.
+    // `stem_snap_v` = vertical stems (X-axis widths, paired with StdVW);
+    // `stem_snap_h` = horizontal stems (Y-axis widths, paired with StdHW).
+    pub stem_snap_v: Vec<i16>,
+    pub stem_snap_h: Vec<i16>,
     // Extra items
     pub has_bitmap_section: bool,
     pub bitmap_size_table_offset: u32,
@@ -276,6 +331,8 @@ impl PhysicalFontRecord {
             blue_values: Vec::new(),
             blue_fuzz: 0,
             blue_scale: 0,
+            stem_snap_v: Vec::new(),
+            stem_snap_h: Vec::new(),
             has_bitmap_section: false,
             bitmap_size_table_offset: 0,
             gps_offset: 0,

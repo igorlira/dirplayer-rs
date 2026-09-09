@@ -1,0 +1,10 @@
+[movie]
+path = "dcr_misc/spectral_wizard/spectral-wizard.dcr"
+
+[external_params]
+_moviePath = "http://www.miniclip.com/spectral-wizard.dcr"
+
+[test]
+suite = "misc"
+tags = ["2d"]
+default_timeout = 300.0

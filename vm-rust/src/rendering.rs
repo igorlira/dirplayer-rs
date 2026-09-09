@@ -18,7 +18,7 @@ use crate::{
     player::{
         bitmap::{
             bitmap::{self, get_system_default_palette, resolve_color_ref, Bitmap, PaletteRef},
-            drawing::{should_matte_sprite, CopyPixelsParams},
+            drawing::{should_matte_sprite, sprite_color_for_source, CopyPixelsParams},
             mask::BitmapMask,
             palette_map::PaletteMap,
         },
@@ -488,13 +488,14 @@ pub fn render_preview_bitmap(
                 0,
                 PaletteRef::BuiltIn(get_system_default_palette()),
             );
+            let movie_palette = player.current_movie_palette();
             let palettes = &player.movie.cast_manager.palettes();
             bitmap.fill_relative_rect(
                 0, 0, 0, 0,
                 resolve_color_ref(
                     &palettes,
                     &player.bg_color,
-                    &PaletteRef::BuiltIn(get_system_default_palette()),
+                    &movie_palette,
                     original_bit_depth,
                 ),
                 palettes,
@@ -635,7 +636,9 @@ pub fn render_preview_bitmap(
                 original_dst_rect: None,
                 bg_color_explicit: false,
                 fore_color_explicit: false,
-                ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+                ink9_mask_bitmap: None,
+                ink9_mask_offset: (0, 0),
+                reverse_ink: false,
                 floor_rule: false,
             };
 
@@ -663,7 +666,9 @@ pub fn render_preview_bitmap(
                             original_dst_rect: None,
                             bg_color_explicit: false,
                             fore_color_explicit: false,
-                            ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+                            ink9_mask_bitmap: None,
+                            ink9_mask_offset: (0, 0),
+                            reverse_ink: false,
                             floor_rule: false,
                         };
                         bitmap.draw_text(
@@ -1205,7 +1210,7 @@ fn render_filmloop_from_channel_data(
             }
             // For shapes and other non-bitmap members, pos_x/pos_y is the top-left corner.
             // Use (0,0) registration — shapes don't have a registration point like bitmaps.
-            _ => (data.width, data.height, 0, 0),
+            _ => (data.width.max(0) as u16, data.height.max(0) as u16, 0, 0),
         };
 
         // Choose between channel data dims (sprite dims) and actual bitmap dims.
@@ -1217,13 +1222,13 @@ fn render_filmloop_from_channel_data(
             if member_width > 0 && member_height > 0 {
                 (member_width, member_height)
             } else if data.width > 0 && data.height > 0 {
-                (data.width, data.height)
+                (data.width as u16, data.height as u16)
             } else {
                 (member_width, member_height)
             }
         } else {
             if data.width > 0 && data.height > 0 {
-                (data.width, data.height)
+                (data.width as u16, data.height as u16)
             } else {
                 (member_width, member_height)
             }
@@ -1473,6 +1478,7 @@ fn render_filmloop_from_channel_data(
                     fore_color_explicit: false,
                     ink9_mask_bitmap: ink9_mask.as_ref().map(|(bmp, _)| bmp),
                     ink9_mask_offset: ink9_mask.as_ref().map(|(_, off)| *off).unwrap_or((0, 0)),
+                    reverse_ink: false,
                     floor_rule: true,
                 };
 
@@ -1556,7 +1562,9 @@ fn render_filmloop_from_channel_data(
                         original_dst_rect: None,
                         bg_color_explicit: false,
                         fore_color_explicit: false,
-                        ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+                        ink9_mask_bitmap: None,
+                        ink9_mask_offset: (0, 0),
+                        reverse_ink: false,
                         floor_rule: false,
                     };
 
@@ -1635,7 +1643,9 @@ fn render_filmloop_from_channel_data(
                         original_dst_rect: None,
                         bg_color_explicit: false,
                         fore_color_explicit: false,
-                        ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+                        ink9_mask_bitmap: None,
+                        ink9_mask_offset: (0, 0),
+                        reverse_ink: false,
                         floor_rule: false,
                     };
 
@@ -1685,7 +1695,9 @@ fn render_filmloop_from_channel_data(
                             original_dst_rect: Some(dst_rect.clone()),
                             bg_color_explicit: false,
                             fore_color_explicit: false,
-                            ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+                            ink9_mask_bitmap: None,
+                            ink9_mask_offset: (0, 0),
+                            reverse_ink: false,
                             floor_rule: false,
                         };
 
@@ -1773,7 +1785,9 @@ fn render_filmloop_from_channel_data(
                     original_dst_rect: Some(sprite_rect.clone()),
                     bg_color_explicit: false,
                     fore_color_explicit: false,
-                    ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+                    ink9_mask_bitmap: None,
+                    ink9_mask_offset: (0, 0),
+                    reverse_ink: false,
                     floor_rule: false,
                 };
 
@@ -1892,10 +1906,14 @@ pub fn render_score_to_bitmap_with_offset(
         dest_rect.top,
         dest_rect.right,
         dest_rect.bottom,
+        // `the stageColor` is a palette INDEX into the movie palette the score's
+        // palette channel is currently holding — not into the system palette. 15 Love
+        // sets stageColor 31, which is blue in its movie palette (member 166) and a
+        // hot orange in the system palette; the whole intro drew orange.
         resolve_color_ref(
             &palettes,
             &player.bg_color,
-            &PaletteRef::BuiltIn(get_system_default_palette()),
+            &player.current_movie_palette(),
             bitmap.original_bit_depth,
         ),
         &palettes,
@@ -2041,11 +2059,20 @@ pub fn render_score_to_bitmap_with_offset(
                     None
                 };
 
+                // Taken before the mutable bitmap borrow below. Sprite fore/back colours
+                // held as palette indices resolve through the MOVIE palette when the
+                // source is direct-colour — see `sprite_color_for_source`.
+                let movie_palette = player.current_movie_palette();
                 // A GIF carries the background colour the file declares, and
                 // a movie hides it with ink 36, which keys out the background
                 // colour. The score's bgColor for such a sprite is whatever
                 // the author left there, usually white, so a GIF with any
                 // other background drew as a solid box. Prefer the member's.
+                //
+                // This picks WHICH colour is the background; `sprite_color_for_source`
+                // below then decides which PALETTE that colour is an index into. The
+                // two are independent, so the GIF's own background still resolves
+                // through the movie palette like any other.
                 let bg_color = match sprite.member.as_ref() {
                     Some(m) if crate::player::gif::is_gif_member(player, m.cast_lib, m.cast_member) => {
                         player.movie.cast_manager.find_member_by_ref(m)
@@ -2126,8 +2153,8 @@ pub fn render_score_to_bitmap_with_offset(
                 let mut params = CopyPixelsParams {
                     blend: sprite.effective_blend(),
                     ink: sprite.ink as u32,
-                    color: sprite.color.clone(),
-                    bg_color: sprite.bg_color.clone(),
+                    color: sprite_color_for_source(&palettes, &sprite.color, src_bitmap, &movie_palette),
+                    bg_color: sprite_color_for_source(&palettes, &bg_color, src_bitmap, &movie_palette),
                     bg_color_explicit: false,
                     fore_color_explicit: false,
                     mask_image: None,
@@ -2139,6 +2166,7 @@ pub fn render_score_to_bitmap_with_offset(
                     original_dst_rect: Some(logical_rect),
                     ink9_mask_bitmap: ink9_mask.as_ref().map(|(bmp, _)| bmp),
                     ink9_mask_offset: ink9_mask.as_ref().map(|(_, off)| *off).unwrap_or((0, 0)),
+                    reverse_ink: false,
                     floor_rule: true,
                 };
 
@@ -2328,7 +2356,9 @@ pub fn render_score_to_bitmap_with_offset(
                         original_dst_rect: None,
                         bg_color_explicit: false,
                         fore_color_explicit: false,
-                        ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+                        ink9_mask_bitmap: None,
+                        ink9_mask_offset: (0, 0),
+                        reverse_ink: false,
                         floor_rule: false,
                     };
 
@@ -2532,7 +2562,9 @@ pub fn render_score_to_bitmap_with_offset(
                         original_dst_rect: None,
                         bg_color_explicit: false,
                         fore_color_explicit: false,
-                        ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+                        ink9_mask_bitmap: None,
+                        ink9_mask_offset: (0, 0),
+                        reverse_ink: false,
                         floor_rule: false,
                     };
 
@@ -2650,6 +2682,9 @@ pub fn render_score_to_bitmap_with_offset(
                 ink_params.insert("ink".into(), Datum::Int(compositing_ink));
                 ink_params.insert("color".into(), Datum::ColorRef(sprite.color.clone()));
                 ink_params.insert("bgColor".into(), Datum::ColorRef(sprite.bg_color.clone()));
+                // A SPRITE ink, not a Lingo `copyPixels` one — see
+                // `CopyPixelsParams::reverse_ink`.
+                ink_params.insert("sprite_ink".into(), Datum::Int(1));
 
                 bitmap.copy_pixels(
                     &palettes,
@@ -2701,7 +2736,9 @@ pub fn render_score_to_bitmap_with_offset(
                     original_dst_rect: None,
                     bg_color_explicit: false,
                     fore_color_explicit: false,
-                    ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+                    ink9_mask_bitmap: None,
+                    ink9_mask_offset: (0, 0),
+                    reverse_ink: false,
                     floor_rule: false,
                 };
 
@@ -2841,7 +2878,9 @@ pub fn render_score_to_bitmap_with_offset(
                         original_dst_rect: None,
                         bg_color_explicit: false,
                         fore_color_explicit: false,
-                        ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+                        ink9_mask_bitmap: None,
+                        ink9_mask_offset: (0, 0),
+                        reverse_ink: false,
                         floor_rule: false,
                     };
 
@@ -3110,7 +3149,9 @@ pub fn render_score_to_bitmap_with_offset(
                     original_dst_rect: Some(logical_rect),
                     bg_color_explicit: false,
                     fore_color_explicit: false,
-                    ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+                    ink9_mask_bitmap: None,
+                    ink9_mask_offset: (0, 0),
+                    reverse_ink: false,
                     floor_rule: false,
                 };
 
@@ -3186,7 +3227,9 @@ pub fn render_score_to_bitmap_with_offset(
                             original_dst_rect: Some(sprite_rect.clone()),
                             bg_color_explicit: false,
                             fore_color_explicit: false,
-                            ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+                            ink9_mask_bitmap: None,
+                            ink9_mask_offset: (0, 0),
+                            reverse_ink: false,
                             floor_rule: false,
                         };
 
@@ -3219,17 +3262,38 @@ pub fn render_score_to_bitmap_with_offset(
                             .map(|fi| fi.paused_at_start)
                             .unwrap_or(false);
                         let asserted_frame = sprite.flash_asserted_frame.unwrap_or(-1);
-                        JsApi::dispatch_flash_member_loaded(
-                            channel_num as i32,
-                            member_ref.cast_lib,
-                            member_ref.cast_member,
-                            &flash_member.data,
-                            w,
-                            h,
-                            paused_at_start,
-                            asserted_frame,
-                        );
-                        player.flash_sprite_loaded.insert(dispatch_key);
+                        if !player.is_playing {
+                            // Movie not playing yet (load-time stage preview): a LOAD
+                            // would bind + autoplay the SWF ahead of the Director
+                            // playhead (rifleman's intro ran to its stop, with sound,
+                            // before PLAY — then the frame-1 gate hung forever).
+                            // WARM it instead; the first playing frame binds it fresh.
+                            // See the webgl2 twin of this dispatch for the full story.
+                            if !player.flash_sprite_warmed.contains(&dispatch_key) {
+                                JsApi::dispatch_flash_member_warm(
+                                    channel_num as i32,
+                                    member_ref.cast_lib,
+                                    member_ref.cast_member,
+                                    &flash_member.data,
+                                    w,
+                                    h,
+                                    paused_at_start,
+                                );
+                                player.flash_sprite_warmed.insert(dispatch_key);
+                            }
+                        } else {
+                            JsApi::dispatch_flash_member_loaded(
+                                channel_num as i32,
+                                member_ref.cast_lib,
+                                member_ref.cast_member,
+                                &flash_member.data,
+                                w,
+                                h,
+                                paused_at_start,
+                                asserted_frame,
+                            );
+                            player.flash_sprite_loaded.insert(dispatch_key);
+                        }
                     }
                 }
             }
@@ -3525,7 +3589,9 @@ impl PlayerCanvasRenderer {
                 original_dst_rect: None,
                 bg_color_explicit: false,
                 fore_color_explicit: false,
-                ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+                ink9_mask_bitmap: None,
+                ink9_mask_offset: (0, 0),
+                reverse_ink: false,
                 floor_rule: false,
             };
 

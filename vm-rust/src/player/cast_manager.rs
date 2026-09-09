@@ -505,14 +505,45 @@ impl CastManager {
             None
         };
 
+        // A chunk expression IS a string in Director -- `member(a1.char[1..4])`
+        // names a member exactly like a String does. Without this the chunk fell
+        // through to the numeric catch-all below, where `int_value()` answers 0
+        // for a non-numeric string and the lookup silently became member 0, i.e.
+        // an invalid (-1, -1) ref. PHOSPHOR alpha 4's C_Object3D builds every
+        // sprite/texture name that way (`member(a1).useAlpha`).
+        let chunk_as_string;
+        let member_name_or_num: &Datum = match member_name_or_num {
+            Datum::StringChunk(_, _, s) => {
+                chunk_as_string = Datum::String(s.clone());
+                &chunk_as_string
+            }
+            other => other,
+        };
+
         let member_ref = match (&member_name_or_num, cast_lib.as_ref()) {
             (Datum::String(name), Some(cast_lib)) => {
-                cast_lib.find_member_by_name(name).map(|member| {
-                    Ok(Some(CastMemberRef {
+                // Director 11.5, `member()`: with BOTH arguments the call is
+                // "a specific reference to both a cast library and a member
+                // within it"; the all-libraries search is documented for when
+                // castNameOrNum is OMITTED ("If omitted, member() searches all
+                // cast libraries until a match is found"). So a name the named
+                // cast does not hold is a MISS, not a cue to look elsewhere.
+                //
+                // Habbo v26's FUSE Resource Manager depends on exactly that: it
+                // discovers which libraries carry an index field by walking them
+                // all and testing the qualified lookup —
+                //     repeat with tCastLib = 1 to <n>
+                //       if member(tClsIndex, tCastLib).number > 0 then
+                //         getObject(#classes).dump(member(tClsIndex, tCastLib).number)
+                // — so a movie-wide fallback made EVERY library report the same
+                // index and dump it over and over, and the client never came up.
+                cast_lib
+                    .find_member_by_name(name)
+                    .map(|member| CastMemberRef {
                         cast_lib: cast_lib.number as i32,
                         cast_member: member.number as i32,
-                    }))
-                })
+                    })
+                    .map(|member_ref| Ok(Some(member_ref)))
             }
             (Datum::String(name), None) => self
                 .find_member_ref_by_name(name)
@@ -927,6 +958,7 @@ impl CastManager {
                             font_size,
                             font_style,
                             char_widths: font_data.char_widths.clone(),
+                            char_widths_frac: None,
                             pfr_native_size: font_size,
                         };
 

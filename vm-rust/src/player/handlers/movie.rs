@@ -655,6 +655,9 @@ impl MovieHandlers {
             // ONLY set go_same_frame, NOT has_frame_changed_in_go
             reserve_player_mut(|player| {
                 player.go_same_frame = true;
+                // Re-entering the same frame still counts as a playhead move,
+                // so a registered puppetTransition starts animating here too.
+                player.start_pending_puppet_transition();
             });
         }
 

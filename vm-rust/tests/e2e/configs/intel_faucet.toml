@@ -3,3 +3,4 @@ path = "dcr_intel/Faucet.dcr"
 
 [test]
 suite = "intel"
+tags = ["3d"]

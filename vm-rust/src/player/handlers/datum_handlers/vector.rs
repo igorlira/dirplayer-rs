@@ -63,7 +63,10 @@ impl VectorDatumHandlers {
                 }
                 Ok(DatumRef::Void)
             }),
-            Some(BuiltInSymbol::CrossProduct | BuiltInSymbol::Cross) => reserve_player_mut(|player| {
+            // `perpendicularTo` is documented (11.5 Scripting Dictionary) as
+            // "equivalent to the vector crossProduct command", so it shares the
+            // implementation rather than getting an approximate one of its own.
+            Some(BuiltInSymbol::CrossProduct | BuiltInSymbol::Cross | BuiltInSymbol::PerpendicularTo) => reserve_player_mut(|player| {
                 let a = Self::datum_to_vec(player, player.get_datum(datum))?;
                 let b = Self::datum_to_vec(player, player.get_datum(&args[0]))?;
                 Ok(player.alloc_datum(Datum::Vector([
@@ -194,7 +197,12 @@ impl VectorDatumHandlers {
         // the inner Vector datum (which has no node mapping), not the parent transform.
         if let Some((_, parent_ref, sub_prop)) = player.transform_sub_refs.iter()
             .find(|(vec_ref, _, _)| vec_ref == datum).cloned() {
-            super::transform3d::mark_transform_dirty(&parent_ref);
+            super::transform3d::mark_transform_dirty_with(&parent_ref, match sub_prop.as_lower_str() {
+                "position" => super::transform3d::WRITE_POSITION,
+                "rotation" => super::transform3d::WRITE_ROTATION,
+                "scale" => super::transform3d::WRITE_SCALE,
+                _ => super::transform3d::WRITE_COMPOSE,
+            });
             if let Datum::Transform3d(m) = player.get_datum_mut(&parent_ref) {
                 match sub_prop.as_lower_str() {
                     "position" => {

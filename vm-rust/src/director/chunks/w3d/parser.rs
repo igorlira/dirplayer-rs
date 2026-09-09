@@ -148,9 +148,9 @@ impl W3dFileParser {
 
         // Director always creates a "UIAmbient" light (black ambient, no visual contribution)
         // so Lingo scripts can reference it by name.
-        if !self.scene.lights.iter().any(|l| l.name == Symbol::from_str("UIAmbient")) {
+        if !self.scene.lights.iter().any(|l| l.name == Symbol::builtin(BuiltInSymbol::UIAmbient)) {
             self.scene.lights.push(W3dLight {
-                name: Symbol::from_str("UIAmbient"),
+                name: Symbol::builtin(BuiltInSymbol::UIAmbient),
                 light_type: W3dLightType::Ambient,
                 color: [0.0, 0.0, 0.0],
                 enabled: true,
@@ -159,7 +159,7 @@ impl W3dFileParser {
                 ..Default::default()
             });
             self.scene.nodes.push(W3dNode {
-                name: Symbol::from_str("UIAmbient"),
+                name: Symbol::builtin(BuiltInSymbol::UIAmbient),
                 node_type: W3dNodeType::Light,
                 parent_name: Symbol::builtin(BuiltInSymbol::World),
                 ..Default::default()
@@ -177,13 +177,32 @@ impl W3dFileParser {
         // light and faces the points don't reach fall to the ambient floor and render
         // near-black — the dark "shadows" Shockwave doesn't show. Orientation matches
         // Director's reported default: color rgb(255,255,255), zAxis (0.8543,-0.0015,0.5198).
+        //
+        // NARROWED: only for a member that declares NO light node of its own.
+        // UIAmbient/UIDirectional are the two lights Director gives an EMPTY 3D
+        // member; a member that ships its own lighting keeps exactly what it ships.
+        // Measured in Director's message window on Burnin' Rubber 3, which contradicts
+        // the "point + ambient still gets the default" reading above — every one of its
+        // members answers light.count = 2, its own light plus UIAmbient, and NONE of
+        // them has a UIDirectional:
+        //   Main   -> Direct01(point, 191,191,191) + UIAmbient(0,0,0)
+        //   Logo   -> Omni02(point, 191,191,191)   + UIAmbient
+        //   Car    -> "Default MAX Light"(point)   + UIAmbient
+        //   Hangar -> Direct01(point)              + UIAmbient
+        // The synthetic white key light was adding `diffuse * N·L` on top of a full
+        // emissive and taking the menu bars from orange (255,150,0) to yellow.
+        // (If the `estate` case really does gain one, its own file must carry it.)
+        let has_own_light_node = self.scene.nodes.iter().any(|n| {
+            n.node_type == W3dNodeType::Light
+                && n.name != Symbol::builtin(BuiltInSymbol::UIAmbient)
+        });
         let has_aimed_key_light = self.scene.lights.iter().any(|l| matches!(
             l.light_type,
             W3dLightType::Directional | W3dLightType::Spot
         ));
-        if !has_aimed_key_light {
+        if !has_aimed_key_light && !has_own_light_node {
             self.scene.lights.push(W3dLight {
-                name: Symbol::from_str(&"UIDirectional".to_string()),
+                name: Symbol::builtin(BuiltInSymbol::UIDirectional),
                 light_type: W3dLightType::Directional,
                 color: [1.0, 1.0, 1.0],
                 enabled: true,
@@ -191,15 +210,51 @@ impl W3dFileParser {
                 attenuation: [1.0, 0.0, 0.0],
                 ..Default::default()
             });
-            // Only the Z axis (columns 8/9/10) is read for a directional light's
-            // orientation; X/Y axes and position are unused but kept sane.
-            let mut t = [0.0f32; 16];
-            t[0] = 1.0; t[5] = 1.0;
-            t[8] = 0.8543; t[9] = -0.0015; t[10] = 0.5198;
-            t[12] = -397.3754; t[13] = 714.7632; t[14] = -538.8293;
+            // Director places this light by taking the member's DEFAULT CAMERA
+            // transform and rotating it -45 degrees about the WORLD X axis — a key
+            // light 45 degrees up over the camera's shoulder. Measured in
+            // Director's message window on two movies, and it reproduces both to
+            // 5 decimal places:
+            //
+            //   Havok "Properties"  camera zAxis (0.16222,-0.97333, 0.16222)
+            //                        -> light zAxis (0.16222,-0.57354, 0.80296)
+            //                       camera pos   (50,-50,-100)
+            //                        -> light pos  (50,-106.06602,-35.35534)
+            //   ChickenChasin       camera pos   (0,0,250)
+            //                        -> light pos  (0, 176.77669, 176.77669)
+            //                        -> light zAxis (0, 0.70711, 0.70711)
+            //
+            // The orientation therefore differs PER MOVIE, which is why a single
+            // hardcoded transform could not work: the old constant here was
+            // measured off `estate` and had a Y component of -0.0015, so it could
+            // never light an up-facing surface at all. ChickenChasin's runtime
+            // terrain is exactly that case and rendered unlit.
+            //
+            // Rotation by -45 deg about world X, applied to every row (the three
+            // basis vectors and the translation):
+            //     y' = (y + z) * cos45      z' = (z - y) * cos45
+            const C: f32 = std::f32::consts::FRAC_1_SQRT_2;
+            let cam = self.scene.nodes.iter()
+                .find(|n| n.node_type == W3dNodeType::View)
+                .map(|n| n.transform);
+            let mut t = match cam {
+                Some(c) => c,
+                None => {
+                    // No camera to derive from — keep an identity-ish frame.
+                    let mut d = [0.0f32; 16];
+                    d[0] = 1.0; d[5] = 1.0; d[10] = 1.0; d[15] = 1.0;
+                    d
+                }
+            };
+            for row in 0..4 {
+                let y = t[row * 4 + 1];
+                let z = t[row * 4 + 2];
+                t[row * 4 + 1] = (y + z) * C;
+                t[row * 4 + 2] = (z - y) * C;
+            }
             t[15] = 1.0;
             self.scene.nodes.push(W3dNode {
-                name: Symbol::from_str(&"UIDirectional".to_string()),
+                name: Symbol::builtin(BuiltInSymbol::UIDirectional),
                 node_type: W3dNodeType::Light,
                 parent_name: Symbol::from_str(&"World".to_string()),
                 transform: t,
@@ -238,7 +293,7 @@ impl W3dFileParser {
     /// R0 is recorded in `scene.model_root_com` so the renderer strips precisely
     /// the matrix composed here and the two sides cannot drift apart.
     fn apply_root_com_to_model_nodes(&mut self) {
-        let mut fixups: Vec<(usize, [f32; 16], Option<Symbol>)> = Vec::new();
+        let mut fixups: Vec<(usize, [f32; 16], Option<Symbol>, bool)> = Vec::new();
 
         for (i, node) in self.scene.nodes.iter().enumerate() {
             if node.node_type != W3dNodeType::Model { continue; }
@@ -251,30 +306,63 @@ impl W3dFileParser {
                         || s.name == node.name)
             }) else { continue };
 
-            // A member may hold the rig with NO motion at all: AreaZero keeps each
-            // robot in its own cast member and every clip in a member of its own,
-            // then clones both into the level at runtime. Frame 0 of "no motion" is
-            // the skeleton's REST pose, so that is what Director folds — and it has
-            // to, or `member("RobotGun").model("RobotGun").getWorldTransform()` (the
-            // transform the game copies onto every robot it spawns) comes back
-            // without the biped COM while the renderer still strips it. The robots
-            // then aim correctly and render 90 degrees off, because a 3ds-Max biped
-            // root sits at +90 about Z.
+            // Director folds ONLY when the reference motion is in the SAME cast
+            // member as the rig. Measured with `put` in real Director 11.5:
+            //
+            //   FOLDED     AFR      member(5).model("player")     (0, 0, -90)
+            //              Rifleman "enemy" source node           (0, 0, -90)
+            //   NOT FOLDED TRECH    member("mech").model("mech")  (0, 0,   0)
+            //              AreaZero member("RobotGun")...         (0, 0,   0)
+            //              Backlot  member("onlyguy")...          (0, 0,   0)
+            //
+            // and the file structure separates the two exactly: the folded rigs
+            // carry their own motion (member5.w3d has SKELETON "player" 31 +
+            // MOTION "player" 31; Internal_5_enemy.w3d has SKELETON/MOTION "enemy"
+            // 36), while the unfolded ones keep every clip in a member of its own
+            // and clone it in at runtime (TRECH's mech.w3d has no motion at all,
+            // the clips are in MSQMech.w3d; AreaZero's 149_Punch.w3d likewise,
+            // clips in 151_PunchMelee1_Animation.w3d). Phosphor alpha 4 and
+            // Rasterwerks beta 2 are both in the folded class, which is why they
+            // are unaffected. `SKELETON-MODIFIER` was the rival discriminator and
+            // is refuted: Rifleman's enemy folds without one.
+            //
+            // So this is `import_root_com_motion` answering Some — an idle clip
+            // for this skeleton, else a motion named like the skeleton carrying a
+            // track for its root bone. NOT "the member holds any motion": every
+            // rigged member also ships a one-track "Bip01 Footsteps-Key" that
+            // matches nothing.
+            //
+            // The old behaviour folded the skeleton's REST pose when this answered
+            // None. That branch was added on a consistency argument rather than a
+            // measurement — to cancel a strip Director does not perform — and it
+            // is what put a spurious Rz(-90) on TRECH's mech (drawn 180 deg about
+            // the vertical), on Backlot's charachterBiped (hair off the head) and
+            // on every clip-less AreaZero rig. See
+            // `docs/w3d-clone-com-refold-handoff.md` §2c and
+            // `docs/backlot-character-facing.md`.
+            // `None` = the member holds no clip for this rig, so r0 comes from the
+            // skeleton's REST pose. Recorded either way (the strip's clone path
+            // needs it); folded into the node only when it is Some.
             let reference = super::skeleton::import_root_com_motion(&self.scene, skel);
+            let fold = reference.is_some();
 
             let posed = super::skeleton::build_bone_matrices(skel, reference, 0.0);
             let Some(r0) = posed.first() else { continue };
             if is_identity_mat4(r0) { continue; }
 
-            fixups.push((i, *r0, reference.map(|m| m.name)));
+            fixups.push((i, *r0, reference.map(|m| m.name), fold));
         }
 
-        for (i, r0, reference) in fixups {
+        for (i, r0, reference, fold) in fixups {
             let name = self.scene.nodes[i].name.to_ascii_lowercase();
-            log(&format!("  Root COM folded into model node {:?} (from {})",
+            log(&format!("  Root COM {} model node {:?} (from {})",
+                if fold { "folded into" } else { "recorded for (NOT folded into)" },
                 self.scene.nodes[i].name,
                 reference.map(|n| n.as_str()).unwrap_or("the rest pose")));
-            self.scene.nodes[i].transform = mat4_mul(&self.scene.nodes[i].transform, &r0);
+            if fold {
+                self.scene.nodes[i].transform = mat4_mul(&self.scene.nodes[i].transform, &r0);
+                self.scene.model_com_folded.insert(name.clone());
+            }
             self.scene.model_root_com.insert(name, r0);
         }
     }
@@ -477,20 +565,54 @@ impl W3dFileParser {
         let mut clones: Vec<W3dLight> = Vec::new();
         for node in self.scene.nodes.iter() {
             if node.node_type != W3dNodeType::Light { continue; }
-            if node.resource_name.is_empty() || node.resource_name == node.name {
-                continue;
-            }
             if self.scene.lights.iter().any(|l| l.name == node.name) {
                 continue;
             }
-            if let Some(res) = self.scene.lights.iter()
-                .find(|l| l.name == node.resource_name)
-            {
-                log(&format!(
-                    "  LightNode \"{}\" instantiates resource \"{}\" — binding a copy under the node name",
-                    node.name, node.resource_name
-                ));
-                clones.push(W3dLight { name: node.name.clone(), ..res.clone() });
+            let resource = self.scene.lights.iter().find(|l| {
+                l.name == node.resource_name
+                    || (node.resource_name.is_empty() && l.name == node.name)
+            });
+            match resource {
+                Some(res) => {
+                    log(&format!(
+                        "  LightNode \"{}\" instantiates resource \"{}\" — binding a copy under the node name",
+                        node.name, node.resource_name
+                    ));
+                    clones.push(W3dLight { name: node.name.clone(), ..res.clone() });
+                }
+                None => {
+                    // A light NODE whose LIGHT_RESOURCE block is not in this stream
+                    // still lights the scene in Director — the node IS the light, and
+                    // the missing resource just means it keeps the defaults.
+                    //
+                    // Burnin' Rubber 3 ships every menu member that way. `Menu_6_Main`
+                    // as LOADED is the v1 block set (Material v1 / Model Node v1 / Light
+                    // Node v1) and carries ONE light node, "Direct01", naming a resource
+                    // that no block in the stream defines; the Logo member is the same
+                    // with "Omni02" — which `SetupLogo` then drives directly
+                    // (`SetLight Logo [#name: "Omni02", #color: rgb(255,255,255)]` and
+                    // `AddToMimic Logo [#object: "Omni02", #target: "3"]`). Dropping the
+                    // unbound node left EVERY menu member lit by nothing but the black
+                    // UIAmbient and dirplayer's own injected UIDirectional, so the 3D
+                    // logo rendered dim and `light("Omni02")` addressed nothing.
+                    //
+                    // Defaults are Director's for a light with no authored resource,
+                    // as re-serialised by the W3D exporter for exactly these nodes:
+                    // a POINT light, colour 0.75 grey, constant attenuation, enabled.
+                    log(&format!(
+                        "  LightNode \"{}\" has no LIGHT_RESOURCE block (resource \"{}\") — creating a default point light",
+                        node.name, node.resource_name
+                    ));
+                    clones.push(W3dLight {
+                        name: node.name.clone(),
+                        light_type: W3dLightType::Point,
+                        color: [0.75, 0.75, 0.75],
+                        attenuation: [1.0, 0.0, 0.0],
+                        spot_angle: 90.0,
+                        enabled: true,
+                        ..Default::default()
+                    });
+                }
             }
         }
         self.scene.lights.extend(clones);
@@ -551,9 +673,38 @@ impl W3dFileParser {
             node.fov = r.read_f32()?;
         }
 
+        // IFXView.h `EIFXProjectionMode`: 0 = IFX_VIEW_PERSPECTIVE_PROJECTION,
+        // 1 = IFX_VIEW_ORTHOGRAPHIC_PROJECTION. The mode rides in bit 0 of the
+        // view attributes word — Fly Like A Bird's bird member is the only view
+        // in its three .w3d files with attrs 0x9 instead of 0x8, and Director
+        // reports exactly that camera as `#orthographic`.
+        node.projection_ortho = (view_attrs & 0x1) != 0;
+
+        // `orthoHeight` follows the viewport rect: 4 f32 rect, 11 words, the
+        // target node name, one word, then the height. Measured against the same
+        // member, whose Director `camera.orthoHeight` is 530.7867 — the exact f32
+        // stored at that position, and the only occurrence of that value anywhere
+        // in the file. Every field is guarded, so a shorter or differently-shaped
+        // block simply leaves `ortho_height` at 0 and the renderer falls back to
+        // Director's documented 200.0 default.
+        if r.remaining() >= 16 {
+            let _rect = [r.read_f32()?, r.read_f32()?, r.read_f32()?, r.read_f32()?];
+            if r.remaining() >= 44 {
+                for _ in 0..11 { let _ = r.read_u32()?; }
+                if r.remaining() >= 2 {
+                    let _target = r.read_ifx_string()?;
+                    if r.remaining() >= 8 {
+                        let _ = r.read_u32()?;
+                        node.ortho_height = r.read_f32()?;
+                    }
+                }
+            }
+        }
+
         log(&format!(
-            "  ViewNode: \"{}\" parent=\"{}\" viewAttrs=0x{:X} near={} far={} fov={}\n    pos: ({:.3},{:.3},{:.3})",
+            "  ViewNode: \"{}\" parent=\"{}\" viewAttrs=0x{:X} near={} far={} fov={} ortho={} orthoH={}\n    pos: ({:.3},{:.3},{:.3})",
             node.name, node.parent_name, view_attrs, node.near_plane, node.far_plane, node.fov,
+            node.projection_ortho, node.ortho_height,
             transform[12], transform[13], transform[14],
         ));
 
@@ -896,6 +1047,25 @@ impl W3dFileParser {
             let qy = r.read_f32()?;
             let qz = r.read_f32()?;
             let bone_attrs = r.read_u32()?;
+
+            // Attribute-gated optional fields
+            // A bone record is NOT fixed-size:
+            //   0x40           -> bone links: numLinks (u32) + linkLength (f32)
+            //   0x80           -> joint front/back: 4 + 4 floats
+            //   (a & 0x09)==9  -> X rotation constraint: min/max (2 f32)
+            //   (a & 0x12)==18 -> Y rotation constraint: min/max (2 f32)
+            //   (a & 0x24)==36 -> Z rotation constraint: min/max (2 f32)
+            // Skipping these keeps the stream aligned; the values themselves are
+            // IK/constraint data the renderer does not use. Without this, any rig
+            // with a constrained bone (AreaZero's RobotFrog constrains 6) aborted
+            // mid-block and the member ended up with NO skeleton at all — the
+            // mesh had skin weights but nothing to pose them, so the model could
+            // never animate.
+            if bone_attrs & 0x40 != 0 { r.skip(8); }
+            if bone_attrs & 0x80 != 0 { r.skip(32); }
+            if bone_attrs & 0x09 == 0x09 { r.skip(8); }
+            if bone_attrs & 0x12 == 0x12 { r.skip(8); }
+            if bone_attrs & 0x24 == 0x24 { r.skip(8); }
 
             skeleton.bones.push(W3dBone {
                 name: bone_name,

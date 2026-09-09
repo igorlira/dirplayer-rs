@@ -314,16 +314,29 @@ impl Scope {
     /// bytecode ran a call opcode without a preceding `pusharglist`. Callers
     /// report that as a stack error rather than guessing.
     pub fn pop_call_args(&mut self) -> Option<(Vec<DatumRef>, bool)> {
-        let (count, no_ret) = match self.stack.pop_value()? {
+        self.pop_call_args_diagnosed().ok()
+    }
+
+    /// As `pop_call_args`, but distinguishes the two ways it can fail.
+    ///
+    /// These were previously collapsed into one `None` and reported as
+    /// "expected arg marker", which is actively misleading when the real fault
+    /// is a SHORT STACK: the marker is present and correct, but fewer values
+    /// sit beneath it than it claims. That reads as "the compiler emitted a
+    /// call without pusharglist" when it actually means an earlier opcode in
+    /// the same handler failed to push its result.
+    pub fn pop_call_args_diagnosed(&mut self) -> Result<(Vec<DatumRef>, bool), CallArgsError> {
+        let top = self.stack.pop_value().ok_or(CallArgsError::EmptyStack)?;
+        let (count, no_ret) = match top {
             StackDatum::ArgMarker { count, no_ret } => (count as usize, no_ret),
             // Not a marker: put nothing back — the caller errors out. Restoring
             // it would need a push and the frame is being torn down anyway.
-            _ => return None,
+            _ => return Err(CallArgsError::NotAMarker),
         };
         if self.stack.len() < count {
-            return None;
+            return Err(CallArgsError::ShortStack { want: count, have: self.stack.len() });
         }
-        Some((self.pop_n(count), no_ret))
+        Ok((self.pop_n(count), no_ret))
     }
 
     pub fn pop_n(&mut self, n: usize) -> Vec<DatumRef> {
@@ -426,5 +439,33 @@ impl Scope {
         self.stack.clear();
         self.passed = false;
         self.stop_requested = false;
+    }
+}
+
+
+/// Why `pop_call_args` could not assemble a call's arguments.
+#[derive(Debug, Clone, Copy)]
+pub enum CallArgsError {
+    /// The stack was empty where a marker was expected.
+    EmptyStack,
+    /// The top of stack was a value, not an `ArgMarker` — a call opcode ran
+    /// without a preceding `pusharglist`.
+    NotAMarker,
+    /// The marker was present and well-formed, but fewer values sit beneath it
+    /// than it declares. An earlier opcode in this handler did not push.
+    ShortStack { want: usize, have: usize },
+}
+
+impl std::fmt::Display for CallArgsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CallArgsError::EmptyStack => write!(f, "stack empty, expected an arg marker"),
+            CallArgsError::NotAMarker => write!(f, "top of stack is not an arg marker (call opcode without pusharglist)"),
+            CallArgsError::ShortStack { want, have } => write!(
+                f,
+                "arg marker declares {} argument(s) but only {} value(s) are on the stack                  — an earlier opcode in this handler did not push its result",
+                want, have
+            ),
+        }
     }
 }

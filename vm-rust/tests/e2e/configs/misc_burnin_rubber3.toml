@@ -1,0 +1,34 @@
+[movie]
+# Xform / Shockwave.com "Burnin' Rubber 3" (2009) — Shockwave 3D + Havok, D11.
+# `BR3Preloader.dcr` is the shipped entry point; it does nothing but
+# `[PS] Preload Movie` on `_movie.path & "BurninRubber3.dcr"` behind the
+# shockwave.com token check, so the test loads the main movie directly.
+path = "dcr_misc/burnin_rubber3/BurninRubber3.dcr"
+
+# The preloader's "[FS] SHOCKWAVE PROTECTION" behaviour sets the `gSucces`
+# global once validateToken.jsp answers 1, and the main movie's `startMovie`
+# bounces to shockwave.com unless it finds it: `InitGlobals` copies it into
+# `gGame.succes`, and `if gGame.succes = 0 then gotoNetPage(...)`. Seed it the
+# way the preloader would have, since the token server is long gone.
+startup_do = "gSucces = 1"
+
+[external_params]
+# BR3's engine reads `_player.runMode` twice at boot and BOTH readings want
+# "Projector":
+#
+#  * `prepareMovie` runs `reset(#nothing)` for every runMode EXCEPT "Projector".
+#    That is the authoring "start over" path — it calls `ClearCast` over the
+#    Internal, Menu, Shared, Cars and Tracks libs (`member(i).erase()` across
+#    every slot) and then `clearGlobals()`. Under the default "Plugin" it
+#    empties the movie's own casts before frame 1 and throws away `gSucces`.
+#  * `InitGlobals` then sets `gSystem.local = 0` only for "Projector", and
+#    `local = 0` is the path that reads the game's event/data tables out of the
+#    Internal cast's own text members (`OnlineLoad`). `local = 1` instead looks
+#    for a `\Data\LoadingArray.txt` next to the movie, which this build does
+#    not ship.
+_runMode = "Projector"
+
+[test]
+suite = "misc"
+tags = ["3d", "physx"]
+default_timeout = 300.0

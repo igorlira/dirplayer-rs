@@ -1,0 +1,18 @@
+[movie]
+path = "dcr_misc/agent_freeride2/agent_freeride2.dcr"
+
+# The Miniclip shell passes its whole game/session descriptor in sw2.
+[external_params]
+sw2 = "mc_gamename=Agent Freeride 2&mc_hsname=2999&mc_scoreistime=0&mc_lowscore=0&mc_negativescore=0&mc_width=608&mc_height=455"
+# Frame 1 ("Miniclip First Frame") hardcodes gConfiguration = #release_web, so
+# the domain gate always runs. Without the Miniclip shell there is no
+# MiniclipGameManager object, so the ONLY way past it is validDomainSBS():
+# `the moviePath` must contain "www.silentbaystudios.com" and the "src" param
+# must not start with "http:" (so `src` is deliberately not set here).
+# Anything else falls into go(85) = "Frame Invalid Domain", which loops forever.
+_moviePath = "http://www.silentbaystudios.com/agent_freeride2.dcr"
+
+[test]
+suite = "misc"
+tags = ["3d", "physx", "flash"]
+default_timeout = 300.0

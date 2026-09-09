@@ -3,3 +3,4 @@ path = "dcr_havok_demo/Properties.dcr"
 
 [test]
 suite = "havok_demo"
+tags = ["3d", "havok"]

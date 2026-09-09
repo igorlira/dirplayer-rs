@@ -54,6 +54,7 @@ type TVmCallbacks = {
   onChannelDisplayNamesChanged: (names: Record<number, string>) => void,
   onExternalEvent?: (event: string) => void,
   onFlashMemberLoaded?: (spriteNum: number, castLib: number, castMember: number, swfData: Uint8Array, width: number, height: number, pausedAtStart: boolean, assertedFrame: number) => void,
+  onFlashMemberWarm?: (spriteNum: number, castLib: number, castMember: number, swfData: Uint8Array, width: number, height: number, pausedAtStart: boolean) => void,
   onFlashMemberUnloaded?: (spriteNum: number) => void,
   onFlashResetAll?: () => void,
   onStageSizeChanged?: (width: number, height: number, center: boolean) => void,
