@@ -25,6 +25,51 @@ use crate::{
 
 pub struct CastMemberRefHandlers {}
 
+/// Director 11.5 `member.size`: "size in memory, in bytes, of a cast member"
+/// (read-only). A Flash preloader that has not loaded yet is distinguished
+/// with `member(x).size < 1000`. Never raise — return 0/1 if unknown.
+fn member_media_size_bytes(player: &DirPlayer, member_ref: &CastMemberRef) -> i32 {
+    let type_id = match player.movie.cast_manager.find_member_by_ref(member_ref) {
+        Some(m) => m.member_type.member_type_id(),
+        None => return 0,
+    };
+    if type_id == CastMemberTypeId::Script {
+        return player
+            .movie
+            .cast_manager
+            .get_script_by_ref(member_ref)
+            .map(|s| {
+                s.chunk
+                    .handlers
+                    .iter()
+                    .map(|h| h.bytecode_array.len())
+                    .sum::<usize>()
+                    .max(1) as i32
+            })
+            .unwrap_or(1);
+    }
+    let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) else {
+        return 0;
+    };
+    match &member.member_type {
+        CastMemberType::Flash(f) => f.data.len() as i32,
+        CastMemberType::Text(t) => t
+            .text
+            .len()
+            .max(t.html_source.len())
+            .max(t.rtf_source.len())
+            .max(1) as i32,
+        CastMemberType::Field(f) => f.text.len().max(1) as i32,
+        CastMemberType::Bitmap(b) => player
+            .bitmap_manager
+            .get_bitmap(b.image_ref)
+            .map(|bm| bm.data.len().max(1) as i32)
+            .unwrap_or(1),
+        CastMemberType::Sound(s) => (s.sound.sample_count() as i32).max(1),
+        _ => 1,
+    }
+}
+
 fn is_3d_member(datum: &DatumRef) -> Result<bool, ScriptError> {
     reserve_player_mut(|player| {
         let r = match player.get_datum(datum) {
@@ -792,7 +837,7 @@ impl CastMemberRefHandlers {
             Some(BuiltInSymbol::MemberNum) => Ok(Datum::Int(-1)),
             Some(BuiltInSymbol::Text | BuiltInSymbol::Comments) => Ok(Datum::String("".to_string())),
             Some(BuiltInSymbol::Loaded | BuiltInSymbol::MediaReady) => Ok(Datum::Int(1)),
-            Some(BuiltInSymbol::Width | BuiltInSymbol::Height | BuiltInSymbol::Rect | BuiltInSymbol::Duration) => Ok(Datum::Void),
+            Some(BuiltInSymbol::Width | BuiltInSymbol::Height | BuiltInSymbol::Rect | BuiltInSymbol::Duration | BuiltInSymbol::Size) => Ok(Datum::Void),
             Some(BuiltInSymbol::Image) => Ok(Datum::Void),
             Some(BuiltInSymbol::RegPoint) => Ok(Datum::Point([0.0, 0.0], 0)),
             _ => Err(ScriptError::new(format!(
@@ -1118,11 +1163,10 @@ impl CastMemberRefHandlers {
                         )),
                         // `member.size` — "size in memory, in bytes, of a cast
                         // member. Read-only" (Director 11.5 Scripting Dictionary).
-                        // For a Flash member this is its SWF byte count. Neopets'
-                        // DGS `showPreLoader` gates on `member(x).size < 1000` to
-                        // detect a missing/empty preloader after linking it via
-                        // `x.fileName = <url>`, so this must reflect the bytes the
-                        // fileName setter loaded from the preload cache.
+                        // For a Flash member this is its SWF byte count, including
+                        // after `fileName` is set and the bytes are loaded from
+                        // the preload cache. An empty buffer is how
+                        // `member(x).size < 1000` detects an unlinked preloader.
                         Some(BuiltInSymbol::Size) => Ok(Datum::Int(flash.data.len() as i32)),
                         _ => Ok(Datum::Void),
                     }
@@ -1637,6 +1681,9 @@ impl CastMemberRefHandlers {
             Some(BuiltInSymbol::Comments) => Ok(Datum::String(comments)),
             Some(BuiltInSymbol::Ilk) => Ok(Datum::Symbol(Symbol::from_str("member"))),
             Some(BuiltInSymbol::Member) => Ok(Datum::CastMember(cast_member_ref.clone())),
+            Some(BuiltInSymbol::Size) => {
+                Ok(Datum::Int(member_media_size_bytes(player, cast_member_ref)))
+            }
             _ => Self::get_member_type_prop(player, cast_member_ref, &member_type, prop),
         }
     }
@@ -1751,5 +1798,193 @@ impl CastMemberRefHandlers {
             JsApi::dispatch_cast_member_changed(cast_member_ref.to_owned());
         }
         result
+    }
+}
+
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod member_size_tests {
+    use super::*;
+    use crate::player::{
+        cast_lib::{cast_member_ref, CastLib, CastLibState},
+        cast_member::{FieldMember, FlashMember},
+        symbols::symbol_table::init_symbol_table,
+        testing::{run_test, TestPlayer},
+    };
+    use fxhash::FxHashMap;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    fn expect_int(d: &Datum, n: i32) {
+        match d {
+            Datum::Int(v) => assert_eq!(*v, n),
+            _ => panic!("expected Int({n}), got {}", d.type_str()),
+        }
+    }
+
+    fn empty_cast(number: u32) -> CastLib {
+        CastLib {
+            name: String::new(),
+            file_name: String::new(),
+            number,
+            is_external: false,
+            state: CastLibState::Loaded,
+            lctx: None,
+            members: FxHashMap::default(),
+            scripts: FxHashMap::default(),
+            name_symbols: Vec::new(),
+            preload_mode: 0,
+            capital_x: false,
+            dir_version: 0,
+            palette_id_offset: 0,
+            name_index: RefCell::new(None),
+            font_table: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn a_missing_member_reports_size_void_to_lingo() {
+        init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            reserve_player_mut(|player| {
+                let r = cast_member_ref(1, 1);
+                let size = CastMemberRefHandlers::get_prop(player, &r, Symbol::from_str("size"))
+                    .unwrap();
+                assert!(
+                    matches!(size, Datum::Void),
+                    "expected Void, got {}",
+                    size.type_str()
+                );
+                assert_eq!(member_media_size_bytes(player, &r), 0);
+            });
+        });
+    }
+
+    #[test]
+    fn a_flash_member_size_is_its_swf_byte_length() {
+        init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            reserve_player_mut(|player| {
+                let mut cast = empty_cast(1);
+                let data = vec![0u8; 2_500];
+                cast.members.insert(
+                    1,
+                    CastMember::new(
+                        1,
+                        CastMemberType::Flash(FlashMember {
+                            data: data.clone(),
+                            reg_point: (0, 0),
+                            flash_info: None,
+                        }),
+                    ),
+                );
+                player.movie.cast_manager.casts.push(cast);
+                let r = cast_member_ref(1, 1);
+                let size = CastMemberRefHandlers::get_prop(player, &r, Symbol::from_str("size"))
+                    .unwrap();
+                expect_int(&size, 2_500);
+            });
+        });
+    }
+
+    #[test]
+    fn an_empty_flash_member_size_is_zero() {
+        // `member(x).size < 1000` is how a preloader is recognised as unlinked.
+        init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            reserve_player_mut(|player| {
+                let mut cast = empty_cast(1);
+                cast.members.insert(
+                    1,
+                    CastMember::new(
+                        1,
+                        CastMemberType::Flash(FlashMember {
+                            data: vec![],
+                            reg_point: (0, 0),
+                            flash_info: None,
+                        }),
+                    ),
+                );
+                player.movie.cast_manager.casts.push(cast);
+                let r = cast_member_ref(1, 1);
+                let size = CastMemberRefHandlers::get_prop(player, &r, Symbol::from_str("size"))
+                    .unwrap();
+                expect_int(&size, 0);
+            });
+        });
+    }
+
+    #[test]
+    fn a_field_member_size_is_at_least_one() {
+        init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            reserve_player_mut(|player| {
+                let mut cast = empty_cast(1);
+                let mut empty = FieldMember::new();
+                empty.text = String::new();
+                cast.members.insert(
+                    1,
+                    CastMember::new(1, CastMemberType::Field(empty)),
+                );
+                let mut filled = FieldMember::new();
+                filled.text = "hello".to_string();
+                cast.members.insert(
+                    2,
+                    CastMember::new(2, CastMemberType::Field(filled)),
+                );
+                player.movie.cast_manager.casts.push(cast);
+                expect_int(
+                    &CastMemberRefHandlers::get_prop(
+                        player,
+                        &cast_member_ref(1, 1),
+                        Symbol::from_str("size")
+                    )
+                    .unwrap(),
+                    1
+                );
+                expect_int(
+                    &CastMemberRefHandlers::get_prop(
+                        player,
+                        &cast_member_ref(1, 2),
+                        Symbol::from_str("size")
+                    )
+                    .unwrap(),
+                    5
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn a_text_member_size_is_the_longest_source() {
+        init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            reserve_player_mut(|player| {
+                let mut cast = empty_cast(1);
+                let mut text = TextMember::new();
+                text.text = "ab".to_string();
+                text.html_source = "<p>abcd</p>".to_string();
+                text.rtf_source = String::new();
+                cast.members.insert(
+                    1,
+                    CastMember::new(1, CastMemberType::Text(text)),
+                );
+                player.movie.cast_manager.casts.push(cast);
+                expect_int(
+                    &CastMemberRefHandlers::get_prop(
+                        player,
+                        &cast_member_ref(1, 1),
+                        Symbol::from_str("size")
+                    )
+                    .unwrap(),
+                    "<p>abcd</p>".len() as i32
+                );
+            });
+        });
     }
 }
