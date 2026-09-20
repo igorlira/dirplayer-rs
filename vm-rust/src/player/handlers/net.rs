@@ -34,7 +34,12 @@ impl NetHandlers {
                     if in_progress {
                         shared.update_task_state(
                             id,
-                            NetTaskState { result: Some(Err(4242)), bytes_loaded: 0, bytes_total: 0 },
+                            NetTaskState {
+                                result: Some(Err(4242)),
+                                bytes_loaded: 0,
+                                bytes_total: 0,
+                                lingo_saw_mid_progress: false,
+                            },
                         );
                     }
                 }
@@ -68,7 +73,7 @@ impl NetHandlers {
     pub fn preload_net_thing(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let url = player.get_datum(&args[0]).string_value()?;
-            let task_id = player.net_manager.preload_net_thing(url);
+            let task_id = player.net_manager.preload_net_thing(url.clone());
             Ok(player.alloc_datum(Datum::Int(task_id as i32)))
         })
     }
@@ -176,7 +181,20 @@ impl NetHandlers {
                         // `percentloaded = bytesloaded / bytestotal * 100`.
                         // Accurate mid-load % still needs Content-Length (which
                         // the proxy now preserves); this is the graceful floor.
-                        let total = task_state.bytes_total.max(task_state.bytes_loaded);
+                        let total = crate::player::net_progress::in_progress_bytes_total(
+                            task_state.bytes_loaded,
+                            task_state.bytes_total,
+                        );
+                        if crate::player::net_progress::is_true_mid_file_progress(
+                            task_state.bytes_loaded,
+                            task_state.bytes_total,
+                        ) {
+                            if let Some(mut shared) = player.net_manager.shared_state.try_lock() {
+                                if let Some(s) = shared.task_states.get_mut(&task_id) {
+                                    s.lingo_saw_mid_progress = true;
+                                }
+                            }
+                        }
                         ("InProgress", "", task_state.bytes_loaded as i32, total as i32)
                     } else {
                         ("Connecting", "", 0i32, 0i32)

@@ -39,9 +39,9 @@ impl NetManagerSharedState {
     }
 
     pub async fn fulfill_task(&mut self, id: u32, result: NetResult) {
-        let (bytes_loaded, bytes_total) = self.task_states.get(&id)
-            .map(|s| (s.bytes_loaded, s.bytes_total))
-            .unwrap_or((0, 0));
+        let (bytes_loaded, bytes_total, saw_mid) = self.task_states.get(&id)
+            .map(|s| (s.bytes_loaded, s.bytes_total, s.lingo_saw_mid_progress))
+            .unwrap_or((0, 0, false));
         let final_bytes = match &result {
             Ok(bytes) => bytes.len() as u64,
             Err(_) => bytes_loaded,
@@ -50,6 +50,7 @@ impl NetManagerSharedState {
             result: Some(result),
             bytes_loaded: final_bytes,
             bytes_total: if bytes_total > 0 { bytes_total } else { final_bytes },
+            lingo_saw_mid_progress: saw_mid,
         };
         self.task_states.insert(id, new_state);
 
@@ -255,7 +256,7 @@ impl NetManager {
         // Set task initial state
         {
             let mut shared_shared = self.shared_state.try_lock().unwrap();
-            shared_shared.update_task_state(task_id, NetTaskState { result: None, bytes_loaded: 0, bytes_total: 0 });
+            shared_shared.update_task_state(task_id, NetTaskState { result: None, bytes_loaded: 0, bytes_total: 0, lingo_saw_mid_progress: false });
         }
 
         // Push the task
@@ -309,6 +310,7 @@ impl NetManager {
                     result: Some(result),
                     bytes_loaded: final_bytes,
                     bytes_total: final_bytes,
+                    lingo_saw_mid_progress: false,
                 };
                 shared_state.task_states.insert(task_id, new_state);
             }
@@ -363,7 +365,7 @@ impl NetManager {
         // Set task initial state
         {
             let mut shared_shared = self.shared_state.try_lock().unwrap();
-            shared_shared.update_task_state(task_id, NetTaskState { result: None, bytes_loaded: 0, bytes_total: 0 });
+            shared_shared.update_task_state(task_id, NetTaskState { result: None, bytes_loaded: 0, bytes_total: 0, lingo_saw_mid_progress: false });
         }
 
         // Push the task and execute it

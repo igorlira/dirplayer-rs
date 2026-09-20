@@ -47,3 +47,5 @@ xtras/*/target/
 /dist-polyfill
 
 /test-results
+/playwright-report
+/.tmp

@@ -10,6 +10,29 @@
 // to the extension root by Vite). Modeled after Ruffle's
 // `web/packages/extension/src/background.ts` strategy.
 
+// Copied locally on purpose. Importing `src/services/base64Binary` /
+// `corsProxyPolicy` from both this service worker and the isolated content
+// script makes Vite emit a shared chunk; Chrome content scripts cannot
+// load that chunk, so the player never mounts and the page shows
+// "This plugin is not supported".
+const B64_CHUNK = 0x8000;
+function bytesToBase64(bytes: Uint8Array): string {
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += B64_CHUNK) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + B64_CHUNK) as unknown as number[]);
+  }
+  return btoa(bin);
+}
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function corsProxyContentLength(header: string | null | undefined, bodyByteLength: number): string {
+  return header ? header : String(bodyByteLength);
+}
+
 const POLYFILL_SCRIPT_ID = 'dirplayer-shockwave-plugin-polyfill';
 const POLYFILL_SCRIPT_FILE = 'dirplayer-shockwave-polyfill.js';
 const PREINIT_SCRIPT_ID = 'dirplayer-pre-init';
@@ -112,8 +135,14 @@ async function ensureRegistered(): Promise<void> {
 // `host_permissions` does NOT let it read cross-origin responses — but the
 // service worker (with host_permissions <all_urls>) can. Neopets' DGS loads its
 // game SWF (ml_maraqua.swf) and other assets from cross-origin neopets hosts;
-// flashPlayerManager's fetch shim routes those here. Bytes are base64-framed
-// because chrome.runtime messaging JSON-serializes payloads.
+// flashPlayerManager's fetch shim routes those here.
+//
+// Prefer `chrome.runtime.connect` so the body is forwarded as base64
+// chunks (the VM updates getStreamStatus per ReadableStream chunk).
+// `Port.postMessage` JSON-serializes, so ArrayBuffers arrive empty; the
+// one-shot `sendMessage` fallback also base64-frames the full body.
+const CORS_FETCH_PORT = 'dirplayer-cors-fetch';
+
 interface CorsFetchRequest {
   type: 'dirplayer-cors-fetch';
   url: string;
@@ -122,41 +151,137 @@ interface CorsFetchRequest {
   body?: string; // base64
 }
 
+function corsFetchInit(
+  url: string,
+  method: string | undefined,
+  headers: Record<string, string> | undefined,
+  body: BodyInit | undefined,
+): Promise<Response> {
+  return fetch(url, {
+    method: method || 'GET',
+    headers,
+    body,
+    credentials: 'omit',
+  });
+}
+
 chrome.runtime.onMessage.addListener((msg: CorsFetchRequest, _sender, sendResponse) => {
   if (!msg || msg.type !== 'dirplayer-cors-fetch') return; // not ours — let others handle
   void _sender;
   (async () => {
     try {
-      const body = msg.body
-        ? Uint8Array.from(atob(msg.body), (c) => c.charCodeAt(0))
-        : undefined;
-      const res = await fetch(msg.url, {
-        method: msg.method || 'GET',
-        headers: msg.headers,
-        body,
-        credentials: 'omit',
-      });
+      const body = msg.body ? base64ToBytes(msg.body) : undefined;
+      const res = await corsFetchInit(msg.url, msg.method, msg.headers, body);
       const buf = new Uint8Array(await res.arrayBuffer());
-      let bin = '';
-      const CHUNK = 0x8000;
-      for (let i = 0; i < buf.length; i += CHUNK) {
-        bin += String.fromCharCode.apply(
-          null,
-          buf.subarray(i, i + CHUNK) as unknown as number[],
-        );
-      }
       sendResponse({
         ok: res.ok,
         status: res.status,
         statusText: res.statusText,
         contentType: res.headers.get('content-type') || '',
-        bodyBase64: btoa(bin),
+        contentLength: corsProxyContentLength(
+          res.headers.get('content-length'),
+          buf.byteLength,
+        ),
+        bodyBase64: bytesToBase64(buf),
       });
     } catch (e) {
       sendResponse({ ok: false, status: 0, error: String((e as Error)?.message || e) });
     }
   })();
   return true; // keep the message channel open for the async sendResponse
+});
+
+interface CorsFetchPortRequest {
+  url: string;
+  method?: string;
+  headers?: Record<string, string>;
+  bodyBase64?: string;
+}
+
+async function streamCorsFetchOnPort(
+  port: chrome.runtime.Port,
+  msg: CorsFetchPortRequest,
+): Promise<void> {
+  const res = await corsFetchInit(
+    msg.url,
+    msg.method,
+    msg.headers,
+    msg.bodyBase64 ? base64ToBytes(msg.bodyBase64) : undefined,
+  );
+  port.postMessage({
+    kind: 'meta',
+    ok: res.ok,
+    status: res.status,
+    statusText: res.statusText,
+    contentType: res.headers.get('content-type') || '',
+    contentLength: res.headers.get('content-length') || '',
+  });
+
+  let disconnected = false;
+  const onDisconnect = () => {
+    disconnected = true;
+  };
+  port.onDisconnect.addListener(onDisconnect);
+
+  try {
+    if (!res.body) {
+      const buf = await res.arrayBuffer();
+      if (!disconnected && buf.byteLength > 0) {
+        port.postMessage({
+          kind: 'chunk',
+          dataBase64: bytesToBase64(new Uint8Array(buf)),
+        });
+      }
+    } else {
+      const reader = res.body.getReader();
+      try {
+        while (!disconnected) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (disconnected) break;
+          if (value && value.byteLength > 0) {
+            port.postMessage({
+              kind: 'chunk',
+              dataBase64: bytesToBase64(value),
+            });
+          }
+        }
+      } finally {
+        try {
+          await reader.cancel();
+        } catch {
+          /* already closed */
+        }
+      }
+    }
+    if (!disconnected) {
+      port.postMessage({ kind: 'done' });
+    }
+  } catch (e) {
+    if (!disconnected) {
+      port.postMessage({
+        kind: 'error',
+        error: String((e as Error)?.message || e),
+      });
+    }
+  }
+}
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== CORS_FETCH_PORT) return;
+  port.onMessage.addListener((msg: CorsFetchPortRequest) => {
+    if (!msg || !msg.url) return;
+    void streamCorsFetchOnPort(port, msg).catch((e) => {
+      try {
+        port.postMessage({
+          kind: 'error',
+          error: String((e as Error)?.message || e),
+        });
+      } catch {
+        /* port already gone */
+      }
+    });
+  });
 });
 
 // CORS relaxation for Ruffle's MAIN-world SWF loads. Ruffle runs in the page's

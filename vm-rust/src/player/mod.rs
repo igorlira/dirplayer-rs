@@ -37,6 +37,7 @@ pub mod keyboard_map;
 pub mod mcp;
 pub mod movie;
 pub mod net_manager;
+pub mod net_progress;
 pub mod net_task;
 pub mod profiling;
 pub mod scope;
@@ -548,8 +549,8 @@ pub struct DirPlayer {
     /// True while `go(frame, movie)` is blocked waiting for the target movie's
     /// fetch. `maybe_hold_dcr_for_preloader` (the Neopets nested-.dcr hold)
     /// checks it and stands down: Director's `go()` loads the movie NOW — the
-    /// artificial 3s "still streaming" window is for preloadNetThing-style
-    /// game loads, not for a navigation the handler is synchronously waiting on.
+    /// mid-file `InProgress` window is for preloadNetThing-style game loads,
+    /// not for a navigation the handler is synchronously waiting on.
     pub goto_wait_active: bool,
     /// Set by an EAGER `go(frame, movie)` mount (the movie was swapped while a
     /// Lingo handler was still executing). The frame loop runs

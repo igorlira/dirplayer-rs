@@ -75,6 +75,7 @@
     "e2e-test-native": "node ./scripts/run-native-tests.mjs",
     "e2e-test-browser": "node ./scripts/run-browser-tests.mjs",
     "e2e-test-browser-debug": "node ./scripts/run-browser-tests.mjs --debug",
+    "e2e-test-extension": "node ./scripts/run-extension-e2e.mjs",
     "e2e-update-native": "node ./scripts/update-test-snapshots.mjs",
     "e2e-update-browser": "node ./scripts/run-browser-tests.mjs --update",
     "test": "react-scripts test",

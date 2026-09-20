@@ -12,6 +12,9 @@ use web_sys::Response;
 use percent_encoding::percent_decode_str;
 
 use crate::player::net_manager::NetManagerSharedState;
+use crate::player::net_progress::{
+    should_hold_nested_dcr, synthetic_mid_file_progress,
+};
 
 pub type NetResult = Result<Vec<u8>, i32>;
 
@@ -23,13 +26,16 @@ pub enum StreamStatusPhase {
     Final,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct NetTaskState {
     pub result: Option<NetResult>,
     /// Bytes downloaded so far (updated progressively during streaming)
     pub bytes_loaded: u64,
     /// Total bytes expected (from Content-Length header, 0 if unknown)
     pub bytes_total: u64,
+    /// Set when Lingo `getStreamStatus` has returned a true mid-file
+    /// `InProgress` (`0 < bytesSoFar < bytesTotal`) for this task.
+    pub lingo_saw_mid_progress: bool,
 }
 
 #[derive(Clone)]
@@ -188,7 +194,13 @@ pub async fn fetch_net_task(
             }
         }
 
-        maybe_hold_dcr_for_preloader(&task.url).await;
+        maybe_hold_dcr_for_preloader(
+            &task.url,
+            &shared_state,
+            task.id,
+            bytes.len() as u64,
+        )
+        .await;
         Ok(bytes)
     } else {
         // Fallback: no body stream, read all at once
@@ -202,44 +214,124 @@ pub async fn fetch_net_task(
             state.update_task_progress(task.id, bytes.len() as u64, total);
         }
 
-        maybe_hold_dcr_for_preloader(&task.url).await;
+        maybe_hold_dcr_for_preloader(
+            &task.url,
+            &shared_state,
+            task.id,
+            bytes.len() as u64,
+        )
+        .await;
         Ok(bytes)
     }
 }
 
 /// Neopets DGS shows a Flash preloader whose guest-login prompt is only
 /// (re)painted while the nested game `.dcr` is still streaming — the Director
-/// loader sits at load-state 34 calling the SWF's `showLoadingProcess` each
-/// frame, which refills the `pre_main` field *after* the translation's `onLoad`
-/// blanks it. If the `.dcr` completes too soon after that blank, the prompt
-/// never repaints and there are no links to click (the movie only advanced when
-/// a debugger pause stretched that window). Hold a *playing* movie's `.dcr` task
-/// "in progress" for a few seconds so those extra frames happen. The task stays
-/// unresolved, so `netDone` stays false AND the frame loop's net-yield keeps the
-/// offscreen Ruffle instance ticking meanwhile. Only applies once the movie is
-/// playing, so it never delays the initial movie load.
-async fn maybe_hold_dcr_for_preloader(url: &str) {
-    let path = url.split('?').next().unwrap_or(url).to_ascii_lowercase();
-    if !path.ends_with(".dcr") {
+/// loader sits at load-state 34 calling `showGameLoadStats` → Flash
+/// `showLoadingStatus` each frame, which refills the `pre_main` field *after*
+/// the translation's `onLoad` blanks it. That handler no-ops when
+/// `bytesSoFar == 0` or percent == 100, then `gameLoaded()` (`netDone`) jumps
+/// straight to state 35/350 which only polls Flash `playGame`.
+///
+/// When the whole `.dcr` arrives in one chunk (browser cache, or a fetch that
+/// never streamed), those paint frames never happen and the guest gate waits
+/// forever on a Play button that still says "Loading Game". Typical internet
+/// connections of the era took many frames to download a game `.dcr`, so a
+/// mid-file `getStreamStatus` was the usual case. Finishing before any poll
+/// is a modern cache/fetch artifact, not a Director feature.
+///
+/// Keep `netDone` false until Lingo has seen one true mid-file
+/// `getStreamStatus` (or ~50ms, so Matematik-style `netDone` waits are not
+/// stalled). Skip the initial movie load (`!is_playing` / `goto_wait`) and
+/// movies with no Flash sprite. Do not key off tempo: the async fetch can
+/// complete while `current_frame_tempo` is still the default 30 even after
+/// `puppetTempo(999)`.
+async fn maybe_hold_dcr_for_preloader(
+    url: &str,
+    shared_state: &Arc<Mutex<NetManagerSharedState>>,
+    task_id: u32,
+    bytes_len: u64,
+) {
+    let (goto_wait_active, is_playing, flash_sprites) =
+        crate::player::reserve_player_ref(|p| {
+            (
+                p.goto_wait_active,
+                p.is_playing,
+                p.flash_sprite_loaded.len(),
+            )
+        });
+    let flash_active = web_sys::window()
+        .and_then(|w| {
+            js_sys::Reflect::get(
+                &w,
+                &wasm_bindgen::JsValue::from_str("__dirplayerActiveFlashCount"),
+            )
+            .ok()
+        })
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    if !should_hold_nested_dcr(
+        url,
+        goto_wait_active,
+        is_playing,
+        flash_active > 0.0 || flash_sprites > 0,
+    ) {
         return;
     }
-    // A go(frame, movie) is synchronously waiting on this fetch — Director
-    // loads the movie immediately there; holding it would only stall the
-    // calling handler (and the whole frame loop) for 3 extra seconds.
-    if crate::player::reserve_player_ref(|p| p.goto_wait_active || !p.is_playing) {
-        return;
+
+    let saw_mid = {
+        let state = shared_state.lock().await;
+        state
+            .task_states
+            .get(&task_id)
+            .map(|s| s.lingo_saw_mid_progress)
+            .unwrap_or(false)
+    };
+    if !saw_mid {
+        // DGS `showGameLoadStats` returns immediately at 0% and 100%. If the
+        // download never opened a mid-file window (one-chunk / cache — a modern
+        // artifact), report one now so the next getStreamStatus actually calls
+        // showLoadingStatus.
+        {
+            let mut state = shared_state.lock().await;
+            let (loaded, reported_total) = state
+                .task_states
+                .get(&task_id)
+                .map(|s| (s.bytes_loaded, s.bytes_total))
+                .unwrap_or((0, 0));
+            if let Some((mid, total)) =
+                synthetic_mid_file_progress(loaded, reported_total, bytes_len)
+            {
+                state.update_task_progress(task_id, mid, total);
+            }
+        }
+        let _ = async_std::future::timeout(
+            std::time::Duration::from_millis(50),
+            async {
+                loop {
+                    let saw = {
+                        let state = shared_state.lock().await;
+                        state
+                            .task_states
+                            .get(&task_id)
+                            .map(|s| s.lingo_saw_mid_progress)
+                            .unwrap_or(false)
+                    };
+                    if saw {
+                        return;
+                    }
+                    let _ = async_std::future::timeout(
+                        std::time::Duration::from_millis(5),
+                        std::future::pending::<()>(),
+                    )
+                    .await;
+                }
+            },
+        )
+        .await;
     }
-    // Only while a Flash preloader is actually loading. The hold is for DGS,
-    // and unqualified it delayed every movie in every game by three seconds:
-    // in Matematik i Maaneby a scene took 3.4 to 4.7 s to open with its movie
-    // already in Cache Storage, where the bytes come back in about 20 ms, and
-    // `netDone` stayed false for exactly this timeout.
-    if !crate::player::is_flash_loading().unwrap_or(false) {
-        return;
+    {
+        let mut state = shared_state.lock().await;
+        state.update_task_progress(task_id, bytes_len, bytes_len.max(1));
     }
-    let _ = async_std::future::timeout(
-        std::time::Duration::from_millis(3000),
-        std::future::pending::<()>(),
-    )
-    .await;
 }
