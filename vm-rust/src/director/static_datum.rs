@@ -182,7 +182,7 @@ pub fn static_datum_to_runtime(param: &StaticDatum, allocator: &mut DatumAllocat
             match reader.read_media() {
                 Ok(media) => allocator.alloc_datum(Datum::media(media)).unwrap(),
                 Err(e) => {
-                    web_sys::console::warn_1(&format!("Failed to parse media from StaticDatum: {}", e).into());
+                    crate::console_warn!("Failed to parse media from StaticDatum: {}", e);
                     DatumRef::Void
                 }
             }

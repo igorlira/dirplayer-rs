@@ -112,7 +112,7 @@ pub fn player_dispatch_event_to_sprite(
 /// where these events follow `the rollover`: a sprite covered by another does
 /// not see the pointer at all. Sending them to every overlapping sprite that
 /// had a handler let a lower sprite's mouseEnter run after the front-most
-/// sprite's and undo it (Matematik i Maaneby's map: a ground patch carrying
+/// sprite's and undo it (a measured map: a ground patch carrying
 /// one house's behaviour sits under another house, and a pointer landing on
 /// the house lit it and then unlit it in the same event).
 pub fn dispatch_rollover_events() {

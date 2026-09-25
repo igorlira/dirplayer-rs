@@ -4421,17 +4421,15 @@ impl CastMember {
         let payload = &raw[flsh_start + 8..];
         let vector_member = Self::parse_flsh_payload(payload);
 
-        web_sys::console::log_1(
-            &format!(
-                "OLE member #{} identified as vectorShape: {} vertices, strokeWidth={}, fillMode={}, closed={}, bbox=({},{},{},{})",
-                number,
-                vector_member.vertices.len(),
-                vector_member.stroke_width,
-                vector_member.fill_mode,
-                vector_member.closed,
-                vector_member.bbox_left, vector_member.bbox_top,
-                vector_member.bbox_right, vector_member.bbox_bottom,
-            ).into(),
+        crate::console_warn!(
+            "OLE member #{} identified as vectorShape: {} vertices, strokeWidth={}, fillMode={}, closed={}, bbox=({},{},{},{})",
+            number,
+            vector_member.vertices.len(),
+            vector_member.stroke_width,
+            vector_member.fill_mode,
+            vector_member.closed,
+            vector_member.bbox_left, vector_member.bbox_top,
+            vector_member.bbox_right, vector_member.bbox_bottom,
         );
 
         let reg_point = (
@@ -4600,11 +4598,7 @@ impl CastMember {
             };
             let is_text_ole = ole_type.is_empty() || ole_type == "text";
             if is_text_ole {
-                let hex_dump = xm.raw_data.clone()
-                    .iter()
-                    .map(|b| format!("{:02X} ", b))
-                    .collect::<Vec<String>>()
-                    .join(" ");
+                let hex_dump = crate::director::chunks::hex_preview(&xm.raw_data);
                 debug!(
                     "XMED X2 (text member #{} '{}', {} bytes):\n{}",
                     number,
@@ -5646,7 +5640,7 @@ impl CastMember {
                         name: member_info.name.clone(),
                     })
                 } else {
-                    web_sys::console::warn_1(&format!("Script member {}: script_id {} not found in Lctx, skipping", number, script_id).into());
+                    crate::console_warn!("Script member {}: script_id {} not found in Lctx, skipping", number, script_id);
                     CastMemberType::Unknown
                 }
             }
@@ -5846,7 +5840,7 @@ impl CastMember {
                                 Some(std::rc::Rc::new(scene))
                             }
                             Err(e) => {
-                                web_sys::console::error_1(&format!("W3D parse error: {}", e).into());
+                                crate::console_error!("W3D parse error: {}", e);
                                 Some(std::rc::Rc::new(Self::create_empty_w3d_scene()))
                             }
                         }

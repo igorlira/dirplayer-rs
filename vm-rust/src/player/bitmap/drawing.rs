@@ -46,10 +46,21 @@ pub struct CopyPixelsParams<'a> {
     /// smaller than the source — alignment is by registration point.
     pub ink9_mask_offset: (i32, i32),
     /// Sample a shrunk source at floor(d * src / dst), as Director does for
-    /// an authored bitmap (measured on klods.dcr's ruler). Off for text, field
+    /// an authored bitmap (measured on a ruler bitmap drawn smaller than its member). Off for text, field
     /// and shape blits, which keep the pixel-centre rule; see the shader's
     /// u_floor_rule.
     pub floor_rule: bool,
+    /// Let a fully transparent source pixel ERASE what is under it on an
+    /// alpha destination, instead of leaving it alone.
+    ///
+    /// Only Lingo's `copyPixels` wants this, and only for offscreen-buffer
+    /// scrolling, where a shifted slice must clear the gap it leaves behind.
+    /// Film loops composite through the same routine with ink 0, and there it
+    /// is wrong: each child stamps its whole rectangle, so the next child
+    /// wipes out the one before it. In a measured walk cycle the right foot
+    /// erased the left one down to a 15 px sliver, and the body then erased
+    /// both above its own edge, which read as a missing rear leg.
+    pub erase_transparent_source: bool,
 }
 
 impl CopyPixelsParams<'_> {
@@ -71,6 +82,8 @@ impl CopyPixelsParams<'_> {
             ink9_mask_bitmap: None,
             ink9_mask_offset: (0, 0),
             floor_rule: false,
+            // Only Lingo's copyPixels turns this on; see the field.
+            erase_transparent_source: false,
         }
     }
 }
@@ -1903,6 +1916,12 @@ impl Bitmap {
             ink9_mask_bitmap: None,
             ink9_mask_offset: (0, 0),
             floor_rule: false,
+            // Lingo's copyPixels is the one caller that WANTS a transparent
+            // source pixel to clear the destination: offscreen-buffer
+            // scrolling blits a shifted slice and must wipe the gap it
+            // leaves. Film loops composite through the same routine and must
+            // not, or each child erases the one before it.
+            erase_transparent_source: true,
         };
         self.copy_pixels_with_params(palettes, src, dst_rect, src_rect, &params);
     }
@@ -2659,7 +2678,7 @@ impl Bitmap {
                 // Map destination pixel to source coordinate with scaling.
                 // Director samples a stretched bitmap at floor(d * src / dst),
                 // the top-left of the destination pixel, not its centre.
-                // Measured on klods.dcr's ruler (member 82, 239x46 drawn at
+                // Measured on a ruler bitmap (239x46 drawn at
                 // 166x32): the floor rule reproduces the projector's pixels
                 // 100%, the centre rule 88%, and the difference is the digit
                 // rows the centre rule skips. Rotation and skew keep the
@@ -3158,7 +3177,11 @@ impl Bitmap {
                 // transparent pixel verbatim, which erases stale content
                 // (required for chat buffer scrolling with shifted-slice blits).
                 if src.original_bit_depth == 32 && src.use_alpha && sa == 0
-                    && !(self.bit_depth == 32 && self.use_alpha && ink == 0 && !params.is_text_rendering)
+                    && !(params.erase_transparent_source
+                        && self.bit_depth == 32
+                        && self.use_alpha
+                        && ink == 0
+                        && !params.is_text_rendering)
                 {
                     continue;
                 }
@@ -3254,7 +3277,10 @@ impl Bitmap {
                 if src.original_bit_depth == 32 && ink == 0 && !params.is_text_rendering {
                     if !src.use_alpha {
                         sa = 255;
-                    } else if self.bit_depth == 32 && self.use_alpha {
+                    } else if params.erase_transparent_source
+                        && self.bit_depth == 32
+                        && self.use_alpha
+                    {
                         // Full RGBA verbatim copy when both src and dst have alpha.
                         // Transparent src pixels (sa=0) erase dst content — required
                         // for offscreen-buffer scrolling (chat history) where the

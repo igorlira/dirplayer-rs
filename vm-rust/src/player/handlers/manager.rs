@@ -1337,6 +1337,7 @@ impl BuiltInHandlerManager {
             Some(BuiltInSymbol::SetPref) => MovieHandlers::set_pref(args),
             Some(BuiltInSymbol::UrlEncode) => StringHandlers::url_encode(args),
             Some(BuiltInSymbol::GoToNetPage) => MovieHandlers::go_to_net_page(args),
+            Some(BuiltInSymbol::PrintFrom) => MovieHandlers::print_from(args),
             Some(BuiltInSymbol::GoToNetMovie) => MovieHandlers::go_to_net_movie(args),
             Some(BuiltInSymbol::Pass) => MovieHandlers::pass(args),
             Some(BuiltInSymbol::Union) => TypeHandlers::union(args),
@@ -1727,7 +1728,7 @@ impl BuiltInHandlerManager {
                     DatumType::PropList => PropListDatumHandlers::set_opt_prop(datum, args),
                     DatumType::ScriptInstanceRef => ScriptInstanceDatumHandlers::set_prop(datum, args),
                     // `member(x).char[a..b] = v` compiles to
-                    // setProp(member, #char, a, b, v) â€” a chunk write into the
+                    // setProp(member, #char, a, b, v) — a chunk write into the
                     // member's text, keeping everything outside the range.
                     DatumType::CastMemberRef => Self::set_member_chunk(datum, args),
                     _ => Err(ScriptError::new(
@@ -3024,7 +3025,7 @@ impl BuiltInHandlerManager {
             }
         })
     }
-    /// `setProp(member, #char|#word|#item|#line, first, last, value)` â€” the
+    /// `setProp(member, #char|#word|#item|#line, first, last, value)` — the
     /// compiled form of `member(x).char[a..b] = value`. Replaces exactly that
     /// range of the member's text and leaves the rest alone. `last` is
     /// optional: `member(x).char[a] = v` compiles with four arguments.
@@ -3237,4 +3238,6 @@ fn get_datum_script_instance_ids(
         }
     }
     Ok(instance_refs)
+
+
 }

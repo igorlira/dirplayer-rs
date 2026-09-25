@@ -226,7 +226,7 @@ impl SoundChannelDatumHandlers {
                     ));
                 }
                 // Director's order is fadeTo(volume, milliseconds). Read the
-                // other way round, Matematik i Maaneby's music button,
+                // other way round, a measured movie's music button,
                 // `sound(1).fadeTo(200 * musik, 1500)`, turned the music OFF by
                 // fading to 1500 over 0 ticks: 1500 clamps to 255, so the button
                 // meant to silence the music set it to full, instantly.
@@ -2307,18 +2307,26 @@ impl SoundChannel {
             *ch.is_decoding.borrow_mut() = false;
         };
 
-        // Extract valid MP3 frames
-        let clean_mp3 = match Self::extract_valid_mp3_frames(&mp3_bytes) {
-            Some(data) => data,
-            None => {
-                error!("❌ No valid MP3 frames found – treating as PCM");
-                clear_flag();
-                return Err(JsValue::from_str("No valid MP3 data"));
+        // Extract valid MP3 frames. An Ogg stream skips this: frame extraction
+        // exists to find MPEG frames inside a buffer that may hold junk around
+        // them, and running it on Ogg would find no frames and refuse a stream
+        // the browser decodes perfectly well.
+        let is_ogg = crate::director::chunks::audio_format::is_ogg(&mp3_bytes);
+        let clean_mp3 = if is_ogg {
+            mp3_bytes.clone()
+        } else {
+            match Self::extract_valid_mp3_frames(&mp3_bytes) {
+                Some(data) => data,
+                None => {
+                    error!("❌ No valid MP3 frames found – treating as PCM");
+                    clear_flag();
+                    return Err(JsValue::from_str("No valid MP3 data"));
+                }
             }
         };
 
         // NEW: Log detailed MP3 info
-        if clean_mp3.len() >= 4 {
+        if !is_ogg && clean_mp3.len() >= 4 {
             let header =
                 u32::from_be_bytes([clean_mp3[0], clean_mp3[1], clean_mp3[2], clean_mp3[3]]);
             let version = (header >> 19) & 0x3;
@@ -2702,8 +2710,8 @@ impl SoundChannel {
         self.elapsed_time = 0.0;
         self.loops_remaining = 0;
         self.is_fading = false;
-        // A stopped channel keeps nothing queued. Matematik i Maaneby's
-        // Gentag button stops channel 4 and queues the narration again; with
+        // A stopped channel keeps nothing queued. A measured movie's
+        // repeat button stops channel 4 and queues the narration again; with
         // the old entries left in place they played before the new ones.
         self.playlist_segments.clear();
         self.playlist.clear();
@@ -3177,6 +3185,20 @@ impl SoundChannel {
             sound_bytes.len(), channels, sample_rate, bits_per_sample, codec, expected_samples
         );
         
+        // Ogg first, and unconditionally: it carries its own rate, channel
+        // count and length, so none of the PCM size reasoning below applies to
+        // it, and none of it should be allowed to second-guess a container
+        // that is unambiguous from its first four bytes.
+        if crate::director::chunks::audio_format::is_ogg(sound_bytes) {
+            debug!("Ogg stream detected ({} bytes) - handing it to the browser decoder", sound_bytes.len());
+            return Ok(AudioData {
+                samples: vec![],
+                num_channels: channels as u16,
+                sample_rate,
+                compressed_data: Some(sound_bytes.to_vec()),
+            });
+        }
+
         // Check for MP3, but skip when data size matches expected raw PCM.
         // sndH/sndS headers sometimes claim "raw_pcm" when data is actually MP3-compressed.
         // We detect this by comparing data size to what raw PCM would need.
@@ -3705,7 +3727,7 @@ impl SoundChannel {
     }
 
     /// fadeOut({ms}): fade to silence and then stop, as Director does. Left
-    /// playing at volume 0 the channel stayed busy, and Matematik i Maaneby's
+    /// playing at volume 0 the channel stayed busy, and a measured movie's
     /// map, which fades the previous house's voice out and sets the volume
     /// back to 255 for the next, had every voice after the first swallowed.
     pub fn fade_out(&mut self, ms: i32) {

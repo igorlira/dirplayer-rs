@@ -287,7 +287,7 @@ out vec4 fragColor;
 
 // Director picks the source texel of a scaled sprite as floor(d * src / dst),
 // the top-left corner of the destination pixel, where GPU nearest sampling
-// picks the texel under the pixel CENTRE. Measured on klods.dcr's ruler
+// picks the texel under the pixel CENTRE. Measured on a ruler bitmap
 // (239x46 drawn at 166x32): the floor rule reproduces the projector's
 // pixels 100%, the centre rule 88%, and the difference is the digit rows
 // the centre rule skips. At 1:1 both rules pick the same texel.
@@ -359,7 +359,7 @@ out vec4 fragColor;
 
 // Director picks the source texel of a scaled sprite as floor(d * src / dst),
 // the top-left corner of the destination pixel, where GPU nearest sampling
-// picks the texel under the pixel CENTRE. Measured on klods.dcr's ruler
+// picks the texel under the pixel CENTRE. Measured on a ruler bitmap
 // (239x46 drawn at 166x32): the floor rule reproduces the projector's
 // pixels 100%, the centre rule 88%, and the difference is the digit rows
 // the centre rule skips. At 1:1 both rules pick the same texel.
@@ -436,7 +436,7 @@ out vec4 fragColor;
 
 // Director picks the source texel of a scaled sprite as floor(d * src / dst),
 // the top-left corner of the destination pixel, where GPU nearest sampling
-// picks the texel under the pixel CENTRE. Measured on klods.dcr's ruler
+// picks the texel under the pixel CENTRE. Measured on a ruler bitmap
 // (239x46 drawn at 166x32): the floor rule reproduces the projector's
 // pixels 100%, the centre rule 88%, and the difference is the digit rows
 // the centre rule skips. At 1:1 both rules pick the same texel.
@@ -520,7 +520,7 @@ out vec4 fragColor;
 
 // Director picks the source texel of a scaled sprite as floor(d * src / dst),
 // the top-left corner of the destination pixel, where GPU nearest sampling
-// picks the texel under the pixel CENTRE. Measured on klods.dcr's ruler
+// picks the texel under the pixel CENTRE. Measured on a ruler bitmap
 // (239x46 drawn at 166x32): the floor rule reproduces the projector's
 // pixels 100%, the centre rule 88%, and the difference is the digit rows
 // the centre rule skips. At 1:1 both rules pick the same texel.
@@ -601,7 +601,7 @@ out vec4 fragColor;
 
 // Director picks the source texel of a scaled sprite as floor(d * src / dst),
 // the top-left corner of the destination pixel, where GPU nearest sampling
-// picks the texel under the pixel CENTRE. Measured on klods.dcr's ruler
+// picks the texel under the pixel CENTRE. Measured on a ruler bitmap
 // (239x46 drawn at 166x32): the floor rule reproduces the projector's
 // pixels 100%, the centre rule 88%, and the difference is the digit rows
 // the centre rule skips. At 1:1 both rules pick the same texel.
@@ -687,7 +687,7 @@ out vec4 fragColor;
 
 // Director picks the source texel of a scaled sprite as floor(d * src / dst),
 // the top-left corner of the destination pixel, where GPU nearest sampling
-// picks the texel under the pixel CENTRE. Measured on klods.dcr's ruler
+// picks the texel under the pixel CENTRE. Measured on a ruler bitmap
 // (239x46 drawn at 166x32): the floor rule reproduces the projector's
 // pixels 100%, the centre rule 88%, and the difference is the digit rows
 // the centre rule skips. At 1:1 both rules pick the same texel.
@@ -766,7 +766,7 @@ out vec4 fragColor;
 
 // Director picks the source texel of a scaled sprite as floor(d * src / dst),
 // the top-left corner of the destination pixel, where GPU nearest sampling
-// picks the texel under the pixel CENTRE. Measured on klods.dcr's ruler
+// picks the texel under the pixel CENTRE. Measured on a ruler bitmap
 // (239x46 drawn at 166x32): the floor rule reproduces the projector's
 // pixels 100%, the centre rule 88%, and the difference is the digit rows
 // the centre rule skips. At 1:1 both rules pick the same texel.
@@ -843,7 +843,7 @@ out vec4 fragColor;
 
 // Director picks the source texel of a scaled sprite as floor(d * src / dst),
 // the top-left corner of the destination pixel, where GPU nearest sampling
-// picks the texel under the pixel CENTRE. Measured on klods.dcr's ruler
+// picks the texel under the pixel CENTRE. Measured on a ruler bitmap
 // (239x46 drawn at 166x32): the floor rule reproduces the projector's
 // pixels 100%, the centre rule 88%, and the difference is the digit rows
 // the centre rule skips. At 1:1 both rules pick the same texel.
@@ -925,7 +925,7 @@ out vec4 fragColor;
 
 // Director picks the source texel of a scaled sprite as floor(d * src / dst),
 // the top-left corner of the destination pixel, where GPU nearest sampling
-// picks the texel under the pixel CENTRE. Measured on klods.dcr's ruler
+// picks the texel under the pixel CENTRE. Measured on a ruler bitmap
 // (239x46 drawn at 166x32): the floor rule reproduces the projector's
 // pixels 100%, the centre rule 88%, and the difference is the digit rows
 // the centre rule skips. At 1:1 both rules pick the same texel.
@@ -1003,7 +1003,7 @@ out vec4 fragColor;
 
 // Director picks the source texel of a scaled sprite as floor(d * src / dst),
 // the top-left corner of the destination pixel, where GPU nearest sampling
-// picks the texel under the pixel CENTRE. Measured on klods.dcr's ruler
+// picks the texel under the pixel CENTRE. Measured on a ruler bitmap
 // (239x46 drawn at 166x32): the floor rule reproduces the projector's
 // pixels 100%, the centre rule 88%, and the difference is the digit rows
 // the centre rule skips. At 1:1 both rules pick the same texel.
@@ -1082,7 +1082,7 @@ out vec4 fragColor;
 
 // Director picks the source texel of a scaled sprite as floor(d * src / dst),
 // the top-left corner of the destination pixel, where GPU nearest sampling
-// picks the texel under the pixel CENTRE. Measured on klods.dcr's ruler
+// picks the texel under the pixel CENTRE. Measured on a ruler bitmap
 // (239x46 drawn at 166x32): the floor rule reproduces the projector's
 // pixels 100%, the centre rule 88%, and the difference is the digit rows
 // the centre rule skips. At 1:1 both rules pick the same texel.
@@ -1162,7 +1162,7 @@ out vec4 fragColor;
 
 // Director picks the source texel of a scaled sprite as floor(d * src / dst),
 // the top-left corner of the destination pixel, where GPU nearest sampling
-// picks the texel under the pixel CENTRE. Measured on klods.dcr's ruler
+// picks the texel under the pixel CENTRE. Measured on a ruler bitmap
 // (239x46 drawn at 166x32): the floor rule reproduces the projector's
 // pixels 100%, the centre rule 88%, and the difference is the digit rows
 // the centre rule skips. At 1:1 both rules pick the same texel.

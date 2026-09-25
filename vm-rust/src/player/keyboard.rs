@@ -2,6 +2,43 @@ use log::debug;
 
 use crate::player::keyboard_map;
 
+/// Director key code from the browser's `event.key` NAME.
+///
+/// `event.keyCode` is deprecated and some environments report 0 for every
+/// key. Movies read `the keyCode` for Escape (53), Delete (117), Return
+/// (36) and friends, so without a fallback those keys silently do nothing
+/// while letters (read through `the key`) keep working.
+fn sw_code_from_key_name(key: &str) -> Option<u16> {
+    let code = match key {
+        "Escape" | "Esc" => 53,
+        "Delete" => 117,
+        "Enter" => 36,
+        "Backspace" => 51,
+        "Tab" => 48,
+        " " | "Space" | "Spacebar" => 49,
+        "ArrowLeft" => 123,
+        "ArrowRight" => 124,
+        "ArrowDown" => 125,
+        "ArrowUp" => 126,
+        "Home" => 115,
+        "End" => 119,
+        "PageUp" => 116,
+        "PageDown" => 121,
+        _ => {
+            // Single characters: reuse the JS-keyCode table via the uppercase
+            // ASCII code, which is what a browser would otherwise have sent.
+            let mut chars = key.chars();
+            let c = chars.next()?;
+            if chars.next().is_some() {
+                return None;
+            }
+            let js = (c.to_ascii_uppercase() as u32) as u16;
+            return keyboard_map::get_keyboard_key_map_js_to_sw().get(&js).copied();
+        }
+    };
+    Some(code)
+}
+
 pub struct KeyboardKey {
     pub key: String,
     pub code: u16,
@@ -31,7 +68,11 @@ impl KeyboardManager {
     pub fn key_down(&mut self, key: String, code: u16) {
         let code_mapped = keyboard_map::get_keyboard_key_map_js_to_sw().get(&code);
         debug!("Key down: {} {} (mapped to: {:?})", key, code, code_mapped);
-        let mapped_code = *code_mapped.unwrap_or(&code);
+        // Fall back to the key NAME when the browser gave no usable keyCode.
+        let mapped_code = match code_mapped {
+            Some(m) => *m,
+            None => sw_code_from_key_name(&key).unwrap_or(code),
+        };
         self.last_key_time = Some(chrono::Local::now());
 
         // Map JS key names to Director key values
