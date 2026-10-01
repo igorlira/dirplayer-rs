@@ -517,6 +517,9 @@ impl WebGL2Renderer {
         if let Some(ref loc) = program.u_floor_rule {
             gl.uniform1f(Some(loc), 0.0);
         }
+        if let Some(ref loc) = program.u_stage_scale {
+            gl.uniform2f(Some(loc), 1.0, 1.0);
+        }
         if let Some(ref loc) = program.u_skew {
             gl.uniform1f(Some(loc), 0.0);
         }
@@ -596,6 +599,9 @@ impl WebGL2Renderer {
         }
         if let Some(ref loc) = program.u_floor_rule {
             gl.uniform1f(Some(loc), 0.0);
+        }
+        if let Some(ref loc) = program.u_stage_scale {
+            gl.uniform2f(Some(loc), 1.0, 1.0);
         }
         if let Some(ref loc) = program.u_skew {
             gl.uniform1f(Some(loc), 0.0);
@@ -687,6 +693,9 @@ impl WebGL2Renderer {
         }
         if let Some(ref loc) = program.u_floor_rule {
             gl.uniform1f(Some(loc), 0.0);
+        }
+        if let Some(ref loc) = program.u_stage_scale {
+            gl.uniform2f(Some(loc), 1.0, 1.0);
         }
         if let Some(ref loc) = program.u_skew {
             gl.uniform1f(Some(loc), 0.0);
@@ -1212,6 +1221,7 @@ impl WebGL2Renderer {
             fore_color_explicit: false,
             ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
             floor_rule: false,
+            erase_transparent_source: false,
         };
 
         // Render text to the bitmap
@@ -1299,6 +1309,9 @@ impl WebGL2Renderer {
         }
         if let Some(ref loc) = program.u_floor_rule {
             gl.uniform1f(Some(loc), 0.0);
+        }
+        if let Some(ref loc) = program.u_stage_scale {
+            gl.uniform2f(Some(loc), 1.0, 1.0);
         }
         if let Some(ref loc) = program.u_skew {
             gl.uniform1f(Some(loc), 0.0);
@@ -1589,7 +1602,7 @@ impl WebGL2Renderer {
                 sprite.flip_v,
                 sprite.rotation,
                 sprite.skew,
-                sprite.bg_color.clone(),
+                bg_color,
                 sprite.color.clone(),
                 sprite.has_fore_color,
                 sprite.has_back_color,
@@ -1623,6 +1636,16 @@ impl WebGL2Renderer {
                 // came through black). Treat 0 as opaque so the scene shows. Mirrors the
                 // Flash force above (Shockwave's 2D compositor ignores sprite blend on
                 // these special composited members).
+                blend = 100;
+            } else if matches!(member.member_type, CastMemberType::FilmLoop(_)) && blend > 0 && blend < 100 {
+                // A film loop is a composited member too, and Shockwave's 2D
+                // compositor ignores a partial sprite blend on it just as it
+                // does for Flash and Shockwave3D: the score can carry blend=50
+                // on a film-loop sprite yet Director draws it fully opaque
+                // (verified against the narrator film loop the score authors
+                // at blend=50 — Shockwave renders him solid, while applying the
+                // blend left him half see-through). blend=0 is left alone: a
+                // deliberately hidden layer, not a partial fade.
                 blend = 100;
             }
         }
@@ -1764,6 +1787,11 @@ impl WebGL2Renderer {
         // Set by filmloop logic: true when the stage sprite dimensions match the
         // filmloop's sprite-dim rect, meaning the score dimensions are intentional.
         let mut filmloop_sprite_dims_match = false;
+        // Set by the FilmLoop arm below: the authored rect the sprite's
+        // on-stage rectangle corresponds to, and how far the offscreen grew
+        // past it to fit the whole animation (left, top, right, bottom).
+        let mut filmloop_base_size = (0i32, 0i32);
+        let mut filmloop_expand = (0i32, 0i32, 0i32, 0i32);
 
         // Handle Flash member dispatch before the texture_source borrow block.
         // We dispatch per (sprite, cast_lib, cast_member) so multiple sprites
@@ -2017,8 +2045,8 @@ impl WebGL2Renderer {
                     // #line: a line is 1 px in one dimension by nature, so
                     // "width <= 1 || height <= 1" dropped every horizontal and
                     // vertical line before the Line arm below ever ran. The
-                    // divider under the ruler on klods.dcr's working drawing
-                    // went missing this way (S8, measured against the
+                    // divider under a ruler on a measured drawing
+                    // went missing this way (measured against the
                     // projector). A line is skipped only when BOTH collapse.
                     let is_line = matches!(shape_member.shape_info.shape_type, crate::director::enums::ShapeType::Line);
                     if (sprite_width <= 1 || sprite_height <= 1) && !(is_line && (sprite_width > 1 || sprite_height > 1)) {
@@ -2285,14 +2313,16 @@ impl WebGL2Renderer {
                         // Safety net: if member.height looks like a per-
                         // line stride (≈ fixed_line_space and < line_count
                         // strides), fall back to line_count × stride.
-                        let mh = text_member.height as i32;
-                        let fls = text_member.fixed_line_space as i32;
-                        let strides = fls.max(1) * _line_count;
-                        if fls > 0 && mh > 0 && mh + 2 < strides {
-                            strides
-                        } else {
-                            mh.max(1)
-                        }
+                        //
+                        // Both are movie pixels while the text is drawn at
+                        // the stage scale, so the box is scaled with it.
+                        let (_, scale_y) = crate::player::stage::stage_scale(player);
+                        crate::player::score::clipped_text_box_render_height(
+                            text_member.height as i32,
+                            text_member.fixed_line_space as i32,
+                            _line_count,
+                            scale_y,
+                        )
                     } else {
                         sprite_rect.height().max(1)
                     };
@@ -2323,12 +2353,22 @@ impl WebGL2Renderer {
                         + 1) as i32;
                     // Estimate wrap-induced extra lines from text
                     // length and approximate chars-per-visual-line.
-                    let chars_per_line = (width as i32
-                        / ((text_member.font_size as i32) / 2).max(1))
-                        .max(1);
-                    let wrap_estimate = (text.chars().count() as i32 / chars_per_line).max(0);
-                    let visual_line_estimate = source_line_count + wrap_estimate + 2;
-                    let content_estimate = max_stride * visual_line_estimate + spacing_pad;
+                    // Everything here is in movie pixels, while `width`
+                    // and `base_height` are in render pixels, so the
+                    // estimate is made against the unscaled width and then
+                    // scaled like the box. Left in movie pixels it lost to
+                    // the scaled sprite height on a stage drawn 2.8x, and a
+                    // five-line paragraph was drawn into a four-line box.
+                    let (_, estimate_scale) = crate::player::stage::stage_scale(player);
+                    let content_estimate = crate::player::score::text_bitmap_height_estimate(
+                        max_stride,
+                        source_line_count,
+                        text.chars().count() as i32,
+                        width as i32,
+                        text_member.font_size as i32,
+                        spacing_pad,
+                        estimate_scale,
+                    );
                     // For #adjust text without explicit \r/\n breaks, score.rs
                     // already grew sprite_rect.height to fit the laid-out
                     // content (its 70% rule covers wrapped single paragraphs
@@ -2586,18 +2626,25 @@ impl WebGL2Renderer {
                             //   (matches non-WebGL2 PFR bitmap rendering where sprite.color always wins)
                             // - span has no color set (fill in missing values)
                             if has_fore_color || (fg_color != ColorRef::PaletteIndex(255) && fg_color != ColorRef::Rgb(0, 0, 0)) || style.color.is_none() {
-                                style.color = match &text_fg_color {
-                                    ColorRef::Rgb(r, g, b) => {
-                                        Some(((*r as u32) << 16) | ((*g as u32) << 8) | (*b as u32))
-                                    }
-                                    ColorRef::PaletteIndex(idx) => {
-                                        match *idx {
-                                            0 => Some(0xFFFFFF),
-                                            255 => Some(0x000000),
-                                            _ => Some(0x000000),
-                                        }
-                                    }
+                                let fg_rgb: u32 = match &text_fg_color {
+                                    ColorRef::Rgb(r, g, b) => ((*r as u32) << 16) | ((*g as u32) << 8) | (*b as u32),
+                                    ColorRef::PaletteIndex(idx) => match *idx {
+                                        0 => 0xFFFFFF,
+                                        _ => 0x000000,
+                                    },
                                 };
+                                // The sprite's foreColor combines with a span's own
+                                // colour rather than replacing it: measured on the
+                                // projector, a member whose text is black with one
+                                // word cyan and one purple, on a sprite coloured
+                                // white, draws white text with a red and a green
+                                // word. That is the span colour XOR the foreColor
+                                // per channel, which for the default black foreColor
+                                // leaves every span as authored.
+                                style.color = Some(match style.color {
+                                    Some(c) => (c ^ fg_rgb) & 0xFFFFFF,
+                                    None => fg_rgb,
+                                });
                             }
 
                             // Per-span bold/italic/underline are authoritative.
@@ -3264,6 +3311,13 @@ impl WebGL2Renderer {
                 CastMemberType::FilmLoop(film_loop) => {
                     // Film loop: render the film loop's score to an offscreen bitmap.
                     // Prefer info_rect (authoritative viewport from Director file).
+                    // NB: despite the field names, FilmLoopInfo.width/height hold
+                    // the info block's RIGHT and BOTTOM edges, not a size. Measured
+                    // on a measured credits loop: reg=(-204,452),
+                    // width/height=(355,793) gives 559x341, which matches the
+                    // bounding box computed from the member's own sprites
+                    // (544x334). Reading them as a size instead produced a
+                    // 355x793 rect and the animation rendered clipped.
                     let info_rect = IntRect::from(
                         film_loop.info.reg_point.0 as i32,
                         film_loop.info.reg_point.1 as i32,
@@ -3273,6 +3327,9 @@ impl WebGL2Renderer {
 
                     let sprite_dim_rect = &film_loop.initial_rect;
                     let bitmap_dim_rect = crate::rendering::compute_filmloop_initial_rect_with_members(player, &member_ref);
+                    // The area the children cover across the whole animation,
+                    // which is what the offscreen has to hold.
+                    let animated_bounds = crate::rendering::compute_filmloop_animated_bounds(player, &member_ref);
 
                     debug!(
                         "FILMLOOP DIMS: member {}:{} sprite_rect {}x{} sprite_dim_rect ({},{},{},{}) {}x{} bitmap_dim_rect {:?} info_rect ({},{},{},{}) {}x{}",
@@ -3290,19 +3347,45 @@ impl WebGL2Renderer {
                         && (sprite_height - sprite_dim_rect.height()).abs() <= 1;
                     filmloop_sprite_dims_match = sprite_dims_match_stage;
 
-                    let initial_rect = if info_rect.width() > 0 && info_rect.height() > 0 {
+                    let base_rect = if info_rect.width() > 0 && info_rect.height() > 0 {
                         info_rect.clone()
                     } else if sprite_dims_match_stage {
                         film_loop.initial_rect.clone()
                     } else {
-                        bitmap_dim_rect.unwrap_or_else(|| film_loop.initial_rect.clone())
+                        bitmap_dim_rect
+                            .clone()
+                            .unwrap_or_else(|| film_loop.initial_rect.clone())
                     };
 
-                    let width = initial_rect.width().max(1);
-                    let height = initial_rect.height().max(1);
+                    // Cover the WHOLE animation, not just the frame the info
+                    // block describes. Measured on a credits loop:
+                    // the walking creature's own rect runs down to y=496 inside
+                    // a 341-tall offscreen, so his legs were cut off at the
+                    // bottom edge, and since he walks up a slope the clipped
+                    // figure looked like it rose out of the ground instead of
+                    // walking in from the left. These bounds are the union over
+                    // every frame's channel data, which is what the renderer
+                    // actually draws.
+                    let _ = (&bitmap_dim_rect, &animated_bounds);
+                    let full_rect = crate::rendering::filmloop_offscreen_rect(
+                        player,
+                        &member_ref,
+                        base_rect.clone(),
+                    );
+
+                    filmloop_base_size = (base_rect.width(), base_rect.height());
+                    filmloop_expand = (
+                        base_rect.left - full_rect.left,
+                        base_rect.top - full_rect.top,
+                        full_rect.right - base_rect.right,
+                        full_rect.bottom - base_rect.bottom,
+                    );
+
+                    let width = full_rect.width().max(1);
+                    let height = full_rect.height().max(1);
 
                     TextureSource::FilmLoop {
-                        initial_rect,
+                        initial_rect: full_rect,
                         width: width as u32,
                         height: height as u32,
                     }
@@ -3399,20 +3482,68 @@ impl WebGL2Renderer {
             TextureSource::FilmLoop { initial_rect, width, height } => {
                 let w = width as i32;
                 let h = height as i32;
-                let should_override = if filmloop_sprite_dims_match {
+                // A sprite that OWNS its size (stretch) keeps it: Director
+                // scales the loop into the authored rect. Overriding with the
+                // loop's natural size and re-centring it on loc pushed a
+                // measured credits animation down past the stage bottom - the
+                // walking creature entered with only its head above the edge,
+                // where the original walks in at mid-frame.
+                let sprite_owns_size = player
+                    .movie
+                    .score
+                    .get_sprite(channel_num)
+                    .map(|sp| sp.stretch != 0)
+                    .unwrap_or(false)
+                    && sprite_width > 0
+                    && sprite_height > 0;
+                let should_override = if sprite_owns_size {
+                    false
+                } else if filmloop_sprite_dims_match {
                     sprite_width <= 0 || sprite_height <= 0
                 } else {
                     sprite_width <= 0 || sprite_height <= 0
                         || (sprite_width - w).abs() > 1 || (sprite_height - h).abs() > 1
                 };
                 if should_override {
-                    let reg_x = w / 2;
-                    let reg_y = h / 2;
+                    // Centre on the AUTHORED size. The texture may be larger
+                    // now that it covers the whole animation, and that growth
+                    // is added back below, so this keeps its old placement.
+                    let base_w = if filmloop_base_size.0 > 0 { filmloop_base_size.0 } else { w };
+                    let base_h = if filmloop_base_size.1 > 0 { filmloop_base_size.1 } else { h };
+                    let reg_x = base_w / 2;
+                    let reg_y = base_h / 2;
+                    // loc and the authored size are movie pixels, while
+                    // sprite_rect is in render space. On a scaled stage the
+                    // unmapped rect drew the loop at its movie position read
+                    // as device pixels: up and to the left of the sprite, and
+                    // at 1x size. Measured on a film loop swapped onto a
+                    // moving, unstretched sprite at stage scale 1.37.
+                    sprite_rect = crate::player::score::movie_rect_to_render_rect(
+                        player,
+                        IntRect::from(
+                            raw_loc.0 as i32 - reg_x,
+                            raw_loc.1 as i32 - reg_y,
+                            raw_loc.0 as i32 - reg_x + base_w,
+                            raw_loc.1 as i32 - reg_y + base_h,
+                        ),
+                    );
+                }
+
+                // The sprite's rectangle corresponds to the AUTHORED rect, so
+                // stretch it by the same amount the texture grew, in stage
+                // units. Scale and anchor stay exactly as before; the figure
+                // simply stops being cut off.
+                if filmloop_base_size.0 > 0
+                    && filmloop_base_size.1 > 0
+                    && filmloop_expand != (0, 0, 0, 0)
+                {
+                    let sx = sprite_rect.width() as f32 / filmloop_base_size.0 as f32;
+                    let sy = sprite_rect.height() as f32 / filmloop_base_size.1 as f32;
                     sprite_rect = IntRect::from(
-                        raw_loc.0 as i32 - reg_x,
-                        raw_loc.1 as i32 - reg_y,
-                        raw_loc.0 as i32 - reg_x + w,
-                        raw_loc.1 as i32 - reg_y + h,
+                        sprite_rect.left - (filmloop_expand.0 as f32 * sx).round() as i32,
+                        sprite_rect.top - (filmloop_expand.1 as f32 * sy).round() as i32,
+                        sprite_rect.right + (filmloop_expand.2 as f32 * sx).round() as i32,
+                        sprite_rect.bottom + (filmloop_expand.3 as f32 * sy).round() as i32,
                     );
                 }
 
@@ -3986,6 +4117,7 @@ impl WebGL2Renderer {
                             fore_color_explicit: false,
                             ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                             floor_rule: false,
+                            erase_transparent_source: false,
                         };
                         btn_bitmap.draw_text_wrapped(
                             &text, font, font_bmp,
@@ -4522,6 +4654,19 @@ impl WebGL2Renderer {
         if let Some(ref loc) = program.u_floor_rule {
             gl.uniform1f(Some(loc), if floor_rule { 1.0 } else { 0.0 });
         }
+        // A stage drawn larger than the movie rect (swStretchStyle) scales
+        // every sprite rect, and the text, shape and film-loop textures are
+        // rasterised at that size. An authored bitmap is not: its texture
+        // holds movie pixels, and the shader mixes them per device pixel so
+        // it looks as the 1:1 stage does when the browser scales it up.
+        if let Some(ref loc) = program.u_stage_scale {
+            let (ssx, ssy) = if floor_rule {
+                crate::player::stage::stage_scale(player)
+            } else {
+                (1.0, 1.0)
+            };
+            gl.uniform2f(Some(loc), ssx as f32, ssy as f32);
+        }
 
         // Continuous skew (`the skew of sprite`) — applied as a horizontal
         // shear `x += y * tan(skew_radians)` around the registration point,
@@ -4547,7 +4692,23 @@ impl WebGL2Renderer {
 
         // Set rotation center (sprite's registration point: loc_h, loc_v)
         if let Some(ref loc) = u_rotation_center {
-            gl.uniform2f(Some(loc), raw_loc.0 as f32, raw_loc.1 as f32);
+            // The pivot is the sprite's loc, in the same space as the sprite
+            // rect. On a stage drawn larger than the movie rect
+            // (swStretchStyle) the rect is scaled into device pixels, so the
+            // loc has to be too; left in movie pixels the pivot sat off the
+            // sprite by the scale factor and a small rotation swung the
+            // whole sprite sideways and up or down.
+            let (sx, sy) = crate::player::stage::stage_scale(player);
+            let (px, py) = if (sx - 1.0).abs() < 1e-6 && (sy - 1.0).abs() < 1e-6 {
+                (raw_loc.0 as f64, raw_loc.1 as f64)
+            } else {
+                let layout = crate::player::stage::stage_layout(player);
+                (
+                    layout.draw_rect[0] + raw_loc.0 as f64 * sx,
+                    layout.draw_rect[1] + raw_loc.1 as f64 * sy,
+                )
+            };
+            gl.uniform2f(Some(loc), px as f32, py as f32);
         }
 
         // Set blend (0-100 -> 0.0-1.0)
@@ -4602,7 +4763,13 @@ impl WebGL2Renderer {
                     matches!(colorize_params, Some((has_f, has_b, ..)) if has_f || has_b);
                 // 16-bit bitmaps need higher tolerance due to RGB565 quantization:
                 // max error is ~4/255 ≈ 0.016, so use 0.02 to cover rounding
-                let tolerance = if bitmap_bit_depth == 1 || is_indexed_ink40 || colorize_baked {
+                // A 32-bit bitmap with its own alpha channel is not keyed
+                // under Add Pin: measured on the projector, a hovered
+                // building whose image and animated top are white where
+                // they are opaque draws solid white, while keying the
+                // white pixels left the ground showing through them.
+                let alpha_masked_add_pin = ink == 33 && bitmap_bit_depth == 32 && bitmap_use_alpha;
+                let tolerance = if bitmap_bit_depth == 1 || is_indexed_ink40 || colorize_baked || alpha_masked_add_pin {
                     0.0
                 } else if bitmap_bit_depth == 16 {
                     0.02
@@ -4619,7 +4786,7 @@ impl WebGL2Renderer {
         // only. An indexed bitmap under Lighten keeps its palette colours
         // (Habbo's navigator buttons: 8-bit, ink 40, foreColor light grey, and
         // the real client leaves their black outlines black), while a 32-bit
-        // one is lifted by the foreColor (Matematik i Maaneby's stones).
+        // one is lifted by the foreColor (a measured movie's stones).
         if effective_ink == InkMode::Darken || effective_ink == InkMode::Lighten {
             let fg = if effective_ink == InkMode::Lighten && bitmap_bit_depth <= 8 {
                 (0, 0, 0)
@@ -5919,6 +6086,32 @@ impl WebGL2Renderer {
         let top_spacing = ((top_spacing as f64) * scale).round() as i16;
         let member_top_spacing = ((member_top_spacing as f64) * scale).round() as i16;
         let bottom_spacing = ((bottom_spacing as f64) * scale).round() as i16;
+        // The per-paragraph tables are in stage pixels too. Left unscaled,
+        // a two-line label with a fixed 24 px line stride kept 24 device
+        // pixels between its lines at 1.6x, and the bitmap measured from
+        // their sum came out too short, so its first line was cut off.
+        let scale_px = |v: i32| ((v as f64) * scale).round() as i32;
+        let per_line_spacings_scaled: Vec<u16> = per_line_spacings
+            .iter()
+            .map(|&s| ((s as f64) * scale).round() as u16)
+            .collect();
+        let per_line_spacings = per_line_spacings_scaled.as_slice();
+        let par_infos_scaled: Vec<crate::director::chunks::xmedia_styled_text::ParInfo> =
+            par_infos_for_native
+                .iter()
+                .map(|pi| {
+                    let mut pi = pi.clone();
+                    pi.line_spacing = scale_px(pi.line_spacing);
+                    pi.line_height = scale_px(pi.line_height);
+                    pi.left_indent = scale_px(pi.left_indent);
+                    pi.right_indent = scale_px(pi.right_indent);
+                    pi.first_indent = scale_px(pi.first_indent);
+                    pi.top_spacing = scale_px(pi.top_spacing);
+                    pi.bottom_spacing = scale_px(pi.bottom_spacing);
+                    pi
+                })
+                .collect();
+        let par_infos_for_native = par_infos_scaled.as_slice();
         let styled_spans_scaled: Option<Vec<StyledSpan>> = styled_spans.map(|spans| {
             spans.iter().map(|s| {
                 let mut style = s.style.clone();
@@ -6278,6 +6471,7 @@ impl WebGL2Renderer {
             fore_color_explicit: false,
             ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
             floor_rule: false,
+            erase_transparent_source: false,
         };
 
         let pfr_multi_span_styled = is_pfr_font && styled_spans.map_or(false, |s| s.len() > 1);
@@ -6378,6 +6572,16 @@ impl WebGL2Renderer {
             } else {
                 font.char_height as i32
             };
+            // An outline font's own line (ascent + descent) at the size the
+            // atlas was drawn at; None for bitmap strikes and pixel fonts.
+            let outline_natural_line_h = if font.font_size > 0 {
+                crate::player::font::outline_auto_line_height_for_font(
+                    player, font_name, font.font_size,
+                )
+                .map(|h| (h as i32).max(line_height))
+            } else {
+                None
+            };
             // Alignment uses the full canvas width: text centered/right-
             // aligned within the sprite display rect (e.g. 348 for Habbo's
             // hotel-navigator help text). The wrap fold-point uses the
@@ -6395,7 +6599,7 @@ impl WebGL2Renderer {
             // line, so subtract member_top_spacing too — while `top_spacing`
             // (effective = member_top_spacing - scroll) keeps any scroll offset:
             //   y = top_spacing - member_top_spacing - cap_top = -scroll - cap_top.
-            let (pfr_cap_top, _pfr_desc_bottom) =
+            let (pfr_cap_top, pfr_desc_bottom) =
                 crate::player::font::pfr_strike_vertical_metrics(&font, font_bitmap);
             // Anchor the atlas cell top at the line top (keeping the natural
             // ascender-to-cap gap), matching the `.image` getter's PFR anchor
@@ -6829,12 +7033,15 @@ impl WebGL2Renderer {
                         .and_then(|n| wrap_variants.get(&n.to_ascii_lowercase()))
                         .map(|v| &*v.font);
                     let measure_font = variant_font.unwrap_or(&*font);
+                    // A run bold on a regular face is synthesised at draw
+                    // time and advances one pixel further per glyph.
+                    let bold_extra = if style.bold && variant_font.is_none() && measure_font.font_style & 1 == 0 { 1 } else { 0 };
                     token_text
                         .chars()
                         .map(|c| {
                             let raw = ((measure_font.get_char_advance(c as u8) as i32) * scale_num / scale_den)
                                 .max(1);
-                            if c == ' ' { raw.max(space_min) } else { raw }
+                            (if c == ' ' { raw.max(space_min) } else { raw }) + bold_extra
                         })
                         .sum()
                 };
@@ -7081,6 +7288,7 @@ impl WebGL2Renderer {
                             fore_color_explicit: false,
                             ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                             floor_rule: false,
+                            erase_transparent_source: false,
                         };
 
                         // Pick the run's atlas. When the run names a variant
@@ -7110,6 +7318,7 @@ impl WebGL2Renderer {
                         // the glyph shapes — suppress fake-bold and
                         // fake-italic so we don't stack them on top.
                         let apply_fake_bold = run.style.bold && !use_variant;
+                        let fake_bold_extra = if apply_fake_bold && run_font.font_style & 1 == 0 { 1 } else { 0 };
                         let apply_fake_italic = run.style.italic && !use_variant;
                         let italic_default_size = apply_fake_italic && span_is_default_size;
                         let underline_y = y + char_h - 1;
@@ -7132,7 +7341,7 @@ impl WebGL2Renderer {
                                 raw_advance.max(space_min)
                             } else {
                                 raw_advance
-                            };
+                            } + fake_bold_extra;
 
                             if ch == ' ' {
                                 x += advance;
@@ -7275,6 +7484,19 @@ impl WebGL2Renderer {
                                 line_height
                             }
                         });
+                    // The glyphs hang from `y`, so a descender reaches
+                    // below the line whenever the stride is shorter than
+                    // the font's line. Record how far, so the texture trim
+                    // below keeps it: with a 24 px stride for a 24 px
+                    // outline font the trim cut the last line at its
+                    // baseline, and a y read as a v and a g as an a.
+                    // Scaled to the line's own size for runs drawn larger
+                    // or smaller than the atlas.
+                    if let (Some(db), true) = (pfr_desc_bottom, font.font_size > 0) {
+                        let size = if line.max_size > 0 { line.max_size } else { font.font_size as i32 };
+                        let reach = ((db + 1) * size + font.font_size as i32 - 1) / font.font_size as i32;
+                        last_glyph_bottom = last_glyph_bottom.max(y + reach);
+                    }
                     // top/bottom_spacing are PER-PARAGRAPH (member-level),
                     // applied above at source-paragraph transitions —
                     // intentionally NOT per-line here.
@@ -7366,7 +7588,15 @@ impl WebGL2Renderer {
                             if render_line_spacing > 0 {
                                 render_line_spacing as i32
                             } else {
-                                line_height
+                                // An outline font steps its own line, the
+                                // same `ascent - descent` that `.rect` and
+                                // `.height` size the box with. Stepping the
+                                // point size instead (24 for Verdana 24,
+                                // whose line is 29) packed each line into
+                                // the one above and left the last one
+                                // below a box sized for 29 px lines, where
+                                // its descenders were cut off.
+                                outline_natural_line_h.unwrap_or(line_height)
                             }
                         });
                     // Director-style leading: when the line cell is taller
@@ -7378,11 +7608,24 @@ impl WebGL2Renderer {
                     // glyphs are only ~16 px tall: Director draws the "1"
                     // ~5 px below the cell top, so the visible text rows
                     // sit "inside" each row rather than crowding the top.
-                    let glyph_cell_h = if font.font_size > 0 {
-                        font.font_size as i32
-                    } else {
-                        font.char_height as i32
-                    };
+                    //
+                    // The leading is what the line box holds BEYOND the
+                    // font's own line (ascent + descent), not beyond the
+                    // point size. For a bitmap strike the two are the same
+                    // and nothing moves. For an outline font the descent
+                    // lies outside the point size: Verdana 24 steps 29 px
+                    // (ascent 24, descent 5), so a fixedLineSpace of 29 is
+                    // the font's natural line and holds no leading at all.
+                    // Counting from the point size put 5 px of "leading"
+                    // above every line, the baseline on the line's bottom
+                    // row, and the descent of each line into the next one.
+                    // On the last line of an #adjust box sized to lines x
+                    // fixedLineSpace that descent fell outside the box, so
+                    // g, p, j and y lost their tails and a comma read as a
+                    // full stop. The box Director authored for that member
+                    // is exactly lines x fixedLineSpace, which only holds
+                    // the last line when its descent stays inside the line.
+                    let glyph_cell_h = outline_natural_line_h.unwrap_or(line_height);
                     let leading_top = (effective_lh - glyph_cell_h).max(0);
                     render_line(line, y + leading_top, &mut text_bitmap);
                     // Track the max glyph extent (including descender). The
@@ -7403,7 +7646,26 @@ impl WebGL2Renderer {
                     // adding it to the per-line step would stack extra
                     // space between every line (visible as "Enter creates
                     // a new line way below the previous one").
-                    let line_step = effective_lh + bottom_spacing as i32;
+                    //
+                    // A line with no fixed or per-paragraph spacing steps
+                    // the larger of the outline font's own line and the
+                    // point size plus bottom spacing. The point-size rule
+                    // is what a 24 pt paragraph with 5 px bottom spacing
+                    // was authored against (three lines in 5 + 3 x 29);
+                    // stepping 29 + 5 pushed its third line's descenders
+                    // out of that box.
+                    let auto_outline_step = per_line_spacing.is_none()
+                        && render_line_spacing == 0
+                        && outline_natural_line_h.is_some();
+                    let line_step = if auto_outline_step {
+                        crate::player::score::auto_outline_line_step(
+                            effective_lh,
+                            line_height,
+                            bottom_spacing as i32,
+                        )
+                    } else {
+                        effective_lh + bottom_spacing as i32
+                    };
                     if DEBUG_WEBGL2_TEXT && is_pfr_font {
                         debug!(
                             "[webgl2.text.pfr.simple] step={} next_y={} h={}",

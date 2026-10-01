@@ -108,20 +108,23 @@ pub fn player_dispatch_event_to_sprite(
 /// so with mouseWithin only on movement, a click on a stationary cursor was
 /// never seen.
 ///
-/// Only the front-most sprite under the pointer is hovered, as in Director,
-/// where these events follow `the rollover`: a sprite covered by another does
-/// not see the pointer at all. Sending them to every overlapping sprite that
+/// Only the front-most active sprite under the pointer is hovered, as in
+/// Director, where mouse events go to active sprites (ones with a sprite or
+/// cast member script), the same rule clicks use: a sprite covered by another
+/// active sprite does not see the pointer at all, while a script-less sprite
+/// drawn over it does not take the pointer away. A measured map animates a
+/// script-less piece over a house every frame; counting it made the house's
+/// hover switch off and on as the piece's pixels moved under a still pointer. Sending them to every overlapping sprite that
 /// had a handler let a lower sprite's mouseEnter run after the front-most
-/// sprite's and undo it (Matematik i Maaneby's map: a ground patch carrying
+/// sprite's and undo it (a measured map: a ground patch carrying
 /// one house's behaviour sits under another house, and a pointer landing on
 /// the house lit it and then unlit it in the same event).
 pub fn dispatch_rollover_events() {
     let (now_hovered, prev_hovered) = reserve_player_mut(|player| {
         let (x, y) = player.mouse_loc;
         let prev_hovered = std::mem::take(&mut player.hovered_sprites);
-        let now_hovered: Vec<i16> = crate::player::score::get_sprites_at(player, x, y)
-            .first()
-            .map(|num| *num as i16)
+        let now_hovered: Vec<i16> = crate::player::score::get_sprite_at(player, x, y, true)
+            .map(|num| num as i16)
             .into_iter()
             .collect();
         player.hovered_sprites = now_hovered.clone();
@@ -142,6 +145,32 @@ pub fn dispatch_rollover_events() {
             "mouseEnter"
         };
         player_dispatch_event_to_sprite(Symbol::from_str(&handler.to_string()), &vec![], *sprite_num as u16);
+    }
+}
+
+/// The same pass as `dispatch_rollover_events`, but delivered now rather
+/// than through the event queue. A press handler must see the hover
+/// change first: queued, the mouseEnter of a freshly pressed sprite ran
+/// only after its mouseDown and mouseUp had.
+pub async fn dispatch_rollover_events_now() {
+    let (now_hovered, prev_hovered) = reserve_player_mut(|player| {
+        let (x, y) = player.mouse_loc;
+        let prev_hovered = std::mem::take(&mut player.hovered_sprites);
+        let now_hovered: Vec<i16> = crate::player::score::get_sprite_at(player, x, y, true)
+            .map(|num| num as i16)
+            .into_iter()
+            .collect();
+        player.hovered_sprites = now_hovered.clone();
+        (now_hovered, prev_hovered)
+    });
+    for sprite_num in &prev_hovered {
+        if !now_hovered.contains(sprite_num) {
+            player_dispatch_event_to_sprite_targeted(Symbol::from_str("mouseLeave"), &vec![], *sprite_num as u16).await;
+        }
+    }
+    for sprite_num in &now_hovered {
+        let handler = if prev_hovered.contains(sprite_num) { "mouseWithin" } else { "mouseEnter" };
+        player_dispatch_event_to_sprite_targeted(Symbol::from_str(handler), &vec![], *sprite_num as u16).await;
     }
 }
 
@@ -218,7 +247,26 @@ pub async fn player_invoke_event_to_instances(
     })?;
 
     let mut handled = false;
+    let frame_at_start = reserve_player_ref(|player| player.movie.current_frame);
     for (script_instance_ref, handler_ref) in recv_instance_handlers {
+        // A handler that jumped to another frame may have ended the span
+        // these behaviours belong to; the channel now holds the next span's
+        // sprite. A behaviour no longer attached to any sprite gets no more
+        // of this event. Delivered anyway, a hover behaviour's mouseUp wrote
+        // the size it remembered for its button onto the sprite that had
+        // taken over the channel.
+        let frame_changed = reserve_player_ref(|player| player.movie.current_frame != frame_at_start);
+        if frame_changed {
+            let attached = reserve_player_ref(|player| {
+                let id = script_instance_ref.id();
+                player.movie.score.channels.iter().any(|channel| {
+                    channel.sprite.script_instance_list.iter().any(|r| r.id() == id)
+                })
+            });
+            if !attached {
+                continue;
+            }
+        }
         match player_call_script_handler(Some(script_instance_ref), handler_ref, args).await {
             Ok(scope) => {
                 if !scope.passed {

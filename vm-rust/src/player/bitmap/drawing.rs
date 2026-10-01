@@ -46,10 +46,21 @@ pub struct CopyPixelsParams<'a> {
     /// smaller than the source — alignment is by registration point.
     pub ink9_mask_offset: (i32, i32),
     /// Sample a shrunk source at floor(d * src / dst), as Director does for
-    /// an authored bitmap (measured on klods.dcr's ruler). Off for text, field
+    /// an authored bitmap (measured on a ruler bitmap drawn smaller than its member). Off for text, field
     /// and shape blits, which keep the pixel-centre rule; see the shader's
     /// u_floor_rule.
     pub floor_rule: bool,
+    /// Let a fully transparent source pixel ERASE what is under it on an
+    /// alpha destination, instead of leaving it alone.
+    ///
+    /// Only Lingo's `copyPixels` wants this, and only for offscreen-buffer
+    /// scrolling, where a shifted slice must clear the gap it leaves behind.
+    /// Film loops composite through the same routine with ink 0, and there it
+    /// is wrong: each child stamps its whole rectangle, so the next child
+    /// wipes out the one before it. In a measured walk cycle the right foot
+    /// erased the left one down to a 15 px sliver, and the body then erased
+    /// both above its own edge, which read as a missing rear leg.
+    pub erase_transparent_source: bool,
 }
 
 impl CopyPixelsParams<'_> {
@@ -71,12 +82,54 @@ impl CopyPixelsParams<'_> {
             ink9_mask_bitmap: None,
             ink9_mask_offset: (0, 0),
             floor_rule: false,
+            // Only Lingo's copyPixels turns this on; see the field.
+            erase_transparent_source: false,
         }
     }
 }
 
 fn blend_alpha(dst: u8, src: u8, alpha: f32) -> u8 {
     (src as f32 * alpha + dst as f32 * (1.0 - alpha)) as u8
+}
+
+/// How a vector shape's closed fill is coloured.
+#[derive(Clone, Copy)]
+enum GradientFill {
+    None,
+    Radial,
+    Linear { direction: f32, scale: f32, offset: (f32, f32), cycles: i32 },
+}
+
+/// Position (0..1) of a pixel along a vector shape's linear gradient.
+///
+/// The ramp runs from `fillColor` (t = 0) to `endColor` (t = 1) across the
+/// shape's bounding box. `fillDirection` rotates it clockwise in screen
+/// space: 0 puts `fillColor` on the left edge, 90 on the top edge, 180 on
+/// the right and 270 on the bottom. `fillScale` stretches the ramp about the
+/// box centre (100 = the box's extent along the direction), `fillOffset`
+/// moves that centre, and `fillCycles` repeats the ramp.
+pub fn linear_gradient_t(
+    px: f32,
+    py: f32,
+    bbox: (f32, f32, f32, f32),
+    direction_deg: f32,
+    scale_pct: f32,
+    offset: (f32, f32),
+    cycles: i32,
+) -> f32 {
+    let (left, top, right, bottom) = bbox;
+    let (sin, cos) = direction_deg.to_radians().sin_cos();
+    let cx = (left + right) / 2.0 + offset.0;
+    let cy = (top + bottom) / 2.0 + offset.1;
+    let extent = (right - left) * cos.abs() + (bottom - top) * sin.abs();
+    let length = (extent * scale_pct / 100.0).max(1.0);
+    let along = (px - cx) * cos + (py - cy) * sin;
+    let t = (along / length + 0.5).clamp(0.0, 1.0);
+    if cycles > 1 && t < 1.0 {
+        (t * cycles as f32).fract()
+    } else {
+        t
+    }
 }
 
 fn blend_color_alpha(dst: (u8, u8, u8), src: (u8, u8, u8), alpha: f32) -> (u8, u8, u8) {
@@ -1571,12 +1624,26 @@ impl Bitmap {
         // The catalog floor preview's `floor_shape_preview` uses
         // fill_mode 2 with closed=true → still fills correctly.
         if vector_data.fill_mode != 0 && vector_data.closed && all_points.len() >= 3 {
-            let is_gradient = vector_data.fill_mode == 2;
+            let gradient = if vector_data.fill_mode != 2 {
+                GradientFill::None
+            } else if vector_data.gradient_type == BuiltInSymbol::Radial {
+                GradientFill::Radial
+            } else {
+                GradientFill::Linear {
+                    direction: vector_data.fill_direction,
+                    scale: vector_data.fill_scale,
+                    offset: (
+                        vector_data.fill_offset.0 as f32 * scale_x,
+                        vector_data.fill_offset.1 as f32 * scale_y,
+                    ),
+                    cycles: vector_data.fill_cycles,
+                }
+            };
             self.scanline_fill_polygon_gradient(
                 &all_points,
                 vector_data.fill_color,
                 vector_data.end_color,
-                is_gradient,
+                gradient,
                 palettes,
                 alpha,
             );
@@ -1656,21 +1723,21 @@ impl Bitmap {
         alpha: f32,
     ) {
         // Solid-fill convenience wrapper.
-        self.scanline_fill_polygon_gradient(points, color, color, false, palettes, alpha);
+        self.scanline_fill_polygon_gradient(points, color, color, GradientFill::None, palettes, alpha);
     }
 
-    /// Polygon scanline fill with optional radial gradient. When
-    /// `is_gradient` is true, pixels closer to the polygon centroid get
-    /// `fill_color` and pixels at the bounding-box corners get `end_color`,
-    /// with linear interpolation in between. CS catalog floor preview
-    /// (`floor_shape_preview`) needs gradient fill so its trapezoid renders
-    /// with the brown start→end ramp instead of a flat colour.
+    /// Polygon scanline fill with an optional gradient. A radial gradient
+    /// gives pixels closer to the polygon centroid `fill_color` and pixels
+    /// at the bounding-box corners `end_color`. CS catalog floor preview
+    /// (`floor_shape_preview`) needs it so its trapezoid renders with the
+    /// brown start→end ramp. A linear gradient ramps across the polygon's
+    /// bounding box along `fillDirection` (see `linear_gradient_t`).
     fn scanline_fill_polygon_gradient(
         &mut self,
         points: &[(f32, f32)],
         fill_color: (u8, u8, u8),
         end_color: (u8, u8, u8),
-        is_gradient: bool,
+        gradient: GradientFill,
         palettes: &PaletteMap,
         alpha: f32,
     ) {
@@ -1732,10 +1799,24 @@ impl Bitmap {
                 let x_start = intersections[i].ceil() as i32;
                 let x_end = intersections[i + 1].floor() as i32;
                 for x in x_start..=x_end {
-                    let color = if is_gradient {
-                        let dx = x as f32 + 0.5 - cx;
-                        let dy = y as f32 + 0.5 - cy;
-                        let t = ((dx * dx + dy * dy).sqrt() / max_dist).clamp(0.0, 1.0);
+                    let t = match gradient {
+                        GradientFill::None => None,
+                        GradientFill::Radial => {
+                            let dx = x as f32 + 0.5 - cx;
+                            let dy = y as f32 + 0.5 - cy;
+                            Some(((dx * dx + dy * dy).sqrt() / max_dist).clamp(0.0, 1.0))
+                        }
+                        GradientFill::Linear { direction, scale, offset, cycles } => Some(linear_gradient_t(
+                            x as f32 + 0.5,
+                            y as f32 + 0.5,
+                            (min_x, min_y, max_x, max_y),
+                            direction,
+                            scale,
+                            offset,
+                            cycles,
+                        )),
+                    };
+                    let color = if let Some(t) = t {
                         (
                             ((1.0 - t) * fill_color.0 as f32 + t * end_color.0 as f32) as u8,
                             ((1.0 - t) * fill_color.1 as f32 + t * end_color.1 as f32) as u8,
@@ -1903,6 +1984,12 @@ impl Bitmap {
             ink9_mask_bitmap: None,
             ink9_mask_offset: (0, 0),
             floor_rule: false,
+            // Lingo's copyPixels is the one caller that WANTS a transparent
+            // source pixel to clear the destination: offscreen-buffer
+            // scrolling blits a shifted slice and must wipe the gap it
+            // leaves. Film loops composite through the same routine and must
+            // not, or each child erases the one before it.
+            erase_transparent_source: true,
         };
         self.copy_pixels_with_params(palettes, src, dst_rect, src_rect, &params);
     }
@@ -2106,6 +2193,35 @@ impl Bitmap {
             ((src.1 as u16 * fore.1 as u16) / 255) as u8,
             ((src.2 as u16 * fore.2 as u16) / 255) as u8,
         )
+    }
+
+    /// Composite one source pixel over an alpha-aware 32-bit destination,
+    /// keeping the destination's alpha. The plain pixel writer lerps toward
+    /// the cleared black and stamps full alpha, which turns a soft source
+    /// into a solid dark shape once the offscreen is drawn on the stage.
+    fn write_over_alpha(&mut self, dst_x: i32, dst_y: i32, (sr, sg, sb): (u8, u8, u8), sa_f: f32) {
+        if sa_f < 0.001 || dst_x < 0 || dst_y < 0 || dst_x >= self.width as i32 || dst_y >= self.height as i32 {
+            return;
+        }
+        let idx = (dst_y as usize * self.width as usize + dst_x as usize) * 4;
+        if idx + 3 >= self.data.len() {
+            return;
+        }
+        let dr = self.data[idx] as f32;
+        let dg = self.data[idx + 1] as f32;
+        let db = self.data[idx + 2] as f32;
+        let da = self.data[idx + 3] as f32 / 255.0;
+        let one_minus_sa = 1.0 - sa_f;
+        let out_a = sa_f + da * one_minus_sa;
+        if out_a < 0.001 {
+            self.data[idx + 3] = 0;
+            return;
+        }
+        let inv = 1.0 / out_a;
+        self.data[idx] = ((sr as f32 * sa_f + dr * da * one_minus_sa) * inv).clamp(0.0, 255.0) as u8;
+        self.data[idx + 1] = ((sg as f32 * sa_f + dg * da * one_minus_sa) * inv).clamp(0.0, 255.0) as u8;
+        self.data[idx + 2] = ((sb as f32 * sa_f + db * da * one_minus_sa) * inv).clamp(0.0, 255.0) as u8;
+        self.data[idx + 3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
     }
 
     fn allows_colorize(depth: u8, ink: u32, is_text: bool) -> bool {
@@ -2659,7 +2775,7 @@ impl Bitmap {
                 // Map destination pixel to source coordinate with scaling.
                 // Director samples a stretched bitmap at floor(d * src / dst),
                 // the top-left of the destination pixel, not its centre.
-                // Measured on klods.dcr's ruler (member 82, 239x46 drawn at
+                // Measured on a ruler bitmap (239x46 drawn at
                 // 166x32): the floor rule reproduces the projector's pixels
                 // 100%, the centre rule 88%, and the difference is the digit
                 // rows the centre rule skips. Rotation and skew keep the
@@ -2974,6 +3090,12 @@ impl Bitmap {
                     // so their color-key behavior is unchanged.
                     let src_a = if src.use_alpha { a as f32 / 255.0 } else { 1.0 };
                     let eff = src_a * alpha;
+                    // Into an alpha offscreen the source alpha is kept, as
+                    // copy and blend ink already do.
+                    if src.use_alpha && self.bit_depth == 32 && self.use_alpha && !params.is_text_rendering {
+                        self.write_over_alpha(dst_x, dst_y, src_color, eff);
+                        continue;
+                    }
                     let blended = if eff >= 0.999 {
                         src_color
                     } else {
@@ -3158,7 +3280,11 @@ impl Bitmap {
                 // transparent pixel verbatim, which erases stale content
                 // (required for chat buffer scrolling with shifted-slice blits).
                 if src.original_bit_depth == 32 && src.use_alpha && sa == 0
-                    && !(self.bit_depth == 32 && self.use_alpha && ink == 0 && !params.is_text_rendering)
+                    && !(params.erase_transparent_source
+                        && self.bit_depth == 32
+                        && self.use_alpha
+                        && ink == 0
+                        && !params.is_text_rendering)
                 {
                     continue;
                 }
@@ -3254,7 +3380,10 @@ impl Bitmap {
                 if src.original_bit_depth == 32 && ink == 0 && !params.is_text_rendering {
                     if !src.use_alpha {
                         sa = 255;
-                    } else if self.bit_depth == 32 && self.use_alpha {
+                    } else if params.erase_transparent_source
+                        && self.bit_depth == 32
+                        && self.use_alpha
+                    {
                         // Full RGBA verbatim copy when both src and dst have alpha.
                         // Transparent src pixels (sa=0) erase dst content — required
                         // for offscreen-buffer scrolling (chat history) where the
@@ -3305,6 +3434,12 @@ impl Bitmap {
                     let dst_color =
                         if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(dst_palette_cache.table(), dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
 
+                    // Into an alpha offscreen the source alpha is kept, as
+                    // copy and blend ink already do.
+                    if src.use_alpha && self.bit_depth == 32 && self.use_alpha {
+                        self.write_over_alpha(dst_x, dst_y, src_color, src_alpha * alpha);
+                        continue;
+                    }
                     let blended = if src_alpha >= 0.999 && alpha >= 0.999 {
                         src_color
                     } else {
@@ -3412,7 +3547,21 @@ impl Bitmap {
                 // so the eventual stage composite produces the correct
                 // translucent fade (white spotlight at 30% opacity = white
                 // at α=0.3, not opaque grey).
-                if !params.is_text_rendering && ink == 32
+                //
+                // Copy ink on a 32-bit source with its own alpha takes the
+                // same path: the projector keeps that alpha, scaled by the
+                // sprite blend. Through set_pixel_fast the source was lerped
+                // toward the cleared black offscreen and stamped opaque, so
+                // a soft grey plume in a film loop came out as solid black.
+                //
+                // Transparent ink (1) on such a source is the same case: the
+                // stage path draws it as an alpha copy, and the projector
+                // shows the bitmap's own soft edges. A film loop whose last
+                // frame holds a semi-transparent impact flash with ink 1 fell
+                // through to blend_pixel here and came out as an opaque black
+                // blob for as long as the loop sat on that frame.
+                let alpha_source_copy = (ink == 0 || ink == 1) && src.original_bit_depth == 32 && src.use_alpha;
+                if !params.is_text_rendering && (ink == 32 || alpha_source_copy)
                     && self.bit_depth == 32 && self.use_alpha
                 {
                     let src_a = sa as f32 / 255.0;
@@ -3736,6 +3885,13 @@ impl Bitmap {
                 let mut line_start = para_start;
                 let mut line_w: i32 = 0;
                 let mut last_space: Option<usize> = None;
+                // Director offers a line break after a hyphen as well as at
+                // a space: it splits a long hyphenated word to fill the
+                // line, where a space-only wrap would push the whole word
+                // down and spill an extra line past a fixed-height field.
+                // The space is dropped at the break; the hyphen stays on the
+                // line before it.
+                let mut last_hyphen: Option<usize> = None;
 
                 // Walk Unicode chars (via char_indices for byte positions)
                 // rather than raw UTF-8 bytes. Bytes-based iteration both
@@ -3755,28 +3911,44 @@ impl Bitmap {
                     }
 
                     if line_w + cw > max_width && p > line_start {
-                        if let Some(sp) = last_space.filter(|&sp| sp > line_start) {
+                        // Prefer the break point nearer the wrap edge. A
+                        // space at sp ends the line at sp (dropped, next
+                        // line starts at sp + 1). A hyphen at h ends the
+                        // line at h + 1 (kept, next line also at h + 1).
+                        // Both ' ' and '-' are ASCII, so the byte offsets
+                        // land on char boundaries.
+                        let space_brk = last_space.filter(|&sp| sp > line_start).map(|sp| (sp, sp + 1));
+                        let hyphen_brk = last_hyphen.filter(|&h| h >= line_start).map(|h| (h + 1, h + 1));
+                        let brk = match (space_brk, hyphen_brk) {
+                            (Some(sb), Some(hb)) => Some(if hb.0 > sb.0 { hb } else { sb }),
+                            (Some(sb), None) => Some(sb),
+                            (None, Some(hb)) => Some(hb),
+                            (None, None) => None,
+                        };
+                        if let Some((end, next_start)) = brk {
                             lines.push(LineSpan {
                                 start: line_start,
-                                end: sp,
-                                text: text[line_start..sp].to_string(),
+                                end,
+                                text: text[line_start..end].to_string(),
                             });
-                            // ' ' is ASCII so sp + 1 is always a char
-                            // boundary.
-                            line_start = sp + 1;
+                            line_start = next_start;
                             last_space = None;
+                            last_hyphen = None;
                             // If the wrap point IS the current char (the
                             // overflowing one), skip it without counting
                             // its width on the new line.
                             if line_start > p {
                                 line_w = 0;
+                                if ch == '-' {
+                                    last_hyphen = Some(p);
+                                }
                                 continue;
                             }
                             // Re-accumulate glyph advances for the chars
                             // that now form the start of the new line.
                             line_w = text[line_start..p]
                                 .chars()
-                                .map(|c| font.get_char_advance(c as u8) as i32)
+                                .map(|c| font.get_char_advance_for(c) as i32)
                                 .sum();
                         } else {
                             #[cfg(feature = "word_hard_break")]
@@ -3793,6 +3965,9 @@ impl Bitmap {
                         }
                     }
 
+                    if ch == '-' {
+                        last_hyphen = Some(p);
+                    }
                     line_w += cw;
                 }
 

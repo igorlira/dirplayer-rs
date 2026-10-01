@@ -554,6 +554,7 @@ impl VectorShapeMemberHandlers {
                     vs.vertices = verts;
                     vs.new_curve_count = new_curve_count;
                     vs.recompute_bbox();
+                    vs.resize_to_vertices();
                     return Ok(());
                 }
                 _ => return Err(ScriptError::new(
@@ -765,7 +766,7 @@ impl VectorShapeMemberHandlers {
         // Snapshot everything we need from the cast member before we
         // need `&mut player.bitmap_manager`.
         let (w, h, fill, end, bg, stroke, stroke_width, fill_mode, closed, poly,
-             gradient_type, fill_scale, fill_offset) = {
+             gradient_type, fill_scale, fill_offset, fill_direction, fill_cycles) = {
             let cast_member = player
                 .movie
                 .cast_manager
@@ -859,7 +860,7 @@ impl VectorShapeMemberHandlers {
                 local.iter().map(|v| (v.0, v.1)).collect()
             };
             (w, h, fill, end, bg, stroke, stroke_width, fill_mode, closed, poly,
-             gradient_type, fill_scale, fill_offset)
+             gradient_type, fill_scale, fill_offset, vs.fill_direction, vs.fill_cycles)
         };
 
         let mut bitmap = Bitmap::new(
@@ -926,8 +927,8 @@ impl VectorShapeMemberHandlers {
         // the same gate in drawing.rs::draw_vector_shape.
         //
         // Gradients:
-        //  - `linear` (vertical) — t = y / (bh-1), lerp fill→end. fillDirection
-        //    and fillCycles are not yet honoured (no concrete test case).
+        //  - `linear` — ramp across the bbox along fillDirection, see
+        //    `drawing::linear_gradient_t`.
         //  - `radial` — origin at (bw/2 + fillOffset.x, bh/2 + fillOffset.y),
         //    radius ≈ half-bbox-diagonal × fillScale/100. The CS catalog
         //    `floor_shape_preview` is radial with offset (-80,+80) and
@@ -938,7 +939,6 @@ impl VectorShapeMemberHandlers {
         //    we add elliptical/rotated gradients.
         let is_gradient = fill_mode == 2;
         let is_radial = is_gradient && gradient_type == BuiltInSymbol::Radial;
-        let bh_minus_1 = (bh as f32 - 1.0).max(1.0);
         let radial_origin = (
             bw as f32 / 2.0 + fill_offset.0 as f32,
             bh as f32 / 2.0 + fill_offset.1 as f32,
@@ -961,7 +961,15 @@ impl VectorShapeMemberHandlers {
                 let dy = py - radial_origin.1;
                 ((dx * dx + dy * dy).sqrt() / radial_radius).clamp(0.0, 1.0)
             } else {
-                ((y as f32) / bh_minus_1).clamp(0.0, 1.0)
+                crate::player::bitmap::drawing::linear_gradient_t(
+                    x as f32 + 0.5,
+                    y as f32 + 0.5,
+                    (0.0, 0.0, bw as f32, bh as f32),
+                    fill_direction,
+                    fill_scale,
+                    (fill_offset.0 as f32, fill_offset.1 as f32),
+                    fill_cycles,
+                )
             };
             (
                 lerp_u8(fill.0, end.0, t),

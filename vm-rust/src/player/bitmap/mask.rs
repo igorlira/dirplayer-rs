@@ -131,6 +131,28 @@ impl Bitmap {
     }
 
     pub fn create_matte(&mut self, palettes: &PaletteMap) {
+        let matte = self.compute_matte(palettes);
+        self.matte = Some(Arc::new(matte));
+    }
+
+    /// The matte ink's shape: every pixel except the background colour that
+    /// is connected to the image's edge. Interior background pixels stay
+    /// part of the shape, as they do in Director.
+    pub fn compute_matte(&self, palettes: &PaletteMap) -> BitmapMask {
+        // A 32-bit image with its alpha channel in use carries its own
+        // shape: the matte is every pixel that is not fully transparent.
+        // The white-from-the-edge fill below would find no white border on
+        // such an image and cover its whole rectangle.
+        if self.bit_depth == 32 && self.use_alpha {
+            let mut matte = BitmapMask::new(self.width, self.height, false);
+            for y in 0..self.height {
+                for x in 0..self.width {
+                    let i = (y as usize * self.width as usize + x as usize) * 4 + 3;
+                    matte.set_bit(x, y, self.data.get(i).copied().unwrap_or(0) > 0);
+                }
+            }
+            return matte;
+        }
         let bg_color = &self.get_bg_color_ref();
         let mut mask = self.get_mask(palettes, bg_color);
         let mut outside_pixels = vec![];
@@ -156,7 +178,45 @@ impl Bitmap {
                 outside_pixels.push((x, self.height - 1));
             }
         }
-        let matte = mask.flood_matte(outside_pixels, false, true);
-        self.matte = Some(Arc::new(matte));
+        mask.flood_matte(outside_pixels, false, true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::player::bitmap::bitmap::{Bitmap, BuiltInPalette, PaletteRef};
+    use crate::player::bitmap::palette_map::PaletteMap;
+
+    #[test]
+    fn matte_keeps_interior_white_and_drops_the_white_around() {
+        // 5x5 white image with a black square ring at 1..=3: the white
+        // outside the ring touches the edge, the white centre does not.
+        let mut bmp = Bitmap::new(5, 5, 32, 32, 0, PaletteRef::BuiltIn(BuiltInPalette::SystemWin));
+        for y in 0..5usize {
+            for x in 0..5usize {
+                let ring = (1..=3).contains(&x) && (1..=3).contains(&y) && !(x == 2 && y == 2);
+                let v = if ring { 0 } else { 255 };
+                let i = (y * 5 + x) * 4;
+                bmp.data[i..i + 4].copy_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let matte = bmp.compute_matte(&PaletteMap::new());
+        assert!(!matte.get_bit(0, 0), "white touching the edge is outside the shape");
+        assert!(!matte.get_bit(4, 2));
+        assert!(matte.get_bit(1, 1), "the ring is the shape");
+        assert!(matte.get_bit(2, 2), "white enclosed by the ring stays part of the shape");
+    }
+
+    #[test]
+    fn matte_of_an_alpha_image_is_its_visible_pixels() {
+        // 3x1, alpha 0 / 255 / 0: only the middle pixel is the shape, even
+        // though none of them is white.
+        let mut bmp = Bitmap::new(3, 1, 32, 32, 8, PaletteRef::BuiltIn(BuiltInPalette::SystemWin));
+        bmp.use_alpha = true;
+        bmp.data[0..12].copy_from_slice(&[10, 20, 30, 0, 10, 20, 30, 255, 10, 20, 30, 0]);
+        let matte = bmp.compute_matte(&PaletteMap::new());
+        assert!(!matte.get_bit(0, 0));
+        assert!(matte.get_bit(1, 0));
+        assert!(!matte.get_bit(2, 0));
     }
 }

@@ -893,6 +893,30 @@ impl VectorShapeMember {
     /// mutation of `vertices` (e.g. `addVertex`) so the `.image` rasterizer
     /// and `width()`/`height()` fallbacks stay correct. Mirrors the bbox
     /// computation in `From<VectorShapeInfo>`.
+    /// After a script replaces the vertices, the authored member size no
+    /// longer describes the shape: size the member from the new outline.
+    /// Director's authored sizes are the vertex span plus the stroke width
+    /// on each side (a +-20 square with a 1 px stroke is 42 wide). A
+    /// registration point that sat in the middle moves to the new middle.
+    pub fn resize_to_vertices(&mut self) {
+        if self.vertices.is_empty() {
+            return;
+        }
+        let stroke = self.stroke_width.max(0.0);
+        let span_w = (self.bbox_right - self.bbox_left) - stroke;
+        let span_h = (self.bbox_bottom - self.bbox_top) - stroke;
+        let new_w = (span_w + 2.0 * stroke).ceil().max(1.0) as u32;
+        let new_h = (span_h + 2.0 * stroke).ceil().max(1.0) as u32;
+        let was_centered = self.center_reg_point
+            || (self.member_width > 0
+                && self.reg_point == ((self.member_width / 2) as i16, (self.member_height / 2) as i16));
+        self.member_width = new_w;
+        self.member_height = new_h;
+        if was_centered {
+            self.reg_point = ((new_w / 2) as i16, (new_h / 2) as i16);
+        }
+    }
+
     pub fn recompute_bbox(&mut self) {
         let mut left = f32::MAX;
         let mut top = f32::MAX;
@@ -3626,19 +3650,17 @@ impl CastMember {
                 // correctly combines JPEG RGB with ALFA alpha channel.
                 // decode_jpeg_bitd only looks for alpha AFTER FFD9 inside the BITD data,
                 // missing the separate ALFA chunk entirely.
-                match decode_jpeg_bitmap(&bitd_chunk.data, bitmap_info, alfa_data) {
-                    Ok(new_bitmap) => bitmap_manager.add_bitmap(new_bitmap),
-                    Err(e) => {
+                // Decoded on first use: see BitmapManager::add_lazy_bitmap.
+                let (jpeg, info, alfa) = (bitd_chunk.data.clone(), bitmap_info.clone(), alfa_data.cloned());
+                bitmap_manager.add_lazy_bitmap(Box::new(move || {
+                    decode_jpeg_bitmap(&jpeg, &info, alfa.as_ref()).unwrap_or_else(|e| {
                         warn!(
                             "Failed to decode JPEG+ALFA bitmap {}: {:?}. Using empty image.",
                             number, e
                         );
-                        bitmap_manager.add_bitmap(Bitmap::new(
-                            1, 1, 8, 8, 0,
-                            PaletteRef::BuiltIn(BuiltInPalette::GrayScale),
-                        ))
-                    }
-                }
+                        Bitmap::new(1, 1, 8, 8, 0, PaletteRef::BuiltIn(BuiltInPalette::GrayScale))
+                    })
+                }))
             } else {
                 let decompressed =
                     decompress_bitmap(&bitd_chunk.data, bitmap_info, cast_lib, bitd_chunk.version);
@@ -3680,15 +3702,14 @@ impl CastMember {
                         _ => None,
                     })
                 });
-                return match decode_jpeg_bitmap(jpeg, bitmap_info, alfa) {
-                    Ok(new_bitmap) => bitmap_manager.add_bitmap(new_bitmap),
-                    Err(e) => {
+                // Decoded on first use: see BitmapManager::add_lazy_bitmap.
+                let (jpeg, info, alfa) = (jpeg.clone(), bitmap_info.clone(), alfa.cloned());
+                return bitmap_manager.add_lazy_bitmap(Box::new(move || {
+                    decode_jpeg_bitmap(&jpeg, &info, alfa.as_ref()).unwrap_or_else(|e| {
                         warn!("Failed to decode ediM JPEG bitmap {}: {:?}. Using empty image.", number, e);
-                        bitmap_manager.add_bitmap(Bitmap::new(
-                            1, 1, 8, 8, 0, PaletteRef::BuiltIn(BuiltInPalette::GrayScale),
-                        ))
-                    }
-                };
+                        Bitmap::new(1, 1, 8, 8, 0, PaletteRef::BuiltIn(BuiltInPalette::GrayScale))
+                    })
+                }));
             }
 
             // A 32-bit alpha+JPEG member whose ediM (colour) chunk is unresolvable —
@@ -4421,17 +4442,15 @@ impl CastMember {
         let payload = &raw[flsh_start + 8..];
         let vector_member = Self::parse_flsh_payload(payload);
 
-        web_sys::console::log_1(
-            &format!(
-                "OLE member #{} identified as vectorShape: {} vertices, strokeWidth={}, fillMode={}, closed={}, bbox=({},{},{},{})",
-                number,
-                vector_member.vertices.len(),
-                vector_member.stroke_width,
-                vector_member.fill_mode,
-                vector_member.closed,
-                vector_member.bbox_left, vector_member.bbox_top,
-                vector_member.bbox_right, vector_member.bbox_bottom,
-            ).into(),
+        crate::console_warn!(
+            "OLE member #{} identified as vectorShape: {} vertices, strokeWidth={}, fillMode={}, closed={}, bbox=({},{},{},{})",
+            number,
+            vector_member.vertices.len(),
+            vector_member.stroke_width,
+            vector_member.fill_mode,
+            vector_member.closed,
+            vector_member.bbox_left, vector_member.bbox_top,
+            vector_member.bbox_right, vector_member.bbox_bottom,
         );
 
         let reg_point = (
@@ -4600,11 +4619,7 @@ impl CastMember {
             };
             let is_text_ole = ole_type.is_empty() || ole_type == "text";
             if is_text_ole {
-                let hex_dump = xm.raw_data.clone()
-                    .iter()
-                    .map(|b| format!("{:02X} ", b))
-                    .collect::<Vec<String>>()
-                    .join(" ");
+                let hex_dump = crate::director::chunks::hex_preview(&xm.raw_data);
                 debug!(
                     "XMED X2 (text member #{} '{}', {} bytes):\n{}",
                     number,
@@ -5646,7 +5661,7 @@ impl CastMember {
                         name: member_info.name.clone(),
                     })
                 } else {
-                    web_sys::console::warn_1(&format!("Script member {}: script_id {} not found in Lctx, skipping", number, script_id).into());
+                    crate::console_warn!("Script member {}: script_id {} not found in Lctx, skipping", number, script_id);
                     CastMemberType::Unknown
                 }
             }
@@ -5846,7 +5861,7 @@ impl CastMember {
                                 Some(std::rc::Rc::new(scene))
                             }
                             Err(e) => {
-                                web_sys::console::error_1(&format!("W3D parse error: {}", e).into());
+                                crate::console_error!("W3D parse error: {}", e);
                                 Some(std::rc::Rc::new(Self::create_empty_w3d_scene()))
                             }
                         }
@@ -6746,5 +6761,36 @@ impl CastMember {
             bg_color: initial_bg_color,
             reg_point,
         }
+    }
+}
+
+#[cfg(test)]
+mod vector_resize_tests {
+    use super::VectorShapeMember;
+    use crate::director::enums::VectorShapeVertex;
+
+    fn vertex(x: f32, y: f32) -> VectorShapeVertex {
+        VectorShapeVertex { x, y, handle1_x: 0.0, handle1_y: 0.0, handle2_x: 0.0, handle2_y: 0.0 }
+    }
+
+    #[test]
+    fn new_vertices_resize_the_member_and_keep_a_centred_reg_point_centred() {
+        let mut vs = VectorShapeMember::new();
+        vs.stroke_width = 1.0;
+        // Authored 32x40 with its registration point in the middle.
+        vs.member_width = 32;
+        vs.member_height = 40;
+        vs.reg_point = (16, 20);
+        // A script writes a 40 x 55 outline.
+        vs.vertices = vec![vertex(20.0, 20.0), vertex(0.0, -10.0), vertex(-20.0, -20.0), vertex(-15.0, 35.0), vertex(20.0, 20.0)];
+        vs.recompute_bbox();
+        vs.resize_to_vertices();
+        assert_eq!((vs.member_width, vs.member_height), (42, 57));
+        assert_eq!(vs.reg_point, (21, 28));
+        // A square stays square.
+        vs.vertices = vec![vertex(15.0, 15.0), vertex(15.0, -15.0), vertex(-15.0, -15.0), vertex(-15.0, 15.0), vertex(15.0, 15.0)];
+        vs.recompute_bbox();
+        vs.resize_to_vertices();
+        assert_eq!(vs.member_width, vs.member_height);
     }
 }

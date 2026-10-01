@@ -1,6 +1,6 @@
 use binary_reader::BinaryReader;
 
-use crate::io::list_readers::{read_pascal_string, read_string};
+use crate::io::list_readers::{read_pascal_string, read_pascal_string_macroman, read_string};
 
 use super::list::BasicListChunk;
 
@@ -37,7 +37,7 @@ impl CastMemberInfoChunk {
                 .unwrap();
 
         let script_src_text = read_string(&item_bufs, 0);
-        let name = read_pascal_string(&item_bufs, 1, reader.endian);
+        let name = read_pascal_string_macroman(&item_bufs, 1, reader.endian);
         let directory = read_pascal_string(&item_bufs, 2, reader.endian);
         let file_name = read_pascal_string(&item_bufs, 3, reader.endian);
         let comments = read_string(&item_bufs, 20);

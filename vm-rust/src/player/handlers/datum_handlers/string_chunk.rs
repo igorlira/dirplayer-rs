@@ -42,28 +42,109 @@ pub(crate) fn char_range_to_byte_range(s: &str, char_start: usize, char_end: usi
     (byte_start, byte_end)
 }
 
+/// The line break this text already uses. Rebuilding a line range has to put
+/// the text back together with the breaks it came with: a member authored
+/// with CR breaks that came back with CRLF grew by one byte per line, which
+/// moved every later character and left the member's style runs describing
+/// the wrong range.
+fn line_break_of(text: &str) -> &'static str {
+    if text.contains("\r\n") {
+        "\r\n"
+    } else if text.contains('\r') {
+        "\r"
+    } else if text.contains('\n') {
+        "\n"
+    } else {
+        "\r"
+    }
+}
+/// Rewrite the concatenated text of `spans` from `old_text` to `new_text`,
+/// preserving the style of every run outside the changed region. The changed
+/// run (found by common prefix/suffix diff) takes the style that already
+/// covered its first character, so replacing one line's text keeps that line's
+/// own weight instead of collapsing the member to its first run's style.
+fn rewrite_span_text(spans: &[StyledSpan], old_text: &str, new_text: &str) -> Vec<StyledSpan> {
+    let oc: Vec<char> = old_text.chars().collect();
+    let nc: Vec<char> = new_text.chars().collect();
+    let max_pre = oc.len().min(nc.len());
+    let mut p = 0usize;
+    while p < max_pre && oc[p] == nc[p] { p += 1; }
+    let mut suf = 0usize;
+    while suf < (max_pre - p) && oc[oc.len() - 1 - suf] == nc[nc.len() - 1 - suf] { suf += 1; }
+    let prefix_bytes: usize = oc[..p].iter().map(|c| c.len_utf8()).sum();
+    let old_suffix_start_char = oc.len() - suf;
+    let suffix_start_byte: usize = oc[..old_suffix_start_char].iter().map(|c| c.len_utf8()).sum();
+    let repl: String = nc[p..nc.len() - suf].iter().collect();
+    // Style covering the first changed character (or the last kept run).
+    let mut off = 0usize;
+    let mut cut_style = spans.first().map(|s| s.style.clone()).unwrap_or_default();
+    for sp in spans {
+        let e = off + sp.text.len();
+        if off <= prefix_bytes && prefix_bytes < e { cut_style = sp.style.clone(); break; }
+        if e <= prefix_bytes { cut_style = sp.style.clone(); }
+        off = e;
+    }
+    let mut out: Vec<StyledSpan> = Vec::new();
+    // Retained prefix runs.
+    off = 0;
+    for sp in spans {
+        let e = off + sp.text.len();
+        if off < prefix_bytes {
+            let take = prefix_bytes.min(e) - off;
+            if take > 0 { out.push(StyledSpan { text: sp.text[..take].to_string(), style: sp.style.clone() }); }
+        }
+        off = e;
+    }
+    if !repl.is_empty() { out.push(StyledSpan { text: repl, style: cut_style }); }
+    // Retained suffix runs.
+    off = 0;
+    for sp in spans {
+        let e = off + sp.text.len();
+        if e > suffix_start_byte {
+            let from = suffix_start_byte.max(off) - off;
+            if from < sp.text.len() { out.push(StyledSpan { text: sp.text[from..].to_string(), style: sp.style.clone() }); }
+        }
+        off = e;
+    }
+    out
+}
+
 impl StringChunkUtils {
+    /// Read the source text behind a chunk, for BOTH Field and Text members
+    /// (the old `.as_field().unwrap()` panicked the whole VM when a chunk of
+    /// a #text member was mutated — MX 2004 movies do that routinely).
+    fn source_text(
+        player: &DirPlayer,
+        original_str_src: &StringChunkSource,
+    ) -> Result<String, ScriptError> {
+        match original_str_src {
+            StringChunkSource::Datum(original_str_ref) => {
+                player.get_datum(original_str_ref).string_value()
+            }
+            StringChunkSource::Member(member_ref) => {
+                let member = player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(&member_ref)
+                    .ok_or_else(|| ScriptError::new("Chunk source member not found".to_string()))?;
+                match &member.member_type {
+                    crate::player::cast_member::CastMemberType::Field(f) => Ok(f.text.clone()),
+                    crate::player::cast_member::CastMemberType::Text(t) => Ok(t.text.clone()),
+                    _ => Err(ScriptError::new(
+                        "Chunk source member is not a text member".to_string(),
+                    )),
+                }
+            }
+        }
+    }
+
     pub fn delete(
         player: &mut DirPlayer,
         original_str_src: &StringChunkSource,
         chunk_expr: &StringChunkExpr,
     ) -> Result<(), ScriptError> {
         let new_string = {
-            let original_str = match original_str_src {
-                StringChunkSource::Datum(original_str_ref) => {
-                    player.get_datum(original_str_ref).string_value()?
-                }
-                StringChunkSource::Member(member_ref) => player
-                    .movie
-                    .cast_manager
-                    .find_member_by_ref(&member_ref)
-                    .unwrap()
-                    .member_type
-                    .as_field()
-                    .unwrap()
-                    .text
-                    .clone(),
-            };
+            let original_str = Self::source_text(player, original_str_src)?;
             Self::string_by_deleting_chunk(&original_str, &chunk_expr)
         }?;
         Self::set_value(player, original_str_src, chunk_expr, new_string)?;
@@ -77,21 +158,7 @@ impl StringChunkUtils {
         new_string: String,
     ) -> Result<(), ScriptError> {
         let new_string = {
-            let original_str = match original_str_src {
-                StringChunkSource::Datum(original_str_ref) => {
-                    player.get_datum(original_str_ref).string_value()?
-                }
-                StringChunkSource::Member(member_ref) => player
-                    .movie
-                    .cast_manager
-                    .find_member_by_ref(&member_ref)
-                    .unwrap()
-                    .member_type
-                    .as_field()
-                    .unwrap()
-                    .text
-                    .clone(),
-            };
+            let original_str = Self::source_text(player, original_str_src)?;
             Self::string_by_putting_into_chunk(&original_str, &chunk_expr, &new_string)
         }?;
         Self::set_value(player, original_str_src, chunk_expr, new_string)?;
@@ -128,7 +195,28 @@ impl StringChunkUtils {
                     .member_type;
                 match member {
                     CastMemberType::Field(field) => field.set_text_preserving_caret(new_string),
-                    CastMemberType::Text(member) => member.set_text_preserving_caret(new_string),
+                    CastMemberType::Text(member) => {
+                        // Rewriting part of a text member (a script localising
+                        // one line: `member("Label").line[1] = "..."`)
+                        // must update the content AND keep every other run's
+                        // style. Clearing the spans fixed stale content but
+                        // dropped all character styles, so a member whose first
+                        // line is bold and the rest regular (a map tooltip:
+                        // bold name over a plain subtitle) rendered wholly bold
+                        // from the member's single fallback font_style. Diff the
+                        // old and new text and rewrite only the changed run,
+                        // giving it the style that region already had.
+                        let old_text = member.text.clone();
+                        if member.html_styled_spans.is_empty() || old_text == new_string {
+                            member.set_text_preserving_caret(new_string);
+                            member.text_set_at_runtime = true;
+                        } else {
+                            let new_spans = rewrite_span_text(&member.html_styled_spans, &old_text, &new_string);
+                            member.set_text_preserving_caret(new_string);
+                            member.html_styled_spans = new_spans;
+                            member.text_set_at_runtime = true;
+                        }
+                    }
                     _ => {
                         return Err(ScriptError::new(
                             "Cannot set contents for non-text member".to_string(),
@@ -218,7 +306,7 @@ impl StringChunkUtils {
 
                 let mut new_chunks = chunk_list;
                 new_chunks.drain(start..end);
-                Ok(new_chunks.join("\r\n"))
+                Ok(new_chunks.join(line_break_of(string)))
             },
         }
     }
@@ -392,7 +480,7 @@ impl StringChunkUtils {
                 if chunk_list.len() == 0 {
                     return Ok("".to_string());
                 }
-                chunk_list[start..end].join("\r\n")
+                chunk_list[start..end].join(line_break_of(string))
             }
         };
 
@@ -437,7 +525,7 @@ impl StringChunkUtils {
                 let delimiter = match chunk_expr.chunk_type {
                     StringChunkType::Item => chunk_expr.item_delimiter.to_string(),
                     StringChunkType::Word => " ".to_string(),
-                    StringChunkType::Line => "\r\n".to_string(),
+                    StringChunkType::Line => line_break_of(string).to_string(),
                     _ => unreachable!(),
                 };
                 Ok(new_chunks.join(&delimiter))
@@ -488,7 +576,7 @@ impl StringChunkUtils {
                 let delimiter = match chunk_expr.chunk_type {
                     StringChunkType::Item => chunk_expr.item_delimiter.to_string(),
                     StringChunkType::Word => " ".to_string(),
-                    StringChunkType::Line => "\r\n".to_string(),
+                    StringChunkType::Line => line_break_of(string).to_string(),
                     _ => unreachable!(),
                 };
                 Ok(new_chunks.join(&delimiter))
@@ -540,7 +628,7 @@ impl StringChunkUtils {
                 let delimiter = match chunk_expr.chunk_type {
                     StringChunkType::Item => chunk_expr.item_delimiter.to_string(),
                     StringChunkType::Word => " ".to_string(),
-                    StringChunkType::Line => "\r\n".to_string(),
+                    StringChunkType::Line => line_break_of(string).to_string(),
                     _ => unreachable!(),
                 };
                 Ok(new_chunks.join(&delimiter))
@@ -769,6 +857,43 @@ impl StringChunkHandlers {
         *spans = new_spans;
     }
 
+    fn is_chunk_symbol(datum_ref: &DatumRef) -> bool {
+        crate::player::reserve_player_ref(|player| {
+            let name = player.get_datum(datum_ref).string_value().unwrap_or_default();
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                "char" | "chars" | "word" | "words" | "line" | "lines" | "item" | "items"
+            )
+        })
+    }
+
+    /// `chunk.word[a..b] = v` compiles to setProp(chunk, #word, a, b, v):
+    /// put v into that part of the chunk's text, then the chunk back into
+    /// its source. Before this the write was dropped as an unknown property.
+    pub fn set_nested_chunk(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let (source, outer, text) = player.get_datum(datum).to_string_chunk()?;
+            let (source, outer, text) = (source.clone(), outer.clone(), text.to_owned());
+            let kind = player.get_datum(&args[0]).symbol_value()?;
+            let first = player.get_datum(&args[1]).int_value()?;
+            let (last, value_ref) = if args.len() >= 4 {
+                (player.get_datum(&args[2]).int_value()?, &args[3])
+            } else {
+                (first, &args[2])
+            };
+            let replacement = player.get_datum(value_ref).string_value()?;
+            let inner = StringChunkExpr {
+                chunk_type: StringChunkType::from(kind),
+                start: first,
+                end: last,
+                item_delimiter: player.movie.item_delimiter,
+            };
+            let new_text = StringChunkUtils::string_by_putting_into_chunk(&text, &inner, &replacement)?;
+            StringChunkUtils::set_contents(player, &source, &outer, new_text)?;
+            Ok(DatumRef::Void)
+        })
+    }
+
     pub fn set_prop(
         player: &mut DirPlayer,
         datum_ref: &DatumRef,
@@ -784,6 +909,18 @@ impl StringChunkHandlers {
             // the whole body rendered at 18.
             "font" | "fontstyle" | "color" | "hyperlink" | "fontsize" => {
                 return Self::set_chunk_style_prop(player, datum_ref, prop, value_ref);
+            }
+            // `chunk.setProp(#text, s)` / `chunk.text = s` — replace the
+            // chunk's contents, same semantics as `put s into <chunk>`.
+            // A Director MX 2004 movie rewrites per-line template text this way;
+            // the previous warn-and-ignore fallback left original/template
+            // words visible in the rendered story text.
+            "text" => {
+                let (source, chunk_expr, ..) = player.get_datum(datum_ref).to_string_chunk()?;
+                let source = source.clone();
+                let chunk_expr = chunk_expr.clone();
+                let new_str = player.get_datum(value_ref).string_value()?;
+                return StringChunkUtils::set_contents(player, &source, &chunk_expr, new_str);
             }
             "charspacing" => {
                 // Update the source member's char_spacing
@@ -818,9 +955,10 @@ impl StringChunkHandlers {
                 }
             }
             _ => {
-                return Err(ScriptError::new(format!(
-                    "Cannot set property {prop} for string chunk datum"
-                )))
+                // Unknown chunk property: warn-and-continue instead of erroring.
+                // A ScriptError here reaches on_script_error which stops the
+                // whole movie; a missed style tweak is strictly less damage.
+                log::warn!("Ignoring set of unknown property {prop} for string chunk datum");
             }
         }
         Ok(())
@@ -849,7 +987,8 @@ impl StringChunkHandlers {
         enum StyleChange {
             Font(String),
             FontSize(i32),
-            FontStyle { bold: bool, italic: bool, underline: bool },
+            /// `None` leaves that flag as the chunk has it.
+            FontStyle { bold: Option<bool>, italic: Option<bool>, underline: Option<bool> },
             Color(u32),
             /// Director chapter 15 `hyperlink` — per-character link target
             /// stored on `HtmlStyle.hyperlink`. Setting empty string clears.
@@ -863,9 +1002,9 @@ impl StringChunkHandlers {
             "fontstyle" => {
                 // Director accepts either a single symbol (#bold) or a list
                 // of symbols ([#bold, #underline]). #plain resets the style.
-                let mut bold = false;
-                let mut italic = false;
-                let mut underline = false;
+                let mut bold = None;
+                let mut italic = None;
+                let mut underline = None;
                 let symbols: Vec<Symbol> = match &value_datum {
                     Datum::Symbol(s) => vec![s.clone()],
                     Datum::List(_, items, _) => {
@@ -879,15 +1018,22 @@ impl StringChunkHandlers {
                     }
                     _ => Vec::new(),
                 };
-                for s in symbols.iter() {
+                // On a chunk, only the first entry of the list takes effect,
+                // and it is added to the styles the chunk already has; #plain
+                // clears them. Measured on the projector: a word given
+                // [#italic, #bold] draws italic at regular weight, the first
+                // character of a bold member given [#underline, #bold] stays
+                // bold and gains the underline, and a word given [#bold]
+                // alone is bold.
+                for s in symbols.iter().take(1) {
                     match s.into_builtin() {
-                        Some(BuiltInSymbol::Bold) => bold = true,
-                        Some(BuiltInSymbol::Italic) => italic = true,
-                        Some(BuiltInSymbol::Underline) => underline = true,
+                        Some(BuiltInSymbol::Bold) => bold = Some(true),
+                        Some(BuiltInSymbol::Italic) => italic = Some(true),
+                        Some(BuiltInSymbol::Underline) => underline = Some(true),
                         Some(BuiltInSymbol::Plain) => {
-                            bold = false;
-                            italic = false;
-                            underline = false;
+                            bold = Some(false);
+                            italic = Some(false);
+                            underline = Some(false);
                         }
                         _ => {}
                     }
@@ -945,9 +1091,9 @@ impl StringChunkHandlers {
                         StyleChange::Font(f) => style.font_face = Some(f.clone()),
                         StyleChange::FontSize(sz) => style.font_size = Some(*sz),
                         StyleChange::FontStyle { bold, italic, underline } => {
-                            style.bold = *bold;
-                            style.italic = *italic;
-                            style.underline = *underline;
+                            if let Some(b) = bold { style.bold = *b; }
+                            if let Some(i) = italic { style.italic = *i; }
+                            if let Some(u) = underline { style.underline = *u; }
                         }
                         StyleChange::Color(rgb) => style.color = Some(*rgb),
                         StyleChange::Hyperlink(link) => {
@@ -970,10 +1116,11 @@ impl StringChunkHandlers {
                     // whole member — matches Director's field behaviour.
                     StyleChange::FontSize(sz) => field.font_size = (*sz).max(0) as u16,
                     StyleChange::FontStyle { bold, italic, underline } => {
+                        let had = field.font_style.to_lowercase();
                         let mut parts: Vec<&str> = Vec::new();
-                        if *bold { parts.push("bold"); }
-                        if *italic { parts.push("italic"); }
-                        if *underline { parts.push("underline"); }
+                        if bold.unwrap_or(had.contains("bold")) { parts.push("bold"); }
+                        if italic.unwrap_or(had.contains("italic")) { parts.push("italic"); }
+                        if underline.unwrap_or(had.contains("underline")) { parts.push("underline"); }
                         field.font_style = if parts.is_empty() { "plain".to_string() } else { parts.join(",") };
                     }
                     StyleChange::Color(rgb) => {
@@ -1124,6 +1271,29 @@ impl StringChunkHandlers {
                 }
             }
             Some(BuiltInSymbol::GetPropRef) => Self::get_prop_ref(datum, args),
+            // Explicit `setProp(chunk, #prop, value)` handler-call form.
+            // The dot-syntax path (`chunk.color = v`) already routes through
+            // script.rs::set_obj_prop -> Self::set_prop; this wires the same
+            // implementation into the generic handler-call dispatch, which
+            // a Director MX 2004 movie hits on startup.
+            Some(BuiltInSymbol::SetProp) => {
+                if args.len() < 2 {
+                    return Err(ScriptError::new(
+                        "setProp requires 2 arguments for string chunk datum".to_string(),
+                    ));
+                }
+                if args.len() >= 3 && Self::is_chunk_symbol(&args[0]) {
+                    return Self::set_nested_chunk(datum, args);
+                }
+                let datum = datum.clone();
+                let prop_ref = args[0].clone();
+                let value_ref = args[1].clone();
+                reserve_player_mut(|player| {
+                    let prop_name = player.get_datum(&prop_ref).string_value()?;
+                    Self::set_prop(player, &datum, Symbol::from_str(&prop_name), &value_ref)?;
+                    Ok(DatumRef::Void)
+                })
+            }
             Some(BuiltInSymbol::Delete) => Self::delete(datum, args),
             Some(BuiltInSymbol::SetContents) => Self::set_contents(datum, args),
             Some(BuiltInSymbol::SetContentsBefore) => Self::set_contents_before(datum, args),
@@ -1315,6 +1485,107 @@ mod tests {
         StringChunkUtils::resolve_chunk_expr_string(s, &expr).unwrap()
     }
 
+    fn spans(v: &[(&str, bool)]) -> Vec<StyledSpan> {
+        v.iter()
+            .map(|(t, b)| {
+                let mut style = crate::player::handlers::datum_handlers::cast_member::font::HtmlStyle::default();
+                style.bold = *b;
+                StyledSpan { text: t.to_string(), style }
+            })
+            .collect()
+    }
+
+    fn runs(v: &[StyledSpan]) -> Vec<(String, bool)> {
+        let mut out: Vec<(String, bool)> = Vec::new();
+        for sp in v {
+            match out.last_mut() {
+                Some(last) if last.1 == sp.style.bold => last.0.push_str(&sp.text),
+                _ => out.push((sp.text.clone(), sp.style.bold)),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn line_write_keeps_the_break_style() {
+        // Rebuilding the text has to reuse the break the member came with.
+        // Returning CRLF for a CR member added a byte per line, so the style
+        // runs (which keep the original text) described the wrong range and
+        // the weight of a later line came out wrong.
+        let expr = StringChunkExpr {
+            chunk_type: StringChunkType::Line,
+            start: 1,
+            end: 1,
+            item_delimiter: ',',
+        };
+        for (text, want) in [
+            ("one\rtwo\rthree", "ONE\rtwo\rthree"),
+            ("one\r\ntwo", "ONE\r\ntwo"),
+            ("one\ntwo", "ONE\ntwo"),
+        ] {
+            assert_eq!(
+                StringChunkUtils::string_by_putting_into_chunk(text, &expr, "ONE").unwrap(),
+                want
+            );
+        }
+    }
+
+    #[test]
+    fn span_rewrite_keeps_every_character() {
+        // The rewrite must always hand back exactly the new text. When it
+        // did not, the spans drifted shorter than the member's text and the
+        // next write found nothing to keep, so the member fell back to its
+        // member-wide style: a tooltip whose name alone is bold went wholly
+        // bold once the map updated its progress line.
+        let mut v = spans(&[("The north tower", true), ("\r(fractions and decimals)\r0/6", false)]);
+        let mut text = "The north tower\r(fractions and decimals)\r0/6".to_string();
+        for next in [
+            "Nordt\u{e5}rnet\r(fractions and decimals)\r0/6",
+            "Nordt\u{e5}rnet\r(br\u{f8}ker og decimaltal)\r0/6",
+            "Nordt\u{e5}rnet\r(br\u{f8}ker og decimaltal)\r0/6",
+            "Nordt\u{e5}rnet\r(br\u{f8}ker og decimaltal)\r3/6",
+            "Nordt\u{e5}rnet\r(br\u{f8}ker og decimaltal)\r3/6",
+        ] {
+            v = rewrite_span_text(&v, &text, next);
+            text = next.to_string();
+            let joined: String = v.iter().map(|s| s.text.as_str()).collect();
+            assert_eq!(joined, text, "spans must spell out the member's text");
+            assert_eq!(runs(&v)[0].1, true, "the name stays bold");
+            assert_eq!(runs(&v).len(), 2, "name bold, the rest regular");
+        }
+    }
+
+    #[test]
+    fn line_write_keeps_the_other_lines_weight() {
+        // A map tooltip: bold name, regular subtitle and progress. The
+        // localisation rewrites line 1 and then line 2; both writes must
+        // leave the regular lines regular.
+        let name_da = "Nordt\u{e5}rnet";
+        let mut v = spans(&[("The north tower", true), ("\r(fractions and decimals)\r0/6", false)]);
+        let mut text = "The north tower\r(fractions and decimals)\r0/6".to_string();
+
+        let next = format!("{}\r(fractions and decimals)\r0/6", name_da);
+        v = rewrite_span_text(&v, &text, &next);
+        text = next;
+        assert_eq!(
+            runs(&v),
+            vec![
+                (name_da.to_string(), true),
+                ("\r(fractions and decimals)\r0/6".to_string(), false),
+            ]
+        );
+
+        let next = format!("{}\r(br\u{f8}ker og decimaltal)\r0/6", name_da);
+        v = rewrite_span_text(&v, &text, &next);
+        assert_eq!(
+            runs(&v),
+            vec![
+                (name_da.to_string(), true),
+                ("\r(br\u{f8}ker og decimaltal)\r0/6".to_string(), false),
+            ]
+        );
+    }
+
     #[test]
     fn word_range_preserves_original_delimiters() {
         // `tMessage.word[2..tMessage.word.count]` — the returns between words
@@ -1350,6 +1621,53 @@ mod tests {
         assert_eq!(del_word("a b c", 3, 0), "a b");
         // Interior runs of whitespace: only the deleted gap goes.
         assert_eq!(del_word("a   b   c", 2, 0), "a   c");
+    }
+}
+
+#[cfg(test)]
+mod nested_chunk_write_tests {
+    use super::*;
+    use crate::player::testing::{run_test, TestPlayer};
+
+    fn sym(player: &mut DirPlayer, s: &str) -> DatumRef {
+        player.alloc_datum(Datum::Symbol(Symbol::from_str(s)))
+    }
+
+    #[test]
+    fn a_word_of_a_line_is_written_back_into_the_source() {
+        crate::player::init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            // member("Label").line[3].word[1] = "4/4" on a three-line text.
+            let (source, chunk, args) = reserve_player_mut(|player| {
+                let source = player.alloc_datum(Datum::String("Den Dybe\r\n(gange)\r\n0/4 x".to_string()));
+                let line = StringChunkExpr { chunk_type: StringChunkType::Line, start: 3, end: 3, item_delimiter: ',' };
+                let chunk = player.alloc_datum(Datum::StringChunk(StringChunkSource::Datum(source.clone()), line, "0/4 x".to_string()));
+                let args = vec![sym(player, "word"), player.alloc_datum(Datum::Int(1)), player.alloc_datum(Datum::String("4/4".to_string()))];
+                (source, chunk, args)
+            });
+            StringChunkHandlers::set_nested_chunk(&chunk, &args).unwrap();
+            let text = reserve_player_mut(|player| player.get_datum(&source).string_value().unwrap());
+            assert_eq!(text, "Den Dybe\r\n(gange)\r\n4/4 x");
+        });
+    }
+
+    #[test]
+    fn a_range_form_writes_the_whole_range() {
+        crate::player::init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            let (source, chunk, args) = reserve_player_mut(|player| {
+                let source = player.alloc_datum(Datum::String("a b c d".to_string()));
+                let whole = StringChunkExpr { chunk_type: StringChunkType::Line, start: 1, end: 1, item_delimiter: ',' };
+                let chunk = player.alloc_datum(Datum::StringChunk(StringChunkSource::Datum(source.clone()), whole, "a b c d".to_string()));
+                let args = vec![sym(player, "word"), player.alloc_datum(Datum::Int(2)), player.alloc_datum(Datum::Int(3)), player.alloc_datum(Datum::String("X".to_string()))];
+                (source, chunk, args)
+            });
+            StringChunkHandlers::set_nested_chunk(&chunk, &args).unwrap();
+            let text = reserve_player_mut(|player| player.get_datum(&source).string_value().unwrap());
+            assert_eq!(text, "a X d");
+        });
     }
 }
 

@@ -49,11 +49,24 @@ function createBlobUrl(deflatedBase64: string, mimeType: string): string {
   return URL.createObjectURL(blob);
 }
 
+// The script's own URL, read while it is first evaluated (currentScript is
+// null afterwards). A build that ships the wasm as a file puts it beside the
+// script, and it takes the script's query too, so a `?v=` that versions the
+// bundle versions the engine with it.
+const scriptSrc = (document.currentScript as HTMLScriptElement | null)?.src || '';
+const WASM_FILE_NAME = 'dirplayer-vm.wasm';
+
 // Lazily create blob URLs on first access
 let wasmBlobUrl: string | null = null;
 let fontBlobUrl: string | null = null;
 
 export function getEmbeddedWasmUrl(): string {
+  if (!wasmBase64) {
+    const base = scriptSrc || document.baseURI;
+    const url = new URL(WASM_FILE_NAME, base);
+    if (scriptSrc) url.search = new URL(scriptSrc).search;
+    return url.href;
+  }
   if (!wasmBlobUrl) {
     wasmBlobUrl = createBlobUrl(wasmBase64, 'application/wasm');
   }

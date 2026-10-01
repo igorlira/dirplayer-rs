@@ -226,7 +226,7 @@ impl SoundChannelDatumHandlers {
                     ));
                 }
                 // Director's order is fadeTo(volume, milliseconds). Read the
-                // other way round, Matematik i Maaneby's music button,
+                // other way round, a measured movie's music button,
                 // `sound(1).fadeTo(200 * musik, 1500)`, turned the music OFF by
                 // fading to 1500 over 0 ticks: 1500 clamps to 255, so the button
                 // meant to silence the music set it to full, instantly.
@@ -430,6 +430,7 @@ impl SoundChannelDatumHandlers {
         );
 
         ch.stop_playback_nodes();
+        ch.queued_unstarted = false;
 
         if !ch.playlist_segments.is_empty() {
             ch.current_segment_index = Some(0);
@@ -474,6 +475,14 @@ impl SoundChannelDatumHandlers {
             let mut ch = channel_rc.borrow_mut();
             ch.loop_count = loop_count;
             ch.loops_remaining = loop_count;
+            // A new sound replaces the channel's queue, as play(member) does
+            // above. Left in place, the queue resumed when the new sound
+            // ended: a narration that queued ten spoken numbers and then
+            // moved on with puppetSound heard the rest of the numbers come
+            // back in the middle of its next line.
+            ch.playlist_segments.clear();
+            ch.playlist.clear();
+            ch.current_segment_index = None;
         }
 
         // Call the associated function with the Rc
@@ -696,6 +705,7 @@ impl SoundChannelDatumHandlers {
         // --- ✅ Save results to the channel
         let channel_rc = Self::get_sound_channel_mut(player, datum)?;
         let mut channel = channel_rc.borrow_mut();
+        channel.note_queue_on_silent_channel();
         channel.playlist_segments = segments;
         channel.playlist = playlist;
 
@@ -1172,6 +1182,11 @@ pub struct SoundChannel {
     /// fall before `start_time`, so a `[#startTime: N]` seek doesn't
     /// re-fire cues already behind the playhead).
     pub next_cue_index: usize,
+
+    /// Entries were queued on a silent channel and `play()` has not been
+    /// called since. Director leaves such a queue waiting: the channel is not
+    /// busy until something starts it (see `has_pending_sound`).
+    pub queued_unstarted: bool,
 }
 
 impl SoundChannel {
@@ -1447,6 +1462,7 @@ impl SoundChannel {
             decode_generation: Rc::new(RefCell::new(0)),
             playback_start_context_time: 0.0,
             next_cue_index: 0,
+            queued_unstarted: false,
         }
     }
 
@@ -1794,6 +1810,7 @@ impl SoundChannel {
             debug!("🔄 Ready to play immediately");
             channel.status = SoundStatus::Idle;
             channel.queued_members.clear();
+            channel.queued_unstarted = false;
 
             if channel.loop_count == 0 || channel.loop_count > 1 {
                 channel.member = Some(member_ref.clone());
@@ -1902,6 +1919,14 @@ impl SoundChannel {
                 // playing 2-3). The async task / error paths below take over the
                 // Loading → Playing/Idle transitions from here.
                 this.status = SoundStatus::Loading;
+                // `soundBusy` treats a channel that has sat in Loading for
+                // more than five seconds as stuck and idles it, measuring
+                // from this stamp. Left at the previous sound's start time,
+                // a sound started more than five seconds after the last one
+                // was idled by the very first `soundBusy` after its
+                // puppetSound: a frame script that holds while the
+                // narration plays moved on at once.
+                this.playback_start_context_time = this.context_time();
             }
             // Stash sound_member + cue cursor are set further below, inside
             // the async resampling completion block — at the exact moment we
@@ -1926,7 +1951,7 @@ impl SoundChannel {
                 Err(e) => {
                     error!("❌ Failed to load sound: {}", e);
                     let mut this = self_rc.borrow_mut();
-                    this.status = SoundStatus::Idle;
+                    this.skip_unplayable();
                     return;
                 }
             };
@@ -1963,7 +1988,7 @@ impl SoundChannel {
                         error!("❌ MP3 playback failed for \"{}\": {:?} ({} bytes, first bytes {:02X?})",
                             member_name, e, mp3_data.len(), &mp3_data[0..16.min(mp3_data.len())]);
                         let mut ch = self_rc_clone.borrow_mut();
-                        ch.status = SoundStatus::Idle;
+                        ch.skip_unplayable();
                     }
                 });
                 debug!("🚀 Spawned MP3 decode task (start_sound)");
@@ -1974,7 +1999,7 @@ impl SoundChannel {
             if audio_data.samples.is_empty() {
                 error!("❌ Audio data has no samples");
                 let mut this = self_rc.borrow_mut();
-                this.status = SoundStatus::Idle;
+                this.skip_unplayable();
                 return;
             }
 
@@ -2006,7 +2031,7 @@ impl SoundChannel {
                         audio_data.samples.len(), target_sample_rate, e
                     );
                     let mut this = self_rc.borrow_mut();
-                    this.status = SoundStatus::Idle;
+                    this.skip_unplayable();
                     return;
                 }
             };
@@ -2209,7 +2234,7 @@ impl SoundChannel {
             debug!("🚀 Spawned MP3 decode task (start_sound #2)");
         } else {
             let mut this = self_rc.borrow_mut();
-            this.status = SoundStatus::Idle;
+            this.skip_unplayable();
             error!(
                 "❌ start_sound failed - couldn't get sound member (datum type: {})",
                 datum.type_str()
@@ -2307,18 +2332,26 @@ impl SoundChannel {
             *ch.is_decoding.borrow_mut() = false;
         };
 
-        // Extract valid MP3 frames
-        let clean_mp3 = match Self::extract_valid_mp3_frames(&mp3_bytes) {
-            Some(data) => data,
-            None => {
-                error!("❌ No valid MP3 frames found – treating as PCM");
-                clear_flag();
-                return Err(JsValue::from_str("No valid MP3 data"));
+        // Extract valid MP3 frames. An Ogg stream skips this: frame extraction
+        // exists to find MPEG frames inside a buffer that may hold junk around
+        // them, and running it on Ogg would find no frames and refuse a stream
+        // the browser decodes perfectly well.
+        let is_ogg = crate::director::chunks::audio_format::is_ogg(&mp3_bytes);
+        let clean_mp3 = if is_ogg {
+            mp3_bytes.clone()
+        } else {
+            match Self::extract_valid_mp3_frames(&mp3_bytes) {
+                Some(data) => data,
+                None => {
+                    error!("❌ No valid MP3 frames found – treating as PCM");
+                    clear_flag();
+                    return Err(JsValue::from_str("No valid MP3 data"));
+                }
             }
         };
 
         // NEW: Log detailed MP3 info
-        if clean_mp3.len() >= 4 {
+        if !is_ogg && clean_mp3.len() >= 4 {
             let header =
                 u32::from_be_bytes([clean_mp3[0], clean_mp3[1], clean_mp3[2], clean_mp3[3]]);
             let version = (header >> 19) & 0x3;
@@ -2694,16 +2727,18 @@ impl SoundChannel {
     pub fn play_next(&mut self) {
         debug!("SoundChannel({:?}) -> playNext", self.channel_num);
 
+        self.queued_unstarted = false;
         self.start_next_segment();
     }
 
     pub fn stop(&mut self) {
         self.status = SoundStatus::Idle;
+        self.queued_unstarted = false;
         self.elapsed_time = 0.0;
         self.loops_remaining = 0;
         self.is_fading = false;
-        // A stopped channel keeps nothing queued. Matematik i Maaneby's
-        // Gentag button stops channel 4 and queues the narration again; with
+        // A stopped channel keeps nothing queued. A measured movie's
+        // repeat button stops channel 4 and queues the narration again; with
         // the old entries left in place they played before the new ones.
         self.playlist_segments.clear();
         self.playlist.clear();
@@ -3177,6 +3212,20 @@ impl SoundChannel {
             sound_bytes.len(), channels, sample_rate, bits_per_sample, codec, expected_samples
         );
         
+        // Ogg first, and unconditionally: it carries its own rate, channel
+        // count and length, so none of the PCM size reasoning below applies to
+        // it, and none of it should be allowed to second-guess a container
+        // that is unambiguous from its first four bytes.
+        if crate::director::chunks::audio_format::is_ogg(sound_bytes) {
+            debug!("Ogg stream detected ({} bytes) - handing it to the browser decoder", sound_bytes.len());
+            return Ok(AudioData {
+                samples: vec![],
+                num_channels: channels as u16,
+                sample_rate,
+                compressed_data: Some(sound_bytes.to_vec()),
+            });
+        }
+
         // Check for MP3, but skip when data size matches expected raw PCM.
         // sndH/sndS headers sometimes claim "raw_pcm" when data is actually MP3-compressed.
         // We detect this by comparing data size to what raw PCM would need.
@@ -3626,6 +3675,7 @@ impl SoundChannel {
             loops_remaining: loop_count,
         };
 
+        self.note_queue_on_silent_channel();
         self.playlist_segments.push(segment);
         self.playlist.push(datum_ref.clone());
 
@@ -3705,7 +3755,7 @@ impl SoundChannel {
     }
 
     /// fadeOut({ms}): fade to silence and then stop, as Director does. Left
-    /// playing at volume 0 the channel stayed busy, and Matematik i Maaneby's
+    /// playing at volume 0 the channel stayed busy, and a measured movie's
     /// map, which fades the previous house's voice out and sets the volume
     /// back to 255 for the next, had every voice after the first swallowed.
     pub fn fade_out(&mut self, ms: i32) {
@@ -3729,7 +3779,65 @@ impl SoundChannel {
     }
 
     pub fn is_busy(&self) -> bool {
-        self.status != SoundStatus::Idle
+        self.status != SoundStatus::Idle || self.has_pending_sound()
+    }
+
+    /// Called before a `queue()` or `setPlayList()` adds entries. On a channel
+    /// that is silent and has nothing else to play, the entries wait for
+    /// `play()`, as Director's do, and until then the channel is not busy.
+    /// Counted as busy, a movie that queues a line and then waits for
+    /// `soundBusy` to fall before it calls `play()` would wait for good. On a
+    /// channel that is playing, or between two clips of a queue, the new
+    /// entries join what is already running and keep it busy as before.
+    fn note_queue_on_silent_channel(&mut self) {
+        if self.status == SoundStatus::Idle && self.source_node.is_none() && !self.has_pending_sound() {
+            self.queued_unstarted = true;
+        }
+    }
+
+    /// A clip that cannot start (the entry names no sound member, or its data
+    /// will not decode) is passed over as if it had ended at once, and the
+    /// channel goes on to whatever is queued after it. Left Idle with the rest
+    /// of a playlist still waiting, the channel counted as busy for good,
+    /// since a queue still to play keeps `soundBusy` true, and a frame that
+    /// waits for the channel to fall silent never moved on. The clip's own
+    /// remaining loops are dropped with it.
+    fn skip_unplayable(&mut self) {
+        self.status = SoundStatus::Idle;
+        self.source_node = None;
+        if !self.has_pending_sound() {
+            return;
+        }
+        match self.current_segment_index {
+            Some(i) => {
+                if let Some(seg) = self.playlist_segments.get_mut(i) {
+                    seg.loop_count = 1;
+                    seg.loops_remaining = 1;
+                }
+            }
+            None => self.member = None,
+        }
+        self.start_next_segment();
+    }
+
+    /// Something is still to play after the current clip: a queued member,
+    /// a remaining loop or a later playlist segment. A channel with that is
+    /// busy even while no source is running, because the next clip is being
+    /// decoded. Measured on a narration that queues ten spoken numbers: on a
+    /// slower machine the decode of the next number outlasted the movie's
+    /// 300 ms grace, the channel read as free between two numbers, and the
+    /// movie went on to its next line after the first number.
+    pub fn has_pending_sound(&self) -> bool {
+        if self.queued_unstarted {
+            return false;
+        }
+        !self.queued_members.is_empty()
+            || match self.current_segment_index {
+                None => !self.playlist_segments.is_empty(),
+                Some(i) => self.playlist_segments.get(i).map_or(false, |seg| {
+                    seg.loop_count == 0 || seg.loops_remaining > 1 || i + 1 < self.playlist_segments.len()
+                }),
+            }
     }
 
     pub fn set_loop_count(&mut self, count: i32) {
@@ -4245,7 +4353,17 @@ impl SoundChannel {
                 return;
             }
             
-            ch.status = SoundStatus::Idle;
+            // Idle only when nothing follows. With a queue or a loop still
+            // to play the channel stays busy through the hand-over, so a
+            // script that waits for `isBusy() = 0` between spoken clips
+            // never sees the channel free while the next clip is decoded.
+            let more = ch.has_pending_sound()
+                || (ch.current_segment_index.is_none() && (ch.loop_count == 0 || ch.loops_remaining > 1));
+            ch.status = if more { SoundStatus::Loading } else { SoundStatus::Idle };
+            if more {
+                // Loading is timed from here, not from the clip that ended.
+                ch.playback_start_context_time = ch.context_time();
+            }
             ch.source_node = None;
             ch.start_next_segment();
         } else {
@@ -4641,5 +4759,79 @@ mod fade_tests {
         assert!((ch.fade_duration - 1.0).abs() < 1e-9);
         ch.fade_in(250, 1.0);
         assert!((ch.fade_duration - 0.25).abs() < 1e-9);
+    }
+}
+
+#[cfg(test)]
+mod queue_state_tests {
+    use super::{SoundChannel, SoundSegment, SoundStatus};
+    use crate::player::DatumRef;
+
+    fn entry() -> SoundSegment {
+        SoundSegment { member_ref: DatumRef::Void, loop_count: 1, loops_remaining: 1 }
+    }
+
+    /// What `queue()` does to the channel, without the member lookup.
+    fn queue(ch: &mut SoundChannel) {
+        ch.note_queue_on_silent_channel();
+        ch.playlist_segments.push(entry());
+        ch.playlist.push(DatumRef::Void);
+    }
+
+    #[test]
+    fn a_queue_on_a_silent_channel_is_not_busy_until_played() {
+        let mut ch = SoundChannel::new(5, None);
+        queue(&mut ch);
+        queue(&mut ch);
+        assert!(!ch.has_pending_sound());
+        assert!(!ch.is_busy(), "queued but never played");
+        assert_eq!(ch.playlist_segments.len(), 2, "the entries wait for play()");
+    }
+
+    #[test]
+    fn stop_forgets_an_unstarted_queue() {
+        let mut ch = SoundChannel::new(5, None);
+        queue(&mut ch);
+        ch.stop();
+        assert!(!ch.queued_unstarted);
+        assert!(ch.playlist_segments.is_empty());
+    }
+
+    #[test]
+    fn a_queue_behind_a_playing_clip_keeps_the_channel_busy() {
+        let mut ch = SoundChannel::new(4, None);
+        ch.status = SoundStatus::Playing;
+        queue(&mut ch);
+        assert!(!ch.queued_unstarted);
+        // The clip ends and the next one is still being decoded.
+        ch.status = SoundStatus::Idle;
+        assert!(ch.has_pending_sound());
+        assert!(ch.is_busy(), "busy through the hand-over to the queued clip");
+    }
+
+    #[test]
+    fn a_last_entry_that_cannot_start_leaves_the_channel_free() {
+        let mut ch = SoundChannel::new(8, None);
+        ch.playlist_segments.push(entry());
+        ch.playlist.push(DatumRef::Void);
+        ch.current_segment_index = Some(0);
+        ch.status = SoundStatus::Loading;
+        ch.skip_unplayable();
+        assert_eq!(ch.status, SoundStatus::Idle);
+        assert!(!ch.is_busy());
+    }
+
+    #[test]
+    fn an_entry_that_cannot_start_hands_over_to_the_next() {
+        let mut ch = SoundChannel::new(8, None);
+        for _ in 0..2 {
+            ch.playlist_segments.push(entry());
+            ch.playlist.push(DatumRef::Void);
+        }
+        ch.current_segment_index = Some(0);
+        ch.status = SoundStatus::Loading;
+        ch.skip_unplayable();
+        assert_eq!(ch.playlist_segments.len(), 1, "the failed entry is gone");
+        assert_eq!(ch.current_segment_index, Some(0), "the next entry is current");
     }
 }

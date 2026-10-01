@@ -235,6 +235,7 @@ impl CastMemberRefHandlers {
             Some(BuiltInSymbol::Duplicate) => Self::duplicate(datum, args),
             Some(BuiltInSymbol::Erase) => Self::erase(datum, args),
             Some(BuiltInSymbol::Move) => Self::move_member(datum, args),
+            Some(BuiltInSymbol::Crop) => Self::crop_member(datum, args),
             Some(BuiltInSymbol::GetPixel) | Some(BuiltInSymbol::SetPixel) => {
                 // Director lets image methods be called directly on a bitmap MEMBER
                 // (`member.getPixel(x,y)`), proxying to the member's image object.
@@ -557,6 +558,16 @@ impl CastMemberRefHandlers {
                 CastMemberType::VectorShape(_) => {
                     VectorShapeMemberHandlers::call(player, datum, handler_name, args)
                 }
+                // Director exposes the image methods (crop, copyPixels, draw,
+                // getPixel, ...) on bitmap MEMBERS as well as on image
+                // objects; forward to the member's image.
+                CastMemberType::Bitmap(_) => {
+                    let member_ref = match player.get_datum(datum) {
+                        Datum::CastMember(r) => r.to_owned(),
+                        _ => return Err(ScriptError::new("Expected cast member".to_string())),
+                    };
+                    BitmapMemberHandlers::call(player, &member_ref, handler_name, args)
+                }
                 _ => Err(ScriptError::new(format!(
                     "No handler {} for member type {:?}",
                     handler_name, cast_member.member_type.member_type_id()
@@ -603,6 +614,83 @@ impl CastMemberRefHandlers {
     /// rarely matters, and Director itself points scripts at `sprite.member`
     /// for display changes. It still has to work, because a wrapper script that
     /// calls it dies at that line otherwise.
+    /// `member.crop(rect)` on a bitmap member: the member keeps only the
+    /// pixels inside `rect` (member coordinates). The registration point
+    /// moves with the crop origin, so a sprite showing the member keeps the
+    /// kept pixels where they were. A movie relies on that to hide part of
+    /// an animation behind a cropped copy of a foreground bitmap; with the
+    /// call ignored the copy stayed full size and hid the animation whole.
+    fn crop_member(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        use crate::player::handlers::datum_handlers::bitmap::BitmapDatumHandlers;
+        if args.len() != 1 {
+            return Err(ScriptError::new("crop requires 1 argument (rect)".to_string()));
+        }
+        let (member_ref, image_ref, image_datum) = reserve_player_mut(|player| {
+            let member_ref = match player.get_datum(datum) {
+                Datum::CastMember(r) => r.to_owned(),
+                _ => return Err(ScriptError::new("crop: not a cast member".to_string())),
+            };
+            let member = player
+                .movie
+                .cast_manager
+                .find_member_by_ref(&member_ref)
+                .ok_or_else(|| ScriptError::new("crop: member not found".to_string()))?;
+            let image_ref = match &member.member_type {
+                CastMemberType::Bitmap(b) => b.image_ref,
+                _ => return Err(ScriptError::new("crop: member is not a bitmap".to_string())),
+            };
+            let image_datum = player.alloc_datum(Datum::BitmapRef(image_ref));
+            Ok((member_ref, image_ref, image_datum))
+        })?;
+        let cropped = BitmapDatumHandlers::crop(&image_datum, args)?;
+        reserve_player_mut(|player| {
+            let (rect_vals, _) = player.get_datum(&args[0]).to_rect_inline()?;
+            let (left, top) = (rect_vals[0] as i32, rect_vals[1] as i32);
+            let new_ref = *player.get_datum(&cropped).to_bitmap_ref()?;
+            let bitmap = player
+                .bitmap_manager
+                .get_bitmap(new_ref)
+                .ok_or_else(|| ScriptError::new("crop: cropped bitmap missing".to_string()))?
+                .clone();
+            let (new_width, new_height) = (bitmap.width as i32, bitmap.height as i32);
+            player.bitmap_manager.replace_bitmap(image_ref, bitmap);
+
+            let cast_member = player
+                .movie
+                .cast_manager
+                .find_mut_member_by_ref(&member_ref)
+                .ok_or_else(|| ScriptError::new("crop: member not found".to_string()))?;
+            let reg = (cast_member.reg_point.0 - left, cast_member.reg_point.1 - top);
+            cast_member.reg_point = reg;
+            if let CastMemberType::Bitmap(b) = &mut cast_member.member_type {
+                b.info.width = new_width as u16;
+                b.info.height = new_height as u16;
+                b.reg_point = (reg.0 as i16, reg.1 as i16);
+            }
+
+            // Sprites that follow the member's size follow the crop too.
+            let mut resized = false;
+            for channel in player.movie.score.channels.iter_mut() {
+                if channel.number == 0 || channel.sprite.member.as_ref() != Some(&member_ref) {
+                    continue;
+                }
+                if channel.sprite.stretch != 0 || channel.sprite.explicit_lingo_size {
+                    continue;
+                }
+                channel.sprite.width = new_width;
+                channel.sprite.height = new_height;
+                channel.sprite.base_width = new_width;
+                channel.sprite.base_height = new_height;
+                resized = true;
+            }
+            if resized {
+                player.movie.score.invalidate_render_channel_cache();
+            }
+            player.stage_dirty = true;
+            Ok(DatumRef::Void)
+        })
+    }
+
     fn move_member(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let src_ref = match player.get_datum(datum) {

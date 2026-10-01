@@ -181,6 +181,24 @@ pub async fn call_xtra_instance_async_handler(
     }
 }
 
+/// Handler names that, called in command form with an Xtra instance as the
+/// first argument, must be awaited because they wait on the page. A cheap
+/// name check, done before looking at the argument.
+pub fn xtra_command_may_await(handler_name: &str) -> bool {
+    FileIoXtraManager::command_must_await(handler_name)
+}
+
+/// Whether `handler_name(instance, ...)` on this Xtra must be awaited.
+pub fn xtra_instance_command_must_await(xtra_name: &str, handler_name: &str) -> bool {
+    if external::is_registered(xtra_name) {
+        return false;
+    }
+    match xtra_name.to_lowercase().as_str() {
+        "fileio" => FileIoXtraManager::command_must_await(handler_name),
+        _ => false,
+    }
+}
+
 pub fn has_xtra_instance_async_handler(
     xtra_name: &str,
     handler_name: &str,

@@ -62,6 +62,314 @@ pub struct StyledSpan {
     pub style: HtmlStyle,
 }
 
+#[derive(Clone)]
+pub(crate) struct NativeSegmentStyle {
+    pub font: String,
+    pub size_px: f64,
+    pub underline: bool,
+    pub color: (u8, u8, u8),
+}
+
+#[derive(Clone)]
+pub(crate) struct NativeSegment {
+    pub text: String,
+    pub width: f64,
+    pub style: NativeSegmentStyle,
+    pub is_tab: bool, // Tab marker - width is placeholder, resolved during rendering
+    // Byte offset of this segment's first char in the concatenation of
+    // all spans[*].text. Used by the optional caret/selection overlay
+    // to map byte offsets back to pixel positions.
+    pub start_byte: usize,
+}
+
+impl NativeSegment {
+    /// Part of a word: not a tab marker and not a run of whitespace.
+    fn is_word_part(&self) -> bool {
+        !self.is_tab && !self.text.is_empty() && !self.text.chars().all(char::is_whitespace)
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct NativeLine {
+    pub segments: Vec<NativeSegment>,
+    pub width: f64,
+    pub max_font_px: f64,
+    // Cumulative text-character position where this line begins.
+    // Used to look up which paragraph (par_info) this line belongs
+    // to via par_runs. Wrap-induced visual lines get a position
+    // somewhere in their source paragraph, which still resolves to
+    // the same par_info index — boundary spacing only triggers on
+    // genuine source-paragraph transitions.
+    pub start_text_pos: u32,
+}
+
+/// Adds one token (a run of word characters or a run of whitespace, all in
+/// one style) to the line, first breaking the line when the token is a word
+/// part that does not fit.
+///
+/// A word can be made of several styled runs, such as an underlined first
+/// letter followed by the rest of the word in the plain style. There is no
+/// break opportunity between those runs, so the break goes before the whole
+/// word: the word parts already at the end of the line move to the new line
+/// with the token. A line that holds nothing but this one word keeps it and
+/// overflows, as a single word longer than the line does.
+fn add_native_token(
+    token_text: &mut String,
+    is_ws: Option<bool>,
+    line: &mut NativeLine,
+    lines_out: &mut Vec<NativeLine>,
+    style: &NativeSegmentStyle,
+    start_byte: usize,
+    wrap_width: f64,
+    measure: &mut dyn FnMut(&str, &NativeSegmentStyle) -> f64,
+) {
+    if token_text.is_empty() {
+        return;
+    }
+    let is_whitespace = is_ws.unwrap_or(false);
+    let token_width = measure(token_text, style);
+
+    // If the line has a tab marker, text after the tab is positioned by
+    // the tab stop (e.g. right-aligned), so it doesn't increase line width
+    // and should not trigger word wrap.
+    let has_tab = line.segments.iter().any(|s| s.is_tab);
+    let would_overflow = !has_tab && line.width + token_width > wrap_width;
+    let will_wrap = would_overflow && !line.segments.is_empty() && !is_whitespace;
+
+    if will_wrap {
+        let word_start = line
+            .segments
+            .iter()
+            .rposition(|s| !s.is_word_part())
+            .map_or(0, |i| i + 1);
+        if word_start == line.segments.len() {
+            lines_out.push(std::mem::take(line));
+        } else if word_start > 0 {
+            let carried = line.segments.split_off(word_start);
+            // Summed in the order the widths were added.
+            line.width = line.segments.iter().map(|s| s.width).sum();
+            line.max_font_px = line.segments.iter().map(|s| s.style.size_px).fold(0.0, f64::max);
+            lines_out.push(std::mem::take(line));
+            for seg in carried {
+                line.width += seg.width;
+                line.max_font_px = line.max_font_px.max(seg.style.size_px);
+                line.segments.push(seg);
+            }
+        }
+    }
+
+    if !(is_whitespace && line.segments.is_empty()) {
+        line.max_font_px = line.max_font_px.max(style.size_px);
+        if !has_tab {
+            line.width += token_width;
+        }
+        line.segments.push(NativeSegment {
+            text: token_text.clone(),
+            width: token_width,
+            style: style.clone(),
+            is_tab: false,
+            start_byte,
+        });
+    }
+
+    token_text.clear();
+}
+
+/// Lays styled runs out into lines for the browser's text rasteriser:
+/// breaks at `\r`/`\n`, at whitespace when a word would pass `wrap_width`,
+/// and places tab markers. `measure` gives a text's width in a style.
+pub(crate) fn layout_native_lines(
+    spans: &[(&str, NativeSegmentStyle)],
+    wrap_width: f64,
+    tab_stops: &[crate::player::cast_member::TabStop],
+    measure: &mut dyn FnMut(&str, &NativeSegmentStyle) -> f64,
+) -> Vec<NativeLine> {
+    let mut lines: Vec<NativeLine> = Vec::new();
+    let mut current_line = NativeLine::default();
+    // Cumulative text-character position across all spans. Used to
+    // stamp `start_text_pos` on each new line so we can map lines to
+    // par_runs / par_infos at draw time for paragraph-boundary
+    // spacing.
+    let mut cumulative_pos: u32 = 0;
+
+    // Cumulative byte offset across all spans — feeds segment.start_byte
+    // so the optional caret/selection overlay can map byte offsets back
+    // to pixel positions.
+    let mut cur_byte_offset: usize = 0;
+
+    for (span_text, seg_style) in spans {
+        if span_text.is_empty() {
+            continue;
+        }
+
+        let mut token = String::new();
+        let mut token_is_ws: Option<bool> = None;
+        let mut token_start_byte: usize = cur_byte_offset;
+
+        let mut prev_was_cr = false;
+        for ch in span_text.chars() {
+            let ch_byte_len = ch.len_utf8();
+            // Director (Mac origin) uses \r for line breaks.
+            // Handle \r, \n, and \r\n without double-breaking.
+            if ch == '\n' && prev_was_cr {
+                // Skip \n after \r (already broke on \r) but still
+                // count it toward cumulative text position so the
+                // next line's start_text_pos lines up with par_runs.
+                prev_was_cr = false;
+                cumulative_pos += 1;
+                current_line.start_text_pos = cumulative_pos;
+                cur_byte_offset += ch_byte_len;
+                token_start_byte = cur_byte_offset;
+                continue;
+            }
+            prev_was_cr = ch == '\r';
+            if ch == '\r' || ch == '\n' {
+                add_native_token(
+                    &mut token,
+                    token_is_ws,
+                    &mut current_line,
+                    &mut lines,
+                    seg_style,
+                    token_start_byte,
+                    wrap_width,
+                    measure,
+                );
+                token_is_ws = None;
+                lines.push(std::mem::take(&mut current_line));
+                cumulative_pos += 1;
+                current_line.start_text_pos = cumulative_pos;
+                cur_byte_offset += ch_byte_len;
+                token_start_byte = cur_byte_offset;
+                continue;
+            }
+            if ch == '\t' {
+                add_native_token(
+                    &mut token,
+                    token_is_ws,
+                    &mut current_line,
+                    &mut lines,
+                    seg_style,
+                    token_start_byte,
+                    wrap_width,
+                    measure,
+                );
+                token_is_ws = None;
+                // Count how many tabs we've seen so far on this line
+                let tab_idx = current_line.segments.iter().filter(|s| s.is_tab).count();
+                // Insert a tab marker segment
+                current_line.segments.push(NativeSegment {
+                    text: String::new(),
+                    width: 0.0,
+                    style: seg_style.clone(),
+                    is_tab: true,
+                    start_byte: cur_byte_offset,
+                });
+                // Update line.width to the tab stop position so subsequent
+                // tokens don't cause false word-wrap overflow
+                if tab_idx < tab_stops.len() {
+                    let stop_pos = tab_stops[tab_idx].position as f64;
+                    if stop_pos > current_line.width {
+                        current_line.width = stop_pos;
+                    }
+                }
+                cumulative_pos += 1;
+                cur_byte_offset += ch_byte_len;
+                token_start_byte = cur_byte_offset;
+                continue;
+            }
+
+            let is_ws = ch.is_whitespace();
+            if token_is_ws != Some(is_ws) && !token.is_empty() {
+                add_native_token(
+                    &mut token,
+                    token_is_ws,
+                    &mut current_line,
+                    &mut lines,
+                    seg_style,
+                    token_start_byte,
+                    wrap_width,
+                    measure,
+                );
+                token_start_byte = cur_byte_offset;
+            }
+            token_is_ws = Some(is_ws);
+            token.push(ch);
+            cumulative_pos += 1;
+            cur_byte_offset += ch_byte_len;
+        }
+
+        add_native_token(
+            &mut token,
+            token_is_ws,
+            &mut current_line,
+            &mut lines,
+            seg_style,
+            token_start_byte,
+            wrap_width,
+            measure,
+        );
+    }
+
+    if !current_line.segments.is_empty() || lines.is_empty() {
+        lines.push(current_line);
+    }
+    lines
+}
+
+#[cfg(test)]
+mod native_layout_tests {
+    use super::{layout_native_lines, NativeLine, NativeSegmentStyle};
+
+    fn style(underline: bool) -> NativeSegmentStyle {
+        NativeSegmentStyle { font: "24px Verdana".to_string(), size_px: 24.0, underline, color: (0, 0, 0) }
+    }
+
+    // Every character is 10 px wide.
+    fn lay(spans: &[(&str, bool)], wrap_width: f64) -> Vec<NativeLine> {
+        let styled: Vec<(&str, NativeSegmentStyle)> =
+            spans.iter().map(|(t, u)| (*t, style(*u))).collect();
+        layout_native_lines(&styled, wrap_width, &[], &mut |t, _| t.chars().count() as f64 * 10.0)
+    }
+
+    fn texts(lines: &[NativeLine]) -> Vec<String> {
+        lines.iter().map(|l| l.segments.iter().map(|s| s.text.as_str()).collect()).collect()
+    }
+
+    #[test]
+    fn a_word_split_into_styled_runs_is_not_broken_between_them() {
+        // An underlined first letter and the rest of the word, 120 px in a
+        // 110 px line: one line that overflows, as a one-run word does.
+        let lines = lay(&[("W", true), ("ordwrapping", false)], 110.0);
+        assert_eq!(texts(&lines), vec!["Wordwrapping"]);
+        assert_eq!(lines[0].width, 120.0);
+        let lines = lay(&[("Abcdefghijklm", false)], 120.0);
+        assert_eq!(texts(&lines), vec!["Abcdefghijklm"]);
+    }
+
+    #[test]
+    fn a_styled_word_that_does_not_fit_moves_whole_to_the_next_line() {
+        // "ab " then "c" (underlined) + "def": the break goes before "c".
+        let lines = lay(&[("ab ", false), ("c", true), ("def", false)], 50.0);
+        assert_eq!(texts(&lines), vec!["ab ", "cdef"]);
+        assert_eq!(lines[0].width, 30.0);
+        assert_eq!(lines[1].width, 40.0);
+        assert!(lines[1].segments[0].style.underline);
+        assert_eq!(lines[1].segments[0].start_byte, 3);
+        // Three runs in one word, the middle one styled.
+        let lines = lay(&[("one tw", false), ("o", true), ("three", false)], 80.0);
+        assert_eq!(texts(&lines), vec!["one ", "twothree"]);
+    }
+
+    #[test]
+    fn words_in_one_run_still_break_at_spaces() {
+        let lines = lay(&[("ab cdef gh", false)], 50.0);
+        assert_eq!(texts(&lines), vec!["ab ", "cdef ", "gh"]);
+        // A run that starts a new word after a space breaks before itself.
+        let lines = lay(&[("ab ", false), ("cdef", true)], 50.0);
+        assert_eq!(texts(&lines), vec!["ab ", "cdef"]);
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum TextAlignment {
     Left,
@@ -686,10 +994,15 @@ impl FontMemberHandlers {
         // Scale the context so text renders at 2x resolution
         let _ = ctx.scale(scale_factor as f64, scale_factor as f64);
 
-        // Render WHITE text on BLACK background to measure pure coverage.
-        // This avoids color-dependent anti-aliasing artifacts from Canvas2D.
-        // Coverage is then mapped to the bitmap as: black text on white background.
-        ctx.set_fill_style_str("rgb(0,0,0)");
+        // Render BLACK text on WHITE and read coverage as 255 - luminance.
+        // The browser's rasteriser shapes a glyph mask by the colour it draws
+        // with: light text on a dark ground gets a contrast boost that makes
+        // its stems heavier, and at 16 px it made a regular face carry the
+        // same ink as its bold cut (measured on a Comic Sans MS tooltip:
+        // regular 728 to bold 718 white-on-black, 621 to 646 black-on-white,
+        // and the projector's rendering of the same lines has 571 to 593).
+        // Dark on light is the mask closest to plain geometric coverage.
+        ctx.set_fill_style_str("rgb(255,255,255)");
         ctx.fill_rect(0.0, 0.0, render_width.max(1) as f64, render_height.max(1) as f64);
 
         // Apply the vertical origin during LAYOUT rather than when blitting the
@@ -704,40 +1017,6 @@ impl FontMemberHandlers {
 
         // Set text baseline to top for consistent positioning
         ctx.set_text_baseline("top");
-
-        #[derive(Clone)]
-        struct NativeSegmentStyle {
-            font: String,
-            size_px: f64,
-            underline: bool,
-            color: (u8, u8, u8),
-        }
-
-        #[derive(Clone)]
-        struct NativeSegment {
-            text: String,
-            width: f64,
-            style: NativeSegmentStyle,
-            is_tab: bool, // Tab marker - width is placeholder, resolved during rendering
-            // Byte offset of this segment's first char in the concatenation of
-            // all spans[*].text. Used by the optional caret/selection overlay
-            // to map byte offsets back to pixel positions.
-            start_byte: usize,
-        }
-
-        #[derive(Default)]
-        struct NativeLine {
-            segments: Vec<NativeSegment>,
-            width: f64,
-            max_font_px: f64,
-            // Cumulative text-character position where this line begins.
-            // Used to look up which paragraph (par_info) this line belongs
-            // to via par_runs. Wrap-induced visual lines get a position
-            // somewhere in their source paragraph, which still resolves to
-            // the same par_info index — boundary spacing only triggers on
-            // genuine source-paragraph transitions.
-            start_text_pos: u32,
-        }
 
         let fallback_color = if let Some(color_ref) = sprite_color {
             match color_ref {
@@ -783,183 +1062,21 @@ impl FontMemberHandlers {
             }
         };
 
-        let mut lines: Vec<NativeLine> = Vec::new();
-        let mut current_line = NativeLine::default();
         let wrap_width = if word_wrap && max_width > 0 {
             max_width as f64
         } else {
             f64::MAX
         };
-        // Cumulative text-character position across all spans. Used to
-        // stamp `start_text_pos` on each new line so we can map lines to
-        // par_runs / par_infos at draw time for paragraph-boundary
-        // spacing.
-        let mut cumulative_pos: u32 = 0;
-
-        let mut push_line = |line: &mut NativeLine, lines_out: &mut Vec<NativeLine>| {
-            lines_out.push(std::mem::take(line));
-        };
-
-        // Cumulative byte offset across all spans — feeds segment.start_byte
-        // so the optional caret/selection overlay can map byte offsets back
-        // to pixel positions.
-        let mut cur_byte_offset: usize = 0;
-
-        for span in spans {
-            if span.text.is_empty() {
-                continue;
-            }
-            let seg_style = style_from_html(&span.style);
-
-            let mut token = String::new();
-            let mut token_is_ws: Option<bool> = None;
-            let mut token_start_byte: usize = cur_byte_offset;
-
-            let mut flush_token = |token_text: &mut String,
-                                   is_ws: Option<bool>,
-                                   line: &mut NativeLine,
-                                   lines_out: &mut Vec<NativeLine>,
-                                   style: &NativeSegmentStyle,
-                                   start_byte: usize| {
-                if token_text.is_empty() {
-                    return;
-                }
-                let is_whitespace = is_ws.unwrap_or(false);
-                ctx.set_font(&style.font);
-                let token_width = ctx
-                    .measure_text(token_text)
-                    .map(|m| m.width())
-                    .unwrap_or_else(|_| token_text.chars().count() as f64 * (style.size_px * 0.55));
-
-                // If the line has a tab marker, text after the tab is positioned by
-                // the tab stop (e.g. right-aligned), so it doesn't increase line width
-                // and should not trigger word wrap.
-                let has_tab = line.segments.iter().any(|s| s.is_tab);
-                let would_overflow = !has_tab && line.width + token_width > wrap_width;
-                let will_wrap = would_overflow && !line.segments.is_empty() && !is_whitespace;
-
-                if will_wrap {
-                    lines_out.push(std::mem::take(line));
-                }
-
-                if !(is_whitespace && line.segments.is_empty()) {
-                    line.max_font_px = line.max_font_px.max(style.size_px);
-                    if !has_tab {
-                        line.width += token_width;
-                    }
-                    line.segments.push(NativeSegment {
-                        text: token_text.clone(),
-                        width: token_width,
-                        style: style.clone(),
-                        is_tab: false,
-                        start_byte,
-                    });
-                }
-
-                token_text.clear();
-            };
-
-            let mut prev_was_cr = false;
-            for ch in span.text.chars() {
-                let ch_byte_len = ch.len_utf8();
-                // Director (Mac origin) uses \r for line breaks.
-                // Handle \r, \n, and \r\n without double-breaking.
-                if ch == '\n' && prev_was_cr {
-                    // Skip \n after \r (already broke on \r) but still
-                    // count it toward cumulative text position so the
-                    // next line's start_text_pos lines up with par_runs.
-                    prev_was_cr = false;
-                    cumulative_pos += 1;
-                    current_line.start_text_pos = cumulative_pos;
-                    cur_byte_offset += ch_byte_len;
-                    token_start_byte = cur_byte_offset;
-                    continue;
-                }
-                prev_was_cr = ch == '\r';
-                if ch == '\r' || ch == '\n' {
-                    flush_token(
-                        &mut token,
-                        token_is_ws,
-                        &mut current_line,
-                        &mut lines,
-                        &seg_style,
-                        token_start_byte,
-                    );
-                    token_is_ws = None;
-                    push_line(&mut current_line, &mut lines);
-                    cumulative_pos += 1;
-                    current_line.start_text_pos = cumulative_pos;
-                    cur_byte_offset += ch_byte_len;
-                    token_start_byte = cur_byte_offset;
-                    continue;
-                }
-                if ch == '\t' {
-                    flush_token(
-                        &mut token,
-                        token_is_ws,
-                        &mut current_line,
-                        &mut lines,
-                        &seg_style,
-                        token_start_byte,
-                    );
-                    token_is_ws = None;
-                    // Count how many tabs we've seen so far on this line
-                    let tab_idx = current_line.segments.iter().filter(|s| s.is_tab).count();
-                    // Insert a tab marker segment
-                    current_line.segments.push(NativeSegment {
-                        text: String::new(),
-                        width: 0.0,
-                        style: seg_style.clone(),
-                        is_tab: true,
-                        start_byte: cur_byte_offset,
-                    });
-                    // Update line.width to the tab stop position so subsequent
-                    // flush_token calls don't cause false word-wrap overflow
-                    if tab_idx < tab_stops.len() {
-                        let stop_pos = tab_stops[tab_idx].position as f64;
-                        if stop_pos > current_line.width {
-                            current_line.width = stop_pos;
-                        }
-                    }
-                    cumulative_pos += 1;
-                    cur_byte_offset += ch_byte_len;
-                    token_start_byte = cur_byte_offset;
-                    continue;
-                }
-
-                let is_ws = ch.is_whitespace();
-                if token_is_ws != Some(is_ws) && !token.is_empty() {
-                    flush_token(
-                        &mut token,
-                        token_is_ws,
-                        &mut current_line,
-                        &mut lines,
-                        &seg_style,
-                        token_start_byte,
-                    );
-                    token_start_byte = cur_byte_offset;
-                }
-                token_is_ws = Some(is_ws);
-                token.push(ch);
-                cumulative_pos += 1;
-                cur_byte_offset += ch_byte_len;
-            }
-
-            flush_token(
-                &mut token,
-                token_is_ws,
-                &mut current_line,
-                &mut lines,
-                &seg_style,
-                token_start_byte,
-            );
-            token_start_byte = cur_byte_offset;
-        }
-
-        if !current_line.segments.is_empty() || lines.is_empty() {
-            lines.push(current_line);
-        }
-
+        let styled: Vec<(&str, NativeSegmentStyle)> = spans
+            .iter()
+            .map(|span| (span.text.as_str(), style_from_html(&span.style)))
+            .collect();
+        let lines = layout_native_lines(&styled, wrap_width, tab_stops, &mut |text, style| {
+            ctx.set_font(&style.font);
+            ctx.measure_text(text)
+                .map(|m| m.width())
+                .unwrap_or_else(|_| text.chars().count() as f64 * (style.size_px * 0.55))
+        });
 
         // Map a text-character position to its par_info index via par_runs.
         // Returns None when no par_info data is available so callers can
@@ -1102,8 +1219,8 @@ impl FontMemberHandlers {
                 }
 
                 ctx.set_font(&segment.style.font);
-                // Always render in WHITE on the black canvas for coverage measurement
-                ctx.set_fill_style_str("rgb(255,255,255)");
+                // Always black on the white canvas: coverage, not colour.
+                ctx.set_fill_style_str("rgb(0,0,0)");
                 let _ = ctx.fill_text(&segment.text, x, y);
 
                 // Record this segment's color region for per-run color lookup
@@ -1133,7 +1250,7 @@ impl FontMemberHandlers {
                     ctx.begin_path();
                     ctx.move_to(x, underline_y);
                     ctx.line_to(x + segment.width, underline_y);
-                    ctx.set_stroke_style_str("rgb(255,255,255)");
+                    ctx.set_stroke_style_str("rgb(0,0,0)");
                     ctx.stroke();
                 }
 
@@ -1196,7 +1313,7 @@ impl FontMemberHandlers {
 
         let pixels = image_data.data();
 
-        // Debug: check raw canvas pixels for non-black (text) content.
+        // Debug: check raw canvas pixels for non-white (text) content.
         // Gated on the log level: this scans every canvas pixel of every text
         // sprite on every frame, which is pure waste when nothing consumes the
         // output.
@@ -1210,7 +1327,7 @@ impl FontMemberHandlers {
                     let r = pixels[idx];
                     let g = pixels[idx + 1];
                     let b = pixels[idx + 2];
-                    if r > 0 || g > 0 || b > 0 {
+                    if r < 255 || g < 255 || b < 255 {
                         nonblack += 1;
                         if first_nb.is_empty() {
                             let x = i % canvas_width as usize;
@@ -1235,9 +1352,8 @@ impl FontMemberHandlers {
             );
         }
 
-        // Downscale 2x canvas (white-on-black) to 1x bitmap (black-on-white).
-        // Coverage = average luminance of sf×sf block. Then invert: output = 255 - coverage.
-        // This gives black text body on white background with proper anti-aliasing.
+        // Downscale the 2x canvas (black on white) to the 1x bitmap.
+        // Coverage = 255 - average luminance of the sf×sf block.
         let out_w = render_width.max(1) as usize;
         let out_h = render_height.max(1) as usize;
         let sf = scale_factor as usize;
@@ -1255,7 +1371,7 @@ impl FontMemberHandlers {
                     continue;
                 }
 
-                // Average luminance of the sf×sf pixel block (white text on black bg)
+                // Average luminance of the sf×sf pixel block (black text on white)
                 let mut lum_sum = 0u32;
                 let count = (sf * sf) as u32;
                 for sy in 0..sf {
@@ -1269,7 +1385,7 @@ impl FontMemberHandlers {
                         }
                     }
                 }
-                let coverage = (lum_sum / count) as u8; // 0=background, 255=text body
+                let coverage = 255 - (lum_sum / count) as u8; // 0=background, 255=text body
 
                 // Only write pixels where text was actually rendered (coverage > 0).
                 // Background pixels stay at the bitmap's pre-fill (transparent for text.image).
@@ -2333,6 +2449,7 @@ impl FontMemberHandlers {
                         fore_color_explicit: false,
                         ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                         floor_rule: false,
+                        erase_transparent_source: false,
                     };
 
                     bitmap.draw_text(
@@ -2504,6 +2621,7 @@ impl FontMemberHandlers {
                                     fore_color_explicit: false,
                                     ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                                     floor_rule: false,
+                                    erase_transparent_source: false,
                                 };
 
                                 if let Some(mask) = mask {

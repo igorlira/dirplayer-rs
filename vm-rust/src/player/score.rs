@@ -137,6 +137,12 @@ pub struct Score {
     pub transition_channel_data: Vec<(u32, i16, i16)>,
     pub frame_labels: Vec<FrameLabel>,
     pub sound_channel_triggered: HashMap<u16, u32>,
+    /// Per effects channel: the (member, span start frame index) of the sound
+    /// span that has already been started. A span is started on whichever of
+    /// its frames the playhead first lands on, not only its first frame: a
+    /// movie whose start script jumps past frame 1 still gets the music its
+    /// score puts there. Once started it is not restarted within the span.
+    pub sound_span_started: HashMap<u16, (u16, u32)>,
     pub keyframes_cache: Arc<HashMap<u16, ChannelKeyframes>>,
     /// Sprite detail behaviors indexed by spriteListIdx (D6+)
     pub sprite_details: HashMap<u32, crate::director::chunks::score::SpriteDetailInfo>,
@@ -152,6 +158,15 @@ pub struct Score {
     /// Channels that have spans from frame_intervals (not from extend_sprite_spans).
     /// Used to prevent per-frame delta initialization from showing sprites outside their span range.
     pub channels_with_frame_interval_spans: HashSet<u32>,
+    /// Channels whose span began in the last `begin_sprites` pass. The
+    /// player takes them out of its hover set: a new span is a new sprite,
+    /// and it gets its mouseEnter once the pointer is seen over it.
+    pub freshly_entered: Vec<u16>,
+    /// Channels whose span began this frame; their tweens write on this
+    /// frame even where the tween is not moving.
+    pub just_entered: Vec<u16>,
+    /// The frame the tween pass last ran for, to tell a jump from a step.
+    pub last_tween_frame: Option<u32>,
     /// Total frame count (used for auto-looping back to frame 1 when past last frame)
     pub frame_count: Option<u32>,
     /// Active non-puppet channel numbers derived from sprite_spans, cached per frame.
@@ -276,12 +291,16 @@ impl Score {
             sprite_spans: vec![],
             frame_script_cache: std::cell::RefCell::new(None),
             sound_channel_triggered: HashMap::new(),
+            sound_span_started: HashMap::new(),
             keyframes_cache: Arc::new(HashMap::new()),
             sprite_details: HashMap::new(),
             custom_tiles: Vec::new(),
             last_sound_clear_frame: None,
             needs_per_frame_updates: false,
             channels_with_frame_interval_spans: HashSet::new(),
+            freshly_entered: Vec::new(),
+            just_entered: Vec::new(),
+            last_tween_frame: None,
             frame_count: None,
             active_channels_cache: RefCell::new(HashMap::new()),
             sorted_channels_cache: RefCell::new(None),
@@ -692,6 +711,7 @@ impl Score {
             if should_clear_all {
                 // Clear all triggers to allow sounds to replay
                 self.sound_channel_triggered.clear();
+                self.sound_span_started.clear();
             } else {
                 // Normal progression - only clear triggers for sounds that are no longer on the current frame
                 let sounds_on_current_frame: HashSet<u16> = self
@@ -779,7 +799,15 @@ impl Score {
                     } else if sprite.visible {
                         // Visible non-puppet sprite leaving its span → full reset,
                         // but keep the last on-screen rect for empty-channel reads.
+                        // locZ survives: a script sets it once and Director keeps
+                        // it while the channel is reused. Measured on the projector:
+                        // a map sets its platforms' locZ below a tip box in its
+                        // init script, then passes a frame where those channels
+                        // have no span; the platforms stayed under the box there,
+                        // while the reset put the visible one back on top.
+                        let loc_z = sprite.loc_z;
                         sprite.reset();
+                        sprite.loc_z = loc_z;
                         sprite.retained_rect = retained_rect;
                         true
                     } else {
@@ -983,6 +1011,13 @@ impl Score {
                     cast_member: data.cast_member as i32,
                 };
 
+                // The span's own stretch flag goes first: the member setter
+                // keeps a stretched sprite's size, and a size a script gave
+                // the previous span's sprite (a button grown on hover) must
+                // not carry into this span. With the flag applied after the
+                // member, the new span's sprite kept the old sprite's size.
+                sprite.stretch = data.stretch as i32;
+                sprite.explicit_lingo_size = false;
                 // For Stage sprites, use sprite_set_prop which handles intrinsic size
                 // initialization and other side effects. For FilmLoop sprites, set
                 // member directly since sprite_set_prop always writes to main stage score.
@@ -1243,8 +1278,17 @@ impl Score {
                     cast_member: data.cast_member as i32,
                 };
 
-                // Update member if changed
+                // Update member if changed. The frame's stretch flag goes
+                // first: the member setter keeps a stretched sprite's size,
+                // and a size a script gave the sprite while it showed the
+                // previous member (a button grown on hover) must not carry
+                // over to the member the Score puts in the channel now.
                 let current_member = self.get_sprite(sprite_num).and_then(|s| s.member.clone());
+                if current_member.as_ref() != Some(&member) {
+                    let sprite = self.get_sprite_mut(sprite_num);
+                    sprite.stretch = data.stretch as i32;
+                    sprite.explicit_lingo_size = false;
+                }
                 match &score_ref {
                     ScoreRef::Stage => {
                         if current_member.as_ref() != Some(&member) {
@@ -1378,6 +1422,11 @@ impl Score {
                         cast_member: data.cast_member as i32,
                     };
 
+                    {
+                        let sprite = self.get_sprite_mut(sprite_num);
+                        sprite.stretch = data.stretch as i32;
+                        sprite.explicit_lingo_size = false;
+                    }
                     match &score_ref {
                         ScoreRef::Stage => {
                             let _ = sprite_set_prop(sprite_num, Symbol::builtin(BuiltInSymbol::Member), Datum::CastMember(member.clone()));
@@ -1409,6 +1458,7 @@ impl Score {
                     sprite.base_blend = sprite.blend;
                     sprite.base_skew = sprite.skew;
                     sprite.entered = true;
+                    self.freshly_entered.push(sprite_num as u16);
                 }
             }
         }
@@ -1543,7 +1593,7 @@ impl Score {
 
         // handle score Sound 1 + Sound 2 in Effects Channels
         // Build a map of (frame_index, channel_index) -> cast_member for quick lookup
-        let sound_by_frame_channel: HashMap<(u32, u16), u8> = self.sound_channel_data.iter()
+        let sound_by_frame_channel: HashMap<(u32, u16), u16> = self.sound_channel_data.iter()
             .map(|(frame_idx, ch_idx, data)| ((*frame_idx, *ch_idx), data.cast_member))
             .collect();
 
@@ -1565,8 +1615,22 @@ impl Score {
                     Some(&prev_cast_member) => prev_cast_member != sound_data.cast_member, // Different sound
                 };
 
-                if !is_new_sound_span {
-                    // This is a continuation of the same sound, skip
+                // The frame index where this span of the same member begins.
+                let span_start = {
+                    let mut f = *frame_index;
+                    while f > 0
+                        && sound_by_frame_channel.get(&(f - 1, *channel_index))
+                            == Some(&sound_data.cast_member)
+                    {
+                        f -= 1;
+                    }
+                    f
+                };
+                if !is_new_sound_span
+                    && self.sound_span_started.get(channel_index)
+                        == Some(&(sound_data.cast_member, span_start))
+                {
+                    // Landed inside a span that already started: keep going.
                     continue;
                 }
                 // Check if we've already triggered this sound on this frame
@@ -1578,9 +1642,19 @@ impl Score {
                 }
 
                 let sound_channel = if *channel_index == 3 { 2 } else { 1 };
+                // Only a sound this score started can be the one it asks for
+                // now. Channels outlive a movie switch, and the next movie's
+                // member with the same number is a different sound.
+                let started_by_this_score = self
+                    .sound_span_started
+                    .get(channel_index)
+                    .map_or(false, |(member, _)| *member == sound_data.cast_member);
 
-                reserve_player_mut(|player| {
-                    if player.is_playing {
+                let started = reserve_player_mut(|player| {
+                    if !player.is_playing {
+                        return false;
+                    }
+                    {
                         // First check if this exact sound is already playing on this channel
                         let already_playing = player
                             .sound_manager
@@ -1604,8 +1678,11 @@ impl Score {
                                     }
                                 }
 
-                                // Checking if the sound is looping
-                                if channel.loop_count == 0 {
+                                // A looping sound counts too, but only while the
+                                // channel still holds it: a stopped channel
+                                // keeps its last member and loop count, and a
+                                // new span must start that sound again.
+                                if channel.loop_count == 0 && channel.status != SoundStatus::Idle {
                                     // 0 means loop forever
                                     if let Some(ref current_member_ref) = channel.member {
                                         let current_datum = player.get_datum(current_member_ref);
@@ -1623,7 +1700,7 @@ impl Score {
                             })
                             .unwrap_or(false);
 
-                        if !already_playing {
+                        if !already_playing || !started_by_this_score {
                             // For film loops, look up the sound in the film loop's cast library
                             // For the main score, use the global slot number lookup
                             let sound_member_opt = match &score_ref {
@@ -1657,26 +1734,36 @@ impl Score {
                                     let member_ref =
                                         player.alloc_datum(Datum::CastMember(cast_member_ref));
 
-                                    let _ = player.puppet_sound(sound_channel, member_ref);
+                                    return player.puppet_sound(sound_channel, member_ref).is_ok();
                                 }
+                                false
                             } else {
                                 debug!(
                                     "Sound member not found: cast_member={} score_ref={:?}",
                                     sound_data.cast_member, score_ref
                                 );
+                                false
                             }
                         } else {
                             debug!(
                                 "SoundChannel {} already playing from channel_index {}",
                                 sound_channel, channel_index
                             );
+                            true
                         }
                     }
                 });
 
-                // Mark that we've triggered this sound on this frame
-                self.sound_channel_triggered
-                    .insert(*channel_index, frame_num);
+                // Remember the start only if it happened. The first frame a
+                // movie shows can come before it is playing, and a span marked
+                // as started there would never get its sound on the frames
+                // that follow.
+                if started {
+                    self.sound_channel_triggered
+                        .insert(*channel_index, frame_num);
+                    self.sound_span_started
+                        .insert(*channel_index, (sound_data.cast_member, span_start));
+                }
             }
         }
 
@@ -1687,6 +1774,7 @@ impl Score {
         for span in &spans_to_enter {
             let sprite = self.get_sprite_mut(span.channel_number as i16);
             sprite.entered = true;
+            self.freshly_entered.push(span.channel_number as u16);
         }
 
         // Attach behaviors and set their parameters - GROUP BY CHANNEL
@@ -1843,8 +1931,15 @@ impl Score {
                                             );
                                         }
                                     }
-                                    // Log all property values for debugging
-                                    let summary: Vec<String> = props_to_set.iter().map(|(name, vref)| {
+                                    // Log all property values for debugging.
+                                    // Guarded: this is a separate statement, so
+                                    // without the check it formats every property
+                                    // of every behaviour on every beginSprite and
+                                    // throws the result away.
+                                    let summary: Vec<String> = if !log::log_enabled!(log::Level::Debug) {
+                                        Vec::new()
+                                    } else {
+                                    props_to_set.iter().map(|(name, vref)| {
                                         let v = match player.get_datum(vref) {
                                             Datum::Int(n) => format!("{}", n),
                                             Datum::Float(f) => format!("{:.4}", f),
@@ -1854,7 +1949,8 @@ impl Score {
                                             other => format!("<{:?}>", other.type_enum()),
                                         };
                                         format!("{}={}", name, v)
-                                    }).collect();
+                                    }).collect()
+                                    };
                                     debug!(
                                         "[BEHAVIOR-APPLY] cast {}/{}: [{}]",
                                         behavior_ref.cast_lib, behavior_ref.cast_member,
@@ -2591,6 +2687,7 @@ impl Score {
             .collect();
 
         for (channel_num, data) in &sprites_to_init {
+            self.freshly_entered.push(*channel_num as u16);
             let sprite = self.get_sprite_mut(*channel_num);
             sprite.entered = true;
 
@@ -2789,6 +2886,21 @@ impl Score {
 
     pub fn apply_tween_modifiers(&mut self, frame: u32) {
         let active_channels = self.active_channel_numbers_for_frame(frame);
+        // A tween writes a property only while its value is changing from
+        // one frame to the next. Where it holds (a single keyframe, or the
+        // frames after the last one) the Score leaves the sprite alone, so a
+        // value a script set stays, as it does in Director: a script that
+        // swaps a sprite's member and rotates it inside a span with size and
+        // rotation keyframes had both undone on the next frame, every
+        // member drawn stretched to the first member's size. The tween still
+        // writes on the frame a span begins and after a jump, so a frame
+        // reached out of order shows the held value rather than the base.
+        let jumped = self
+            .last_tween_frame
+            .map_or(true, |last| last != frame && last + 1 != frame);
+        self.last_tween_frame = Some(frame);
+        let just_entered = std::mem::take(&mut self.just_entered);
+        let prev_frame = frame.saturating_sub(1);
 
         for channel_number in active_channels {
             let Some(channel) = self.channels.get_mut(channel_number) else {
@@ -2806,6 +2918,7 @@ impl Score {
             let Some(keyframes) = self.keyframes_cache.get(&sprite_num) else {
                 continue;
             };
+            let force = jumped || just_entered.contains(&sprite_num);
 
             // ---- Position tween (additive) ----
             if let Some(path) = keyframes.path.as_ref() {
@@ -2814,6 +2927,7 @@ impl Score {
                     .as_ref()
                     .is_some_and(|t| t.is_path_tweened())
                     && path.is_active_at_frame(frame)
+                    && (force || path.get_position_at_frame(prev_frame) != path.get_position_at_frame(frame))
                 {
                     if let Some((dx, dy)) = path.get_delta_at_frame(
                         frame,
@@ -2841,6 +2955,7 @@ impl Score {
                     .as_ref()
                     .is_some_and(|t| t.is_size_tweened())
                     && size.is_active_at_frame(frame)
+                    && (force || size.get_size_at_frame(prev_frame) != size.get_size_at_frame(frame))
                 {
                     if let Some((dw, dh)) = size.get_delta_at_frame(
                         frame,
@@ -2876,6 +2991,7 @@ impl Score {
                     .as_ref()
                     .is_some_and(|t| t.is_rotation_tweened())
                     && rotation.is_active_at_frame(frame)
+                    && (force || rotation.get_rotation_at_frame(prev_frame) != rotation.get_rotation_at_frame(frame))
                 {
                     if let Some(dr) = rotation.get_delta_at_frame(
                         frame,
@@ -2901,6 +3017,7 @@ impl Score {
                     .as_ref()
                     .is_some_and(|t| t.is_blend_tweened())
                     && blend.is_active_at_frame(frame)
+                    && (force || blend.get_blend_at_frame(prev_frame) != blend.get_blend_at_frame(frame))
                 {
                     if let Some(value) = blend.get_blend_at_frame(frame) {
                         debug!(
@@ -2922,6 +3039,7 @@ impl Score {
                     .as_ref()
                     .is_some_and(|t| t.is_skew_tweened())
                     && skew.is_active_at_frame(frame)
+                    && (force || skew.get_skew_at_frame(prev_frame) != skew.get_skew_at_frame(frame))
                 {
                     if let Some(ds) = skew.get_delta_at_frame(
                         frame,
@@ -2947,6 +3065,7 @@ impl Score {
                     .as_ref()
                     .is_some_and(|t| t.is_forecolor_tweened())
                     && fore_color.is_active_at_frame(frame)
+                    && (force || fore_color.get_color_at_frame(prev_frame) != fore_color.get_color_at_frame(frame))
                 {
                     if let Some(color) = fore_color.get_color_at_frame(frame) {
                         debug!(
@@ -2973,6 +3092,7 @@ impl Score {
                     .as_ref()
                     .is_some_and(|t| t.is_backcolor_tweened())
                     && back_color.is_active_at_frame(frame)
+                    && (force || back_color.get_color_at_frame(prev_frame) != back_color.get_color_at_frame(frame))
                 {
                     if let Some(color) = back_color.get_color_at_frame(frame) {
                         debug!(
@@ -3474,9 +3594,20 @@ impl Score {
             // This prevents stale ScriptInstanceRef objects from pointing to deleted instances
             channel.sprite.script_instance_list.clear();
 
-            if channel.sprite.puppet {
-                channel.sprite.reset();
-            }
+            // Reset EVERY channel, not just puppeted ones. reset() only runs
+            // when a movie is torn down (player reset and both movie
+            // transitions), and Director hands the incoming movie a fresh
+            // score: a channel the new movie does not author must not inherit
+            // the old one's ink, blend, size or stretch.
+            //
+            // The measured movie showed why: its map labels sit in channel 10 with ink
+            // 36, and every task scene reuses channel 10 for the blueprint
+            // drawing. Entering a task through gotoNetMovie left the label's
+            // ink and stale size behind, so the drawing rendered invisible
+            // while the answer blocks sat too high and too far left. Loading
+            // the same task movie directly was always correct, which is what
+            // pinned the difference on the leftovers.
+            channel.sprite.reset();
         }
 
         self.invalidate_render_channel_cache();
@@ -4434,6 +4565,39 @@ fn sprite_set_prop_is_noop(
     })
 }
 
+/// Height of a score-placed `#adjust` text sprite whose member carries an
+/// authored height.
+///
+/// Text with explicit breaks keeps the authored height: it is the laid-out
+/// total Director stored. A single wrapped paragraph keeps the authored
+/// height while the measurement is within 30 % of it, which absorbs
+/// bitmap-font metrics that run a few pixels taller than Director's.
+///
+/// That tolerance does not apply when the lines were counted with the
+/// renderer's own Canvas2D wrap: a taller measurement then means lines the
+/// renderer will draw below the box. Measured on a Verdana 24 bold
+/// paragraph whose member was authored three lines tall (87) and filled at
+/// run time with text that wraps to four (116): Director grows the box and
+/// shows the fourth line, the tolerance kept 87 and clipped it.
+pub fn adjust_text_box_height(
+    authored: i32,
+    measured: Option<i32>,
+    text_has_breaks: bool,
+    measured_like_renderer: bool,
+) -> i32 {
+    if text_has_breaks {
+        return authored;
+    }
+    let measured = measured.unwrap_or(authored);
+    if measured_like_renderer && measured > authored {
+        return measured;
+    }
+    if (authored as u32) * 10 >= (measured as u32) * 7 {
+        authored
+    } else {
+        measured.max(authored)
+    }
+}
 
 /// A rect with its corners the right way round, as Director keeps them:
 /// rect(10, 50, 12, 20) and rect(10, 20, 12, 50) are the same rect.
@@ -4901,10 +5065,27 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
                         // Store the member ref to reset later
                         unsafe {
                             if let Some(player) = PLAYER_OPT.as_mut() {
+                                // A film loop's playhead lives on the member and is
+                                // shared by every sprite showing it. Resetting it to
+                                // frame 1 here is right for the FIRST sprite that
+                                // starts the loop, but wrong when another sprite is
+                                // already running it: several sprites share one
+                                // tumbling loop and each restarts on its own, so
+                                // one restart was snapping every sprite's rotation back
+                                // to the start. Only reset when no other sprite is
+                                // currently displaying this loop.
+                                let others_using = player.movie.score.channels.iter().any(|ch| {
+                                    ch.number as i16 != sprite_id
+                                        && ch.sprite.visible
+                                        && ch.sprite.member.as_ref() == Some(r)
+                                });
                                 if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(r) {
                                     if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
-                                        film_loop.current_frame = 1;
+                                        if !others_using {
+                                            film_loop.current_frame = 1;
+                                        }
                                         film_loop.score.sound_channel_triggered.clear();
+                                        film_loop.score.sound_span_started.clear();
                                         film_loop.score.last_sound_clear_frame = None;
                                     }
                                 }
@@ -5398,9 +5579,24 @@ fn matte_pixel_hit_test(player: &DirPlayer, sprite: &Sprite, rect: &IntRect, hit
         Some(b) => b,
         None => return true,
     };
+    // The CPU renderer stores the matte on the bitmap; the WebGL renderer
+    // only bakes it into its texture. Without one here the hit test used to
+    // fall back to the bounding box, so a matte sprite answered the mouse
+    // over its whole rectangle instead of its shape.
     let matte = match bitmap.matte.as_ref() {
-        Some(m) => m,
-        None => return true, // Matte not yet computed, fall back to bounding box
+        Some(m) => m.clone(),
+        None => {
+            let key = bmp_member.image_ref as u32;
+            let mut cache = player.hit_matte_cache.borrow_mut();
+            match cache.get(&key) {
+                Some((version, m)) if *version == bitmap.version => m.clone(),
+                _ => {
+                    let m = Arc::new(bitmap.compute_matte(&player.movie.cast_manager.palettes()));
+                    cache.insert(key, (bitmap.version, m.clone()));
+                    m
+                }
+            }
+        }
     };
 
     let rect_w = (rect.right - rect.left).max(1);
@@ -5500,7 +5696,7 @@ pub fn is_active_sprite(player: &DirPlayer, sprite: &Sprite) -> bool {
 /// Clicks pass through them to the sprite underneath (e.g. a button).
 /// Only sprite behavior scripts that actually define mouse handlers
 /// (mouseDown, mouseUp, mouseUpOutSide) prevent pass-through.
-fn is_click_transparent_sprite(player: &DirPlayer, sprite: &Sprite) -> bool {
+pub(crate) fn is_click_transparent_sprite(player: &DirPlayer, sprite: &Sprite) -> bool {
     if sprite.editable {
         return false;
     }
@@ -5529,6 +5725,22 @@ fn is_click_transparent_sprite(player: &DirPlayer, sprite: &Sprite) -> bool {
                     &member.member_type,
                     CastMemberType::Shape(_) | CastMemberType::VectorShape(_)
                 ) {
+                    return true;
+                }
+            }
+        }
+    }
+    // A Background Transparent (ink 36) bitmap with no mouse handler is a
+    // pure overlay drawn over other sprites, most often a custom pointer or
+    // aiming reticle that tracks the mouse. Its background shows through
+    // visually, so a click must reach whatever interactive sprite sits behind
+    // it, exactly as it does under the reticle's transparent centre. An ink-36
+    // sprite that DOES handle the mouse (a hotspot button drawn with a
+    // transparent background) keeps its clicks.
+    if sprite.ink == 36 && !sprite_has_mouse_handler(player, sprite) {
+        if let Some(member_ref) = sprite.member.as_ref() {
+            if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
+                if matches!(&member.member_type, CastMemberType::Bitmap(_)) {
                     return true;
                 }
             }
@@ -5727,17 +5939,120 @@ pub fn get_sprite_at(player: &DirPlayer, x: i32, y: i32, scripted: bool) -> Opti
 /// consistently across bitmap/text/etc.
 pub fn get_concrete_sprite_render_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect {
     let rect = get_concrete_sprite_rect(player, sprite);
-    let layout = crate::player::stage::stage_layout(player);
+    let shows_bitmap = sprite
+        .member
+        .as_ref()
+        .and_then(|m| player.movie.cast_manager.find_member_by_ref(m))
+        .map_or(false, |m| matches!(m.member_type, CastMemberType::Bitmap(_)));
+    if shows_bitmap {
+        movie_rect_to_render_rect_fixed_size(player, rect)
+    } else {
+        movie_rect_to_render_rect(player, rect)
+    }
+}
+
+/// Like `movie_rect_to_render_rect`, but the size in render space depends
+/// only on the rect's size, never on where it sits. Rounding each edge on
+/// its own makes a rect's scaled width or height vary by a pixel with its
+/// position whenever the stage scale is not a whole number, so a bitmap
+/// moved by one movie pixel was drawn a row or column larger or smaller as
+/// well as moved. Here the left and top edges are snapped to a whole render
+/// pixel, and the size is the movie size times the scale, rounded once.
+pub fn movie_rect_to_render_rect_fixed_size(player: &DirPlayer, rect: IntRect) -> IntRect {
     let (sx, sy) = crate::player::stage::stage_scale(player);
     if (sx - 1.0).abs() < 1e-6 && (sy - 1.0).abs() < 1e-6 {
         return rect;
     }
+    let layout = crate::player::stage::stage_layout(player);
+    scale_movie_rect_fixed_size(rect, layout.draw_rect[0], layout.draw_rect[1], sx, sy)
+}
+
+fn scale_movie_rect_fixed_size(rect: IntRect, origin_x: f64, origin_y: f64, sx: f64, sy: f64) -> IntRect {
+    let left = (origin_x + rect.left as f64 * sx).round() as i32;
+    let top = (origin_y + rect.top as f64 * sy).round() as i32;
+    let width = ((rect.right - rect.left) as f64 * sx).round() as i32;
+    let height = ((rect.bottom - rect.top) as f64 * sy).round() as i32;
+    IntRect::from(left, top, left + width, top + height)
+}
+
+/// Maps a rect in movie coordinates into the renderer's space: offset by the
+/// stage's drawRect and scaled by the stage auto-scale factor. Anything the
+/// renderer builds from a sprite's loc or a member's size is in movie
+/// coordinates and has to pass through here before it is drawn.
+pub fn movie_rect_to_render_rect(player: &DirPlayer, rect: IntRect) -> IntRect {
+    let (sx, sy) = crate::player::stage::stage_scale(player);
+    if (sx - 1.0).abs() < 1e-6 && (sy - 1.0).abs() < 1e-6 {
+        return rect;
+    }
+    let layout = crate::player::stage::stage_layout(player);
+    scale_movie_rect(rect, layout.draw_rect[0], layout.draw_rect[1], sx, sy)
+}
+
+fn scale_movie_rect(rect: IntRect, origin_x: f64, origin_y: f64, sx: f64, sy: f64) -> IntRect {
     IntRect::from(
-        (layout.draw_rect[0] + rect.left as f64 * sx).round() as i32,
-        (layout.draw_rect[1] + rect.top as f64 * sy).round() as i32,
-        (layout.draw_rect[0] + rect.right as f64 * sx).round() as i32,
-        (layout.draw_rect[1] + rect.bottom as f64 * sy).round() as i32,
+        (origin_x + rect.left as f64 * sx).round() as i32,
+        (origin_y + rect.top as f64 * sy).round() as i32,
+        (origin_x + rect.right as f64 * sx).round() as i32,
+        (origin_y + rect.bottom as f64 * sy).round() as i32,
     )
+}
+
+/// Generous bitmap height, in render pixels, for text that may wrap past its
+/// authored lines: `max_stride` per source line, plus an estimate of the
+/// wrapped lines from the text length, plus two spare lines and the spacing.
+/// The strides, font size and spacing are movie pixels and `render_width` is
+/// in render pixels, so the estimate is made at movie scale and then scaled.
+pub fn text_bitmap_height_estimate(
+    max_stride: i32,
+    source_lines: i32,
+    text_chars: i32,
+    render_width: i32,
+    font_size: i32,
+    spacing_pad: i32,
+    scale: f64,
+) -> i32 {
+    let scale = if scale > 0.0 { scale } else { 1.0 };
+    let movie_width = ((render_width as f64) / scale).round() as i32;
+    let chars_per_line = (movie_width / (font_size / 2).max(1)).max(1);
+    let wrap_estimate = (text_chars / chars_per_line).max(0);
+    let lines = source_lines + wrap_estimate + 2;
+    (((max_stride * lines + spacing_pad) as f64) * scale).round() as i32
+}
+
+/// Line stride of an outline font's line that has no fixedLineSpace and no
+/// per-paragraph spacing: the font's own line (ascent + descent) or the point
+/// size plus the bottom spacing, whichever is larger.
+///
+/// Verdana 24 has a 29 px line. With no bottom spacing the point size alone
+/// (24) packed each line into the one above, so the font's line wins. With
+/// 5 px bottom spacing the point-size rule already gives 29, and adding the
+/// spacing on top of the font's line (34) made a three-line paragraph 15 px
+/// taller than the box it was authored in, cutting off its last descenders.
+pub fn auto_outline_line_step(font_line: i32, point_size: i32, bottom_spacing: i32) -> i32 {
+    font_line.max(point_size + bottom_spacing)
+}
+
+/// Height of the box a clipped (#fixed, #scroll, #limit) text member is drawn
+/// into, in render pixels. The member's authored height is in movie pixels,
+/// like its fixedLineSpace, while the text itself is rasterized at the stage
+/// scale. Taken unscaled, a 34 px box drawn at 2.8x kept 34 device rows for
+/// glyphs 68 rows tall, and every line was cut through its middle.
+///
+/// When the stored height looks like one line's stride rather than the whole
+/// box (shorter than `line_count` strides), the box is that many strides.
+pub fn clipped_text_box_render_height(
+    member_height: i32,
+    fixed_line_space: i32,
+    line_count: i32,
+    scale: f64,
+) -> i32 {
+    let strides = fixed_line_space.max(1) * line_count.max(1);
+    let movie_h = if fixed_line_space > 0 && member_height > 0 && member_height + 2 < strides {
+        strides
+    } else {
+        member_height.max(1)
+    };
+    ((movie_h as f64) * scale).round().max(1.0) as i32
 }
 
 /// Height in pixels of a field's laid-out text, wrapped at the box's inner
@@ -6366,6 +6681,10 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 !player.font_manager.font_cache.contains_key(&cache_key)
             };
 
+            // True when the height below comes from the system-font estimate,
+            // which counts lines with the renderer's own Canvas2D wrap rather
+            // than with bitmap-font metrics.
+            let mut measured_like_renderer = false;
             let measured_height = if text_width > 0 {
                 use crate::player::font::{measure_text, measure_text_wrapped, FontManager};
                 let cache_key = FontManager::cache_key(&text_member.font);
@@ -6374,7 +6693,22 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 // match text_member.font_size and gives a wrong measurement.
                 // For system fonts (Arial, etc.), use a font-size-based estimate
                 // since native text uses Canvas2D which we can't measure here.
-                let font = player.font_manager.font_cache.get(&cache_key).cloned();
+                // The font cached for the member's own size and style comes
+                // first: synthesised bold carries wider advances.
+                let style_bits = text_member.font_style.iter().fold(0u8, |acc, s| match s {
+                    BuiltInSymbol::Bold => acc | 1,
+                    BuiltInSymbol::Italic => acc | 2,
+                    BuiltInSymbol::Underline => acc | 4,
+                    _ => acc,
+                });
+                let styled_key = FontManager::cache_key(&format!("{}_{}_{}", text_member.font, text_member.font_size, style_bits));
+                let font = player
+                    .font_manager
+                    .font_cache
+                    .get(&styled_key)
+                    .filter(|f| f.font_size == text_member.font_size)
+                    .or_else(|| player.font_manager.font_cache.get(&cache_key))
+                    .cloned();
                 // Force wrap-aware measurement for puppet text members
                 // even when `word_wrap` is false on the member. Director
                 // grows puppet sprites to fit all visible content; if
@@ -6403,6 +6737,7 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                         ).1 as i32
                     }
                 }).filter(|h| *h > 0);
+                measured_like_renderer = from_bitmap.is_none();
 
                 from_bitmap.or_else(|| {
                     // System-font estimate: prefer fixed_line_space (only set
@@ -6420,7 +6755,38 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                     } else {
                         return None;
                     };
-                    let line_count = text_member.text.matches(|c| c == '\n' || c == '\r').count() as i32 + 1;
+                    let break_lines = text_member.text.matches(|c| c == '\n' || c == '\r').count() as i32 + 1;
+                    // A wrapping member has more lines than its breaks say.
+                    // Count them the way the browser lays the text out, as
+                    // the field path does; a two-line caption at 24 px
+                    // otherwise kept a one-line box and lost its second line.
+                    let line_count = if text_member.word_wrap && text_member.font_size > 0 {
+                        use crate::player::handlers::datum_handlers::cast_member::font::FontMemberHandlers;
+                        let mut style: u8 = 0;
+                        for tag in &text_member.font_style {
+                            match tag {
+                                BuiltInSymbol::Bold => style |= 1,
+                                BuiltInSymbol::Italic => style |= 2,
+                                BuiltInSymbol::Underline => style |= 4,
+                                _ => {}
+                            }
+                        }
+                        let (_, h) = FontMemberHandlers::measure_text_native_styled(
+                            &text_member.text,
+                            if text_member.font.is_empty() { "Arial" } else { text_member.font.as_str() },
+                            text_member.font_size,
+                            if style == 0 { None } else { Some(style) },
+                            true,
+                            text_width,
+                            0,
+                            0,
+                            0,
+                        );
+                        let fs = text_member.font_size as i32;
+                        ((h as i32 + fs / 2) / fs).max(break_lines)
+                    } else {
+                        break_lines
+                    };
                     Some(per_line * line_count
                         + text_member.top_spacing as i32
                         + text_member.bottom_spacing as i32)
@@ -6556,16 +6922,12 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 // pixels of the last line may be cut, but layout
                 // adjacency is preserved (Junkbot credits: stored 375
                 // matches Director, our re-measure 414 would inflate).
-                if text_has_breaks {
-                    preferred_authored
-                } else {
-                    let measured_h = measured_height.unwrap_or(preferred_authored);
-                    if (preferred_authored as u32) * 10 >= (measured_h as u32) * 7 {
-                        preferred_authored
-                    } else {
-                        measured_h.max(preferred_authored)
-                    }
-                }
+                adjust_text_box_height(
+                    preferred_authored,
+                    measured_height,
+                    text_has_breaks,
+                    measured_like_renderer,
+                )
             } else if text_member.box_type == BuiltInSymbol::Adjust {
                 match measured_height {
                     Some(m) if m > stored_height => m,
@@ -6675,23 +7037,35 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             //
             // Falls back to centering when regPoint or member dims are
             // missing (e.g. Lingo `new(#vectorShape)` synthesized members).
+            //
+            // A sprite that was never resized shows the member at its own
+            // size, as an unstretched bitmap does: the score's box is the
+            // size the shape had when the score was saved. A movie that
+            // rewrites `vertexList` at run time gives the member a new size,
+            // and holding the old box stretched a 42 px shape over 202 px.
             let mw = vs.member_width as i32;
             let mh = vs.member_height as i32;
+            let stretched = sprite.stretch != 0 || sprite.has_size_tweened;
+            let (width, height) = if !stretched && mw > 0 && mh > 0 {
+                (mw, mh)
+            } else {
+                (sprite.width, sprite.height)
+            };
             let (reg_x, reg_y) = if mw > 0 && mh > 0 {
-                let sx = sprite.width as f32 / mw as f32;
-                let sy = sprite.height as f32 / mh as f32;
+                let sx = width as f32 / mw as f32;
+                let sy = height as f32 / mh as f32;
                 (
                     (vs.reg_point.0 as f32 * sx).round() as i32,
                     (vs.reg_point.1 as f32 * sy).round() as i32,
                 )
             } else {
-                (sprite.width / 2, sprite.height / 2)
+                (width / 2, height / 2)
             };
             IntRect::from(
                 sprite.loc_h - reg_x,
                 sprite.loc_v - reg_y,
-                sprite.loc_h - reg_x + sprite.width,
-                sprite.loc_v - reg_y + sprite.height,
+                sprite.loc_h - reg_x + width,
+                sprite.loc_v - reg_y + height,
             )
         }
         CastMemberType::Flash(flash_member) => {
@@ -6947,12 +7321,124 @@ pub fn get_score_sprite_mut<'a>(
 
 #[cfg(test)]
 mod rect_tests {
-    use super::normalise_rect;
+    use super::{auto_outline_line_step, clipped_text_box_render_height, normalise_rect, text_bitmap_height_estimate, scale_movie_rect, scale_movie_rect_fixed_size};
+    use crate::player::geometry::IntRect;
+
+    #[test]
+    fn a_movie_rect_lands_on_the_scaled_stage() {
+        // A 174x98 rect centred on loc (454,516), stage drawn 1.37x from
+        // x=10. The render rect must be centred on the SCALED loc, not on
+        // the movie loc read as device pixels.
+        let r = scale_movie_rect(IntRect::from(367, 467, 541, 565), 10.0, 0.0, 1.37, 1.37);
+        assert_eq!((r.left, r.top, r.right, r.bottom), (513, 640, 751, 774));
+        let centre = ((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+        assert_eq!(centre, (632, 707));
+    }
+
+    #[test]
+    fn a_bitmap_rect_keeps_its_size_when_moved_by_one_pixel() {
+        // Moving by one movie pixel may only translate the render rect,
+        // never change its size, at whole and fractional stage scales.
+        for &s in &[1.0f64, 1.433, 1.4326, 1.37, 1.5, 2.0] {
+            for &(w, h) in &[(55, 19), (174, 98), (1, 1), (239, 46)] {
+                let base = scale_movie_rect_fixed_size(IntRect::from(100, 200, 100 + w, 200 + h), 267.0, 0.0, s, s);
+                let size = (base.width(), base.height());
+                assert_eq!(size, ((w as f64 * s).round() as i32, (h as f64 * s).round() as i32));
+                for dx in -3..=3 {
+                    for dy in -3..=3 {
+                        let (l, t) = (100 + dx, 200 + dy);
+                        let r = scale_movie_rect_fixed_size(IntRect::from(l, t, l + w, t + h), 267.0, 0.0, s, s);
+                        assert_eq!((r.width(), r.height()), size, "scale {} size {}x{} moved {},{}", s, w, h, dx, dy);
+                        assert_eq!(r.left, (267.0 + l as f64 * s).round() as i32);
+                        assert_eq!(r.top, (t as f64 * s).round() as i32);
+                    }
+                }
+            }
+        }
+        // The edge-rounded rect does vary, which is the artifact this avoids.
+        let heights: std::collections::HashSet<i32> = (500..510)
+            .map(|t| scale_movie_rect(IntRect::from(143, t, 198, t + 19), 0.0, 0.0, 1.4326, 1.4326).height())
+            .collect();
+        assert!(heights.len() > 1);
+    }
+
+    #[test]
+    fn the_text_bitmap_estimate_scales_with_the_stage() {
+        // Five source lines of 24 pt text (stride 30) in a 987 px box with
+        // 330 characters: the same number of lines at every scale, so the
+        // estimate grows with the scale instead of shrinking relative to it.
+        let one = text_bitmap_height_estimate(30, 5, 330, 987, 24, 0, 1.0);
+        assert_eq!(one, 30 * (5 + 330 / (987 / 12) + 2));
+        let big = text_bitmap_height_estimate(30, 5, 330, 2776, 24, 0, 2.8125);
+        assert_eq!(big, ((one as f64) * 2.8125).round() as i32);
+        // It then outgrows a scaled four-line box (116 px at 2.8125 = 326).
+        assert!(big > 326);
+    }
+
+    #[test]
+    fn an_outline_line_steps_its_own_line_or_the_point_size_and_spacing() {
+        // Verdana 24 (line 29) without bottom spacing steps its own line.
+        assert_eq!(auto_outline_line_step(29, 24, 0), 29);
+        // With 5 px bottom spacing it still steps 29, not 29 + 5: three
+        // lines fill the 5 + 87 px box the paragraph was authored in.
+        assert_eq!(auto_outline_line_step(29, 24, 5), 29);
+        // Spacing beyond the descent still opens the lines up.
+        assert_eq!(auto_outline_line_step(29, 24, 10), 34);
+        // Scaled to a stage drawn 2.8x (68 pt, line 82, spacing 14).
+        assert_eq!(auto_outline_line_step(82, 68, 14), 82);
+    }
+
+    #[test]
+    fn a_clipped_text_box_grows_with_the_stage_scale() {
+        // One line of 24 pt text in a 34 px #fixed box. At scale 1 the box
+        // stays 34; on a stage drawn 2.8125x (1920x1080 at 200 %) it must
+        // hold the 68 px glyphs, so it is 96 rows, not 34.
+        assert_eq!(clipped_text_box_render_height(34, 0, 1, 1.0), 34);
+        assert_eq!(clipped_text_box_render_height(34, 0, 1, 2.8125), 96);
+        assert_eq!(clipped_text_box_render_height(34, 0, 1, 1.40625), 48);
+        // A 60 px box for 48 pt digits and a two-line 68 px box.
+        assert_eq!(clipped_text_box_render_height(60, 0, 1, 2.8125), 169);
+        assert_eq!(clipped_text_box_render_height(68, 0, 1, 1.25), 85);
+        // A stored height that is one stride of three lines becomes the
+        // three strides, scaled.
+        assert_eq!(clipped_text_box_render_height(18, 18, 3, 1.0), 54);
+        assert_eq!(clipped_text_box_render_height(18, 18, 3, 2.0), 108);
+        // Never zero.
+        assert_eq!(clipped_text_box_render_height(0, 0, 1, 0.1), 1);
+    }
+
+    #[test]
+    fn a_fixed_size_rect_matches_at_scale_one() {
+        let r = scale_movie_rect_fixed_size(IntRect::from(367, 467, 541, 565), 0.0, 0.0, 1.0, 1.0);
+        assert_eq!((r.left, r.top, r.right, r.bottom), (367, 467, 541, 565));
+    }
+
+    #[test]
+    fn scale_one_leaves_the_rect_alone() {
+        let r = scale_movie_rect(IntRect::from(367, 467, 541, 565), 0.0, 0.0, 1.0, 1.0);
+        assert_eq!((r.left, r.top, r.right, r.bottom), (367, 467, 541, 565));
+    }
 
     #[test]
     fn inverted_corners_are_swapped() {
         assert_eq!(normalise_rect([10, 50, 12, 20]), [10, 20, 12, 50]);
         assert_eq!(normalise_rect([12, 20, 10, 50]), [10, 20, 12, 50]);
+    }
+
+    #[test]
+    fn an_adjust_paragraph_grows_to_the_lines_the_renderer_draws() {
+        use super::adjust_text_box_height;
+        // Authored three lines of 29 px, filled with text that wraps to four.
+        assert_eq!(adjust_text_box_height(87, Some(116), false, true), 116);
+        // Same numbers from bitmap-font metrics: within the tolerance.
+        assert_eq!(adjust_text_box_height(87, Some(116), false, false), 87);
+        // Text with explicit breaks keeps the stored layout either way.
+        assert_eq!(adjust_text_box_height(87, Some(116), true, true), 87);
+        // Never shrinks below the authored box.
+        assert_eq!(adjust_text_box_height(116, Some(87), false, true), 116);
+        assert_eq!(adjust_text_box_height(116, None, false, true), 116);
+        // A far taller measurement grows on either path.
+        assert_eq!(adjust_text_box_height(36, Some(108), false, false), 108);
     }
 
     #[test]

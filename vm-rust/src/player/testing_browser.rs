@@ -166,6 +166,12 @@ impl BrowserTestPlayer {
             crate::player::PLAYER_TX = Some(tx.clone());
             crate::player::PLAYER_EVENT_TX = Some(event_tx);
             PLAYER_OPT = Some(crate::player::DirPlayer::new(tx));
+            // A browser player seeds random() per session; tests replay a
+            // fixed sequence, as the native harness does.
+            if let Some(p) = PLAYER_OPT.as_mut() {
+                use rand::SeedableRng;
+                p.rng = rand::rngs::SmallRng::seed_from_u64(0);
+            }
             crate::player::xtra::multiuser::MULTIUSER_XTRA_MANAGER_OPT =
                 Some(crate::player::xtra::multiuser::MultiuserXtraManager::new());
             crate::player::xtra::xmlparser::XMLPARSER_XTRA_MANAGER_OPT =

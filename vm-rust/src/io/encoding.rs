@@ -160,9 +160,44 @@ const MACROMAN_HIGH: [char; 128] = [
     '\u{00AF}', '\u{02D8}', '\u{02D9}', '\u{02DA}', '\u{00B8}', '\u{02DD}', '\u{02DB}', '\u{02C7}', // F8-FF
 ];
 
-/// Decode a single Mac Roman byte into its Unicode `char`.
+/// Director's own Mac Roman to Windows-1252 byte table, as a Director 8.5
+/// projector carries it in its font map ("Mac: => Win:" entries). This is
+/// the conversion the Windows player applies to script text on its way to
+/// the screen. It is a bijection: for letters and the symbols both code
+/// pages share it agrees with Apple's ROMAN.TXT, but a Mac byte with no
+/// Windows counterpart lands on a Windows character instead of being lost.
+/// A script literal holding Mac byte 0xFD (a double acute accent in
+/// ROMAN.TXT) is shown as one half (Windows 0xBD) by the projector; through
+/// ROMAN.TXT the same byte became a character no Windows font atlas has,
+/// and the text drew a box where the fraction belonged.
+const DIRECTOR_MAC_TO_WIN: [u8; 128] = [
+    196, 197, 199, 201, 209, 214, 220, 225, 224, 226, 228, 227, 229, 231, 233, 232, // 80-8F
+    234, 235, 237, 236, 238, 239, 241, 243, 242, 244, 246, 245, 250, 249, 251, 252, // 90-9F
+    134, 176, 162, 163, 167, 149, 182, 223, 174, 169, 153, 180, 168, 141, 198, 216, // A0-AF
+    144, 177, 143, 142, 165, 181, 240, 221, 222, 254, 138, 170, 186, 253, 230, 248, // B0-BF
+    191, 161, 172, 175, 131, 188, 208, 171, 187, 133, 160, 192, 195, 213, 140, 156, // C0-CF
+    173, 151, 147, 148, 145, 146, 247, 215, 255, 159, 158, 164, 139, 155, 128, 129, // D0-DF
+    135, 183, 130, 132, 137, 194, 202, 193, 203, 200, 205, 206, 207, 204, 211, 212, // E0-EF
+    157, 210, 218, 219, 217, 166, 136, 152, 150, 154, 178, 190, 184, 189, 179, 185, // F0-FF
+];
+
+/// Decode a single Mac Roman byte into the `char` a Windows player shows
+/// for it: the byte goes through [`DIRECTOR_MAC_TO_WIN`] and then
+/// Windows-1252. [`MACROMAN_HIGH`] documents Apple's reading of the same
+/// bytes; the two agree wherever Windows-1252 has the character.
 #[inline]
 pub fn macroman_byte_to_char(byte: u8) -> char {
+    if byte < 0x80 {
+        byte as char
+    } else {
+        win1252_byte_to_char(DIRECTOR_MAC_TO_WIN[(byte - 0x80) as usize])
+    }
+}
+
+/// Apple's reading of a Mac Roman byte, kept for reference and tests.
+#[allow(dead_code)]
+#[inline]
+pub fn macroman_byte_to_char_apple(byte: u8) -> char {
     if byte < 0x80 {
         byte as char
     } else {

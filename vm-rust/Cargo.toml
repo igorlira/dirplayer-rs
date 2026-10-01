@@ -57,7 +57,10 @@ console_log = "1.0.0"
 log = "0.4.22"
 percent-encoding = "2"
 xml = "1.0"
-image = "0.25.8"
+# Only the formats Director media carries: every decoder the crate enables by
+# default (TIFF, WebP, EXR, QOI, rayon, ...) is linked in otherwise, because
+# load_from_memory sniffs the format at run time.
+image = { version = "0.25.8", default-features = false, features = ["png", "jpeg", "gif", "bmp"] }
 rand = { version = "0.9", features = ["small_rng"] }
 getrandom = { version = "0.3", features = ["wasm_js"] }
 base64 = "0.22"
@@ -98,6 +101,7 @@ features = [
   'Headers',
   'Request',
   'RequestInit',
+  'XmlHttpRequest',
   'RequestMode',
   'Response',
   'ReadableStream',

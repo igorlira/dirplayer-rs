@@ -464,10 +464,19 @@ impl DirectorProperty for Height {
 }
 
 
-/// Convert channel index (stored in score) to channel number (displayed in Director)
+/// Convert channel index (stored in score) to channel number (displayed in Director).
+///
+/// Indices 0 to 5 are the effects channels (script, tempo, palette, transition
+/// and the two sounds), which own no sprite; sprite channel 1 is index 6. They
+/// all map to 0 here, as `get_channel_number_from_index` does, so that an
+/// interval authored on an effects channel is never keyed as if it belonged
+/// to sprite channel 1 to 5. Mapping them to their own index did that: the
+/// second sound channel's interval over frames 1 to 28 became sprite 4's, its
+/// two positions in that range were read as a path tween, and the tween wrote
+/// the score position back over a script's placement on every frame.
 pub fn index_to_channel_number(index: u16) -> u16 {
     if index <= 5 {
-        index
+        0
     } else {
         index - 5
     }
@@ -683,7 +692,7 @@ pub trait KeyframeTrack {
         if let (Some(prev), Some(next)) = (prev_kf, next_kf) {
             let prev_frame = prev.frame();
             let next_frame = next.frame();
-            
+
             // Check if both keyframes and current frame are in the same interval
             for (start, end) in intervals {
                 if prev_frame >= *start && prev_frame <= *end &&
@@ -693,7 +702,27 @@ pub trait KeyframeTrack {
                 }
             }
         }
-        
+
+        // Case 3: Frame is past the span's last keyframe. Director holds the
+        // value that keyframe set until the span ends, and a jump straight to
+        // such a frame must see it too: a chart whose blend tweens 10 -> 100
+        // and whose span holds one frame past the last keyframe came up at 10
+        // when a script skipped its intro to that frame, and at 100 only when
+        // the playhead had stepped through the tween.
+        if let Some(prev) = prev_kf {
+            let prev_frame = prev.frame();
+            let after_last = next_kf.map_or(true, |next| {
+                !intervals.iter().any(|(s, e)| next.frame() >= *s && next.frame() <= *e && frame >= *s && frame <= *e)
+            });
+            if after_last {
+                for (start, end) in intervals {
+                    if prev_frame >= *start && prev_frame <= *end && frame >= *start && frame <= *end {
+                        return true;
+                    }
+                }
+            }
+        }
+
         false
     }
 }
@@ -2217,4 +2246,35 @@ pub fn build_all_keyframes_cache(
     );
     
     combined_cache
+}
+
+#[cfg(test)]
+mod held_keyframe_tests {
+    use super::*;
+
+    fn track(keyframes: &[(u32, u8)], span: (u32, u32)) -> SpriteBlendKeyframes {
+        SpriteBlendKeyframes {
+            channel: 5,
+            keyframes: keyframes.iter().map(|&(frame, blend_percent)| BlendKeyframe { frame, blend_percent }).collect(),
+            tween_info: Some(TweenInfo::default()),
+            intervals: vec![span],
+        }
+    }
+
+    #[test]
+    fn a_frame_past_the_last_keyframe_holds_its_value_until_the_span_ends() {
+        let t = track(&[(19, 10), (30, 100)], (19, 41));
+        assert_eq!(t.get_blend_at_frame(19), Some(10));
+        assert_eq!(t.get_blend_at_frame(25), Some(10), "between keyframes");
+        assert_eq!(t.get_blend_at_frame(30), Some(100));
+        assert_eq!(t.get_blend_at_frame(41), Some(100), "held to the span end");
+        assert_eq!(t.get_blend_at_frame(42), None, "outside the span");
+    }
+
+    #[test]
+    fn a_later_span_does_not_hold_an_earlier_one() {
+        let t = track(&[(19, 10), (30, 100), (45, 50)], (19, 41));
+        assert_eq!(t.get_blend_at_frame(41), Some(100));
+        assert_eq!(t.get_blend_at_frame(44), None);
+    }
 }

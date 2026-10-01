@@ -4,6 +4,7 @@ pub mod io;
 pub mod js_api;
 pub mod player;
 pub mod rendering;
+pub mod rendering_text;
 pub mod rendering_gpu;
 pub mod utils;
 
@@ -916,6 +917,40 @@ pub fn key_up(key: String, code: u16) {
     player_dispatch(PlayerVMCommand::KeyUp(key, code));
 }
 
+/// Bring the modifier keys in line with what the browser reports on any
+/// input event (`ctrlKey`, `shiftKey`, `altKey`, `metaKey`): a modifier the
+/// event says is up is dropped from the held keys. State only, no keyUp is
+/// sent to the movie. See `KeyboardManager::release_modifier`.
+#[wasm_bindgen]
+pub fn sync_modifiers(ctrl: bool, shift: bool, alt: bool, meta: bool) {
+    let released: Vec<&str> = [
+        (!ctrl, "Control"),
+        (!shift, "Shift"),
+        (!alt, "Alt"),
+        (!alt, "AltGraph"),
+        (!meta, "Meta"),
+    ]
+    .iter()
+    .filter(|(up, _)| *up)
+    .map(|(_, key)| *key)
+    .collect();
+    if released.is_empty() {
+        return;
+    }
+    reserve_player_mut(|player| {
+        for key in &released {
+            player.keyboard_manager.release_modifier(key);
+        }
+    });
+}
+
+/// The page lost the focus: keys released from here on are not reported to
+/// it, so none is held any more. State only, no keyUp is sent to the movie.
+#[wasm_bindgen]
+pub fn release_all_keys() {
+    reserve_player_mut(|player| player.keyboard_manager.release_all());
+}
+
 /// Mirror the keyboard state into every on-stage nested `#movie` sub-player so
 /// its polling `keyPressed(code)` (e.g. g349's arrow-key list scrolling) sees
 /// the same keys as the host. State-only, like `forward_mouse_to_nested` — no
@@ -989,6 +1024,138 @@ pub fn is_sprite_editable_field(sprite_id: i32) -> bool {
             CastMemberType::Text(t) => t.info.as_ref().map_or(false, |i| i.editable),
             _ => false,
         })
+    })
+}
+
+/// Members a movie uses as its own text inputs (see text_entry_members):
+///   dirplayer_setTextEntryMembers(['name field'])
+#[wasm_bindgen]
+pub fn set_text_entry_members(names: JsValue) {
+    use wasm_bindgen::JsCast;
+    let mut set: Vec<String> = Vec::new();
+    if let Some(arr) = names.dyn_ref::<js_sys::Array>() {
+        for v in arr.iter() {
+            if let Some(s) = v.as_string() {
+                set.push(s.to_lowercase());
+            }
+        }
+    }
+    crate::player::text_entry_members::set_text_entry(set);
+}
+
+/// The canvas rect [left, top, right, bottom] of a sprite that accepts typed
+/// text: a visible sprite whose Field/Text member is editable, that was made
+/// editable with `the editable of sprite`, or whose member the host declared
+/// a text entry. Empty when it does not.
+fn text_entry_canvas_rect(player: &player::DirPlayer, sprite_id: i16) -> Vec<f64> {
+    if sprite_id <= 0 {
+        return Vec::new();
+    }
+    let Some(sprite) = player.movie.score.get_sprite(sprite_id) else { return Vec::new() };
+    if !sprite.visible {
+        return Vec::new();
+    }
+    let Some(member) = sprite
+        .member
+        .as_ref()
+        .and_then(|m| player.movie.cast_manager.find_member_by_ref(m))
+    else {
+        return Vec::new();
+    };
+    let accepts_text = match &member.member_type {
+        CastMemberType::Field(f) => f.editable || sprite.editable,
+        CastMemberType::Text(t) => {
+            t.info.as_ref().map_or(false, |i| i.editable) || sprite.editable
+        }
+        _ => false,
+    } || crate::player::text_entry_members::is_text_entry(&member.name);
+    if !accepts_text {
+        return Vec::new();
+    }
+    let r = crate::player::score::get_concrete_sprite_rect(player, sprite);
+    if r.right <= r.left || r.bottom <= r.top {
+        return Vec::new();
+    }
+    let layout = crate::player::stage::stage_layout(player);
+    crate::player::stage::movie_rect_to_canvas(
+        [r.left as f64, r.top as f64, r.right as f64, r.bottom as f64],
+        layout.draw_rect,
+        player.movie.rect.width() as f64,
+        player.movie.rect.height() as f64,
+    )
+    .to_vec()
+}
+
+/// The text entry under the given canvas point, or 0. Unlike the mouse hit
+/// test, a non-editable Text member does not let the point fall through here
+/// when it is a host-declared entry: the mouse passes through it, but it is
+/// still the field the player tapped. Any other sprite that would take the
+/// click on top of it hides it.
+#[wasm_bindgen]
+pub fn text_entry_sprite_at(x: f64, y: f64) -> i32 {
+    reserve_player_ref(|player| {
+        let (mx, my) = crate::player::stage::canvas_to_movie_coords(player, x, y);
+        let (mx, my) = (mx as i32, my as i32);
+        for channel in player
+            .movie
+            .score
+            .get_sorted_channels(player.movie.current_frame)
+            .iter()
+            .rev()
+        {
+            let sprite = &channel.sprite;
+            if !sprite.visible {
+                continue;
+            }
+            let r = crate::player::score::get_concrete_sprite_rect(player, sprite);
+            if mx < r.left || mx >= r.right || my < r.top || my >= r.bottom {
+                continue;
+            }
+            if !text_entry_canvas_rect(player, sprite.number as i16).is_empty() {
+                return sprite.number as i32;
+            }
+            if crate::player::score::concrete_sprite_hit_test(player, sprite, mx, my)
+                && !crate::player::score::is_click_transparent_sprite(player, sprite)
+            {
+                return 0;
+            }
+        }
+        0
+    })
+}
+
+/// Canvas rect of the sprite if it accepts typed text, else empty. Lets a
+/// touch frontend decide whether a tap should raise the on-screen keyboard.
+#[wasm_bindgen]
+pub fn sprite_text_entry_rect(sprite_id: i32) -> Vec<f64> {
+    reserve_player_ref(|player| text_entry_canvas_rect(player, sprite_id as i16))
+}
+
+/// Canvas rect of the text entry that has the keyboard, else empty: the
+/// keyboardFocusSprite when it accepts typed text, otherwise `opened_sprite`
+/// (the sprite the frontend raised the keyboard for) when its member is a
+/// host-declared text entry, since the movie never moves keyboard focus to
+/// such a member. A touch frontend polls this to keep its keyboard proxy
+/// over the field and to dismiss the keyboard once the field is gone.
+#[wasm_bindgen]
+pub fn focused_text_entry_rect(opened_sprite: i32) -> Vec<f64> {
+    reserve_player_ref(|player| {
+        let focused = text_entry_canvas_rect(player, player.keyboard_focus_sprite);
+        if !focused.is_empty() || opened_sprite <= 0 {
+            return focused;
+        }
+        let declared = player
+            .movie
+            .score
+            .get_sprite(opened_sprite as i16)
+            .and_then(|s| s.member.as_ref())
+            .and_then(|m| player.movie.cast_manager.find_member_by_ref(m))
+            .map_or(false, |m| crate::player::text_entry_members::is_text_entry(&m.name));
+        if declared {
+            text_entry_canvas_rect(player, opened_sprite as i16)
+        } else {
+            Vec::new()
+        }
     })
 }
 

@@ -91,6 +91,8 @@ export default defineConfig({
     embedResources({
       wasmPath: "vm-rust/pkg/vm_rust_bg.wasm",
       fontPath: "public/charmap-system.png",
+      // DIRPLAYER_WASM_FILE=1: ship the engine as a file beside the bundle.
+      wasmFile: process.env.DIRPLAYER_WASM_FILE === "1",
     }),
     injectCss(),
   ],

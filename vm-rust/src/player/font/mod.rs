@@ -151,7 +151,58 @@ impl FontManager {
     }
 
     /// Get a font by name and size, rasterizing a PFR font at the requested size if needed.
+    /// Bold text drawn from an embedded font that has no bold face is
+    /// synthesised: every glyph is struck twice, one pixel apart, and the
+    /// projector advances one pixel further per glyph to make room. The
+    /// widths in this font carry that extra pixel, so measurement, word
+    /// wrapping and drawing agree. Measured on two fonts and sizes: across
+    /// a line of bold Verdana at 24 px the word starts run ahead of the
+    /// rounded set widths by one pixel per glyph (the last word at 370
+    /// against 341 plus 30 glyphs), and bold Arial digits at 48 px sit on a
+    /// 28 px pitch where the rounded width is 27. Plain text in the same
+    /// face keeps the rounded widths: a plain paragraph of 82 glyphs
+    /// measures within 4 px of the projector's, where the extra pixel
+    /// would have pushed it 82 px wide and wrapped it a line early.
     pub fn get_font_with_cast_and_bitmap(
+        &mut self,
+        font_name: &str,
+        cast_manager: &CastManager,
+        bitmap_manager: &mut crate::player::bitmap::manager::BitmapManager,
+        size: Option<u16>,
+        style: Option<u8>,
+    ) -> Option<Rc<BitmapFont>> {
+        let wants_bold = style.map_or(false, |s| s & 1 != 0);
+        if !wants_bold {
+            return self.get_font_face_with_cast_and_bitmap(font_name, cast_manager, bitmap_manager, size, style);
+        }
+        let bold_key = Self::cache_key(&format!("{}_{}_{}", font_name, size.unwrap_or(0), style.unwrap_or(0)));
+        if let Some(font) = self.font_cache.get(&bold_key) {
+            if font.font_style & 1 != 0 && size.map_or(true, |s| s == font.font_size) {
+                return Some(Rc::clone(font));
+            }
+        }
+        let base = self.get_font_face_with_cast_and_bitmap(font_name, cast_manager, bitmap_manager, size, style)?;
+        let synthesised = base.char_widths.is_some()
+            && base.font_style & 1 == 0
+            && !base.font_name.to_ascii_lowercase().contains("bold");
+        if !synthesised {
+            return Some(base);
+        }
+        let mut bold = (*base).clone();
+        bold.font_style |= 1;
+        if let Some(widths) = bold.char_widths.as_mut() {
+            for w in widths.iter_mut() {
+                if *w > 0 {
+                    *w += 1;
+                }
+            }
+        }
+        let bold = Rc::new(bold);
+        self.font_cache.insert(bold_key, Rc::clone(&bold));
+        Some(bold)
+    }
+
+    fn get_font_face_with_cast_and_bitmap(
         &mut self,
         font_name: &str,
         cast_manager: &CastManager,
@@ -502,6 +553,20 @@ impl FontManager {
     #[inline]
     pub fn cache_key(s: &str) -> String {
         s.to_ascii_lowercase()
+    }
+
+    /// Forget every font rasterised for the movie that is being replaced.
+    /// Fonts belong to a movie's casts: a text member naming a font its own
+    /// movie does not carry falls back to the player's default face, and it
+    /// must do so again after another movie has come and gone. With the
+    /// cache kept, a menu that drew bold and underlined from the default
+    /// face on the first visit drew plain, in a different face, after a
+    /// movie that embedded a font of the same family had been played. The
+    /// system font, the embedded default faces and the ref counter stay.
+    pub fn clear_movie_fonts(&mut self) {
+        self.font_cache.clear();
+        self.fonts.clear();
+        self.font_by_id.clear();
     }
 
     pub fn get_system_font(&self) -> Option<Rc<BitmapFont>> {

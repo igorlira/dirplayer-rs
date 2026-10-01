@@ -2370,6 +2370,10 @@ impl TypeHandlers {
             let ctx_time = channel.context_time();
             let start_time = channel.playback_start_context_time;
             let loop_count = channel.loop_count;
+            // A queue still to play keeps the channel busy between clips,
+            // whatever the state of the clip that just ended (see
+            // SoundChannel::has_pending_sound).
+            let pending = channel.has_pending_sound();
 
             // Check buffer duration for the Playing+source case
             let buffer_duration = if status == SoundStatus::Playing {
@@ -2398,7 +2402,13 @@ impl TypeHandlers {
 
             // Check if sound has actually finished by comparing AudioContext time
             // against the source node's buffer duration.
-            if is_busy && status == SoundStatus::Playing {
+            // With a queue still to play these checks must not end the clip
+            // themselves: the source's `ended` event is what hands over to the
+            // next clip, and a channel already set Idle ignores that event. On
+            // a slow machine `ended` lands a frame or two after the clip's
+            // length has passed, so forcing Idle here first dropped the rest
+            // of a queue of spoken numbers after the first one.
+            if is_busy && status == SoundStatus::Playing && !pending {
                 if let Some(duration) = buffer_duration {
                     let elapsed = ctx_time - start_time;
                     if elapsed > duration && loop_count != 0 {
@@ -2423,7 +2433,7 @@ impl TypeHandlers {
             }
 
             // Also catch Loading state that's been stuck too long (>5 seconds)
-            if is_busy && status == SoundStatus::Loading {
+            if is_busy && status == SoundStatus::Loading && !pending {
                 if start_time > 0.0 && ctx_time - start_time > 5.0 {
                     debug!(
                         "⚠️ soundBusy({}) stuck in Loading for {:.1}s, forcing Idle",
@@ -2434,7 +2444,7 @@ impl TypeHandlers {
                 }
             }
 
-            Ok(player.alloc_datum(Datum::Int(if is_busy { 1 } else { 0 })))
+            Ok(player.alloc_datum(Datum::Int(if is_busy || pending { 1 } else { 0 })))
         })
     }
 }

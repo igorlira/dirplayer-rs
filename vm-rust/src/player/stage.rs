@@ -194,6 +194,30 @@ pub fn canvas_to_movie_coords(player: &DirPlayer, x: f64, y: f64) -> (f64, f64) 
     }
 }
 
+/// Inverse of `canvas_to_movie_coords` for a whole rect: a movie-space
+/// [left, top, right, bottom] mapped into host-canvas coordinates through the
+/// drawRect scaling.
+pub fn movie_rect_to_canvas(
+    rect: [f64; 4],
+    draw_rect: [f64; 4],
+    movie_w: f64,
+    movie_h: f64,
+) -> [f64; 4] {
+    let draw_w = (draw_rect[2] - draw_rect[0]).max(1.0);
+    let draw_h = (draw_rect[3] - draw_rect[1]).max(1.0);
+    if movie_w <= 0.0 || movie_h <= 0.0 {
+        return rect;
+    }
+    let sx = draw_w / movie_w;
+    let sy = draw_h / movie_h;
+    [
+        draw_rect[0] + rect[0] * sx,
+        draw_rect[1] + rect[1] * sy,
+        draw_rect[0] + rect[2] * sx,
+        draw_rect[1] + rect[3] * sy,
+    ]
+}
+
 pub fn get_stage_prop(player: &mut DirPlayer, prop: Symbol) -> Result<Datum, ScriptError> {
     match prop.into_builtin() {
         // A window's `movie` property is the Movie playing in it (Director 11.5
@@ -260,6 +284,11 @@ pub fn get_stage_prop(player: &mut DirPlayer, prop: Symbol) -> Result<Datum, Scr
                 render_stage_to_bitmap(player, &mut bitmap, None);
                 bitmap
             });
+            // The renderer draws a stretched stage at the canvas's size, but
+            // `(the stage).image` is the movie's own stage: scripts crop it in
+            // movie coordinates. Captured at a 1.6x canvas, a crop of the
+            // stage centre came from the wrong place and at the wrong scale.
+            let mut snapshot = stage_snapshot_at_movie_size(player, snapshot);
             // The stage framebuffer is OPAQUE — Director's `(the stage).image`
             // has no alpha channel. `capture_stage_bitmap` flags its result
             // use_alpha=true, but if the persistent stage image keeps that
@@ -290,6 +319,79 @@ pub fn get_stage_prop(player: &mut DirPlayer, prop: Symbol) -> Result<Datum, Scr
         }
         Some(BuiltInSymbol::Name) => Ok(Datum::String("stage".to_string())),
         _ => return Err(ScriptError::new(format!("Invalid stage property {}", prop))),
+    }
+}
+
+/// Bring a canvas-sized stage capture back to the movie's size: the part of
+/// the canvas the movie is drawn into (`draw_rect`), box-averaged down to one
+/// pixel per movie pixel. A capture already at movie size is returned as is.
+fn stage_snapshot_at_movie_size(player: &DirPlayer, snapshot: Bitmap) -> Bitmap {
+    let mw = player.movie.rect.width().max(1) as u32;
+    let mh = player.movie.rect.height().max(1) as u32;
+    if snapshot.width as u32 == mw && snapshot.height as u32 == mh {
+        return snapshot;
+    }
+    let layout = stage_layout(player);
+    let [x0, y0, x1, y1] = layout.draw_rect;
+    let sx = (x1 - x0).max(1.0) / mw as f64;
+    let sy = (y1 - y0).max(1.0) / mh as f64;
+    resample_region(&snapshot, x0, y0, sx, sy, mw, mh)
+}
+
+/// Box-average a region of a 32-bit bitmap into a `w` x `h` bitmap, where
+/// each target pixel covers `sx` x `sy` source pixels starting at `(x0, y0)`.
+fn resample_region(src: &Bitmap, x0: f64, y0: f64, sx: f64, sy: f64, w: u32, h: u32) -> Bitmap {
+    let mut out = Bitmap::new(w as u16, h as u16, 32, 32, 0, src.palette_ref.clone());
+    out.use_alpha = src.use_alpha;
+    let (sw, sh) = (src.width as i64, src.height as i64);
+    for ty in 0..h as i64 {
+        let ya = (y0 + ty as f64 * sy).floor() as i64;
+        let yb = ((y0 + (ty + 1) as f64 * sy).ceil() as i64).max(ya + 1);
+        for tx in 0..w as i64 {
+            let xa = (x0 + tx as f64 * sx).floor() as i64;
+            let xb = ((x0 + (tx + 1) as f64 * sx).ceil() as i64).max(xa + 1);
+            let mut acc = [0u32; 4];
+            let mut n = 0u32;
+            for y in ya.max(0)..yb.min(sh) {
+                for x in xa.max(0)..xb.min(sw) {
+                    let i = ((y * sw + x) * 4) as usize;
+                    for c in 0..4 {
+                        acc[c] += src.data[i + c] as u32;
+                    }
+                    n += 1;
+                }
+            }
+            let o = ((ty * w as i64 + tx) * 4) as usize;
+            if n > 0 {
+                for c in 0..4 {
+                    out.data[o + c] = (acc[c] / n) as u8;
+                }
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::resample_region;
+    use crate::player::bitmap::bitmap::{Bitmap, BuiltInPalette, PaletteRef};
+
+    #[test]
+    fn a_doubled_capture_comes_back_at_movie_size() {
+        // 4x2 capture of a 2x1 stage drawn at 2x: left half red, right blue.
+        let mut src = Bitmap::new(4, 2, 32, 32, 0, PaletteRef::BuiltIn(BuiltInPalette::SystemWin));
+        for y in 0..2usize {
+            for x in 0..4usize {
+                let px = if x < 2 { [200, 0, 0, 255] } else { [0, 0, 200, 255] };
+                let i = (y * 4 + x) * 4;
+                src.data[i..i + 4].copy_from_slice(&px);
+            }
+        }
+        let out = resample_region(&src, 0.0, 0.0, 2.0, 2.0, 2, 1);
+        assert_eq!((out.width, out.height), (2, 1));
+        assert_eq!(&out.data[0..4], &[200, 0, 0, 255]);
+        assert_eq!(&out.data[4..8], &[0, 0, 200, 255]);
     }
 }
 
@@ -352,7 +454,20 @@ pub fn set_stage_prop(
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_stage_layout, StretchStyle};
+    use super::{compute_stage_layout, movie_rect_to_canvas, StretchStyle};
+
+    #[test]
+    fn movie_rect_maps_through_a_letterboxed_draw_rect() {
+        // 640x480 movie drawn at 1000x750 starting 125 px down.
+        let r = movie_rect_to_canvas([64.0, 48.0, 320.0, 96.0], [0.0, 125.0, 1000.0, 875.0], 640.0, 480.0);
+        assert_eq!(r, [100.0, 200.0, 500.0, 275.0]);
+    }
+
+    #[test]
+    fn movie_rect_is_unchanged_at_one_to_one() {
+        let r = movie_rect_to_canvas([10.0, 20.0, 30.0, 40.0], [0.0, 0.0, 640.0, 480.0], 640.0, 480.0);
+        assert_eq!(r, [10.0, 20.0, 30.0, 40.0]);
+    }
 
     #[test]
     fn stretch_meet_letterboxes_inside_stage() {

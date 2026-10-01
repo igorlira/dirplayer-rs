@@ -143,6 +143,17 @@ fs.copyFileSync(
   path.join(REPO_ROOT, "dirplayer-js-api", "index.js"),
   path.join(RUNNER_DIR, "dirplayer-js-api-real.js"),
 );
+// index.js imports its sibling modules by relative path, so they have to sit
+// next to the copy. A missing one fails the whole module graph: the page
+// never starts a test and the run only ends at the spec's timeout.
+for (const entry of fs.readdirSync(path.join(REPO_ROOT, "dirplayer-js-api"))) {
+  if (entry.endsWith(".js") && entry !== "index.js") {
+    fs.copyFileSync(
+      path.join(REPO_ROOT, "dirplayer-js-api", entry),
+      path.join(RUNNER_DIR, entry),
+    );
+  }
+}
 
 // 6a. Bundle flashPlayerManager.ts for Ruffle integration.
 //     The `vm-rust` import is externalized and resolved through the

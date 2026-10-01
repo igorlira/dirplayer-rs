@@ -40,6 +40,7 @@ pub mod net_manager;
 pub mod net_task;
 pub mod profiling;
 pub mod scope;
+pub mod text_entry_members;
 pub mod score;
 pub mod script;
 pub mod script_ref;
@@ -314,6 +315,10 @@ pub struct DirPlayer {
     pub ime_composition: Option<(i32, i32)>,
     pub mouse_loc: (i32, i32),
     pub wants_pointer_lock: bool,
+    /// Matte shapes for hit-testing, keyed by bitmap and its version. The
+    /// WebGL renderer bakes the matte into its texture and never stores it
+    /// on the bitmap, so a matte-ink sprite's hit test builds it here once.
+    pub hit_matte_cache: std::cell::RefCell<std::collections::HashMap<u32, (u32, std::sync::Arc<crate::player::bitmap::mask::BitmapMask>)>>,
     pub cursor_is_hidden: bool,
     /// Track parent DatumRef for chained property access (transform.position.z = value)
     /// (vector DatumRef, parent transform DatumRef, sub-property name)
@@ -523,7 +528,7 @@ pub struct DirPlayer {
     /// the next exitFrame has run. While it is set the stage is not redrawn:
     /// Director draws once per frame, after the handlers of that frame and
     /// its exitFrame have both run, so a handler's half-finished state is
-    /// never on screen. Matematik i Maaneby's crane shows a claw sprite from
+    /// never on screen. A measured movie's crane shows a claw sprite from
     /// mouseUp and moves it into place in exitFrame; drawing in between put
     /// the claw where that sprite last was for one frame. A timestamp, so a
     /// hold can never outlive a stalled frame loop.
@@ -557,6 +562,19 @@ pub struct DirPlayer {
     /// `run_single_frame` treats it as "stop processing this frame" so no
     /// event reaches the new movie's scripts before prepareMovie.
     pub pending_movie_init: bool,
+    /// Set once `run_movie_init_sequence` has delivered the starting frame's
+    /// own events (prepareFrame, enterFrame, exitFrame). The first
+    /// `run_single_frame` after that must not deliver them again: it consumes
+    /// the flag, skips the frame update and the exitFrame dispatch, and goes
+    /// straight to the advance, honouring any go() the init exitFrame made.
+    ///
+    /// Without this every movie's starting frame was visited twice, once by
+    /// the init sequence and once by the first tick. Measured on a task
+    /// movie whose frame 1 exitFrame picks a random weight, shows the text
+    /// sprite for it and starts the narration: the second visit picked a
+    /// second weight and showed a second sprite on top of the first, while
+    /// the projector shows one.
+    pub initial_frame_events_delivered: bool,
     /// Cast libraries of movies replaced by an eager mid-handler `go(frame,
     /// movie)` mount. The suspended caller's trampoline frames hold raw
     /// pointers into these (script Rc contents, `name_symbols`), so they must
@@ -772,6 +790,7 @@ impl DirPlayer {
             keyboard_focus_sprite: -1, // Setting keyboardFocusSprite to -1 returns keyboard focus control to the Score, and setting it to 0 disables keyboard entry into any editable sprite.
             mouse_loc: (0, 0),
             wants_pointer_lock: false,
+            hit_matte_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
             cursor_is_hidden: false,
             transform_sub_refs: Vec::new(),
             last_mouse_down_time: 0,
@@ -858,6 +877,7 @@ impl DirPlayer {
             pending_goto_net_movie: None,
             goto_wait_active: false,
             pending_movie_init: false,
+            initial_frame_events_delivered: false,
             retired_cast_libs: Vec::new(),
             movie_mount_generation: 0,
             pending_restart: false,
@@ -887,7 +907,7 @@ impl DirPlayer {
             startup_go: None,
             env_overrides: EnvOverrides::default(),
             console: console::ConsoleBuffer::new(),
-            rng: rand::rngs::SmallRng::seed_from_u64(0),
+            rng: session_rng(),
         };
 
         result.reset();
@@ -1411,6 +1431,57 @@ impl DirPlayer {
         self.wants_pointer_lock = false;
     }
 
+    /// Free the bitmaps of the movie that is being replaced. Its cast members
+    /// own their pictures, but the pixels live in `bitmap_manager`, which
+    /// nothing emptied on a movie switch: every movie visited stayed decoded
+    /// in memory for the rest of the session (20 to 70 MB per switch, over a
+    /// gigabyte after a dozen switches). Called before the next movie's cast
+    /// is built. Kept: what can still be reached after the switch, namely
+    /// bitmaps held by a live datum (a global or a script instance property
+    /// holding an image), the system font, the stage image and the per-sprite
+    /// and per-member frame buffers, which are refilled in place.
+    fn release_previous_movie_bitmaps(&mut self) {
+        // The previous movie's fonts go with its cast. Clearing them here
+        // (load_movie_from_dir clears them again before loading the new
+        // cast's fonts) lets their glyph sheets be freed with the rest.
+        self.font_manager.clear_movie_fonts();
+        let mut keep: std::collections::HashSet<bitmap::manager::BitmapRef> =
+            std::collections::HashSet::new();
+        for (_, entry) in self.allocator.datums.iter() {
+            if let Datum::BitmapRef(r) = &entry.datum {
+                keep.insert(*r);
+            }
+        }
+        if let Some(font) = &self.font_manager.system_font {
+            keep.insert(font.bitmap_ref);
+        }
+        keep.extend(self.font_manager.fonts.values().map(|f| f.bitmap_ref));
+        keep.extend(self.font_manager.font_cache.values().map(|f| f.bitmap_ref));
+        keep.extend(self.stage_image);
+        keep.extend(self.flash_frame_buffers.values().copied());
+        keep.extend(self.w3d_frame_buffers.values().copied());
+        keep.extend(self.nested_movie_images.values().copied());
+        let (freed, bytes) = self.bitmap_manager.retain_only(&keep);
+        #[cfg(target_arch = "wasm32")]
+        web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!(
+            "[MOVIE-SWITCH] freed {} bitmaps ({:.1} MB) of the previous movie",
+            freed,
+            bytes as f64 / 1048576.0,
+        )));
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = (freed, bytes);
+        // The renderer's textures and rendered text were made from those
+        // bitmaps; drop them now instead of waiting for LRU eviction.
+        if unsafe { ACTIVE_PLAYER_ID } == 0 {
+            with_renderer_mut(|renderer_opt| {
+                if let Some(renderer) = renderer_opt {
+                    use crate::rendering_gpu::Renderer;
+                    renderer.reset_for_new_movie();
+                }
+            });
+        }
+    }
+
     pub(crate) async fn load_movie_from_dir(&mut self, dir: DirectorFile) {
         // Start this movie from the builtin display-spelling baseline. A cast's
         // name table claims the spelling for symbols it defines
@@ -1430,6 +1501,7 @@ impl DirPlayer {
         // member numbers: the map's planet and smoke frames turned up on a
         // task scene's craftsman and plank piles.
         crate::player::gif::forget_all(self);
+        self.release_previous_movie_bitmaps();
         self.reset_cursor_for_new_movie();
         self.movie
             .load_from_file(
@@ -1499,6 +1571,7 @@ impl DirPlayer {
 
         // Load all fonts from cast members into the font manager
         log::debug!("Loading fonts from cast members...");
+        self.font_manager.clear_movie_fonts();
         self.movie
             .cast_manager
             .load_fonts_into_manager(&mut self.font_manager);
@@ -1583,6 +1656,17 @@ impl DirPlayer {
 
     pub fn begin_all_sprites(&mut self) {
         self.movie.score.begin_sprites(ScoreRef::Stage, self.movie.current_frame);
+        // A channel whose span just began holds a new sprite, so it is not
+        // hovered until the pointer is seen over it, even when the previous
+        // span's sprite was. Otherwise a button placed by the next span
+        // exactly where the button that led there stood got mouseWithin
+        // instead of mouseEnter, and a behaviour that sizes buttons on
+        // mouseEnter gave it the earlier button's remembered size.
+        let fresh = std::mem::take(&mut self.movie.score.freshly_entered);
+        if !fresh.is_empty() {
+            self.hovered_sprites.retain(|n| !fresh.contains(&(*n as u16)));
+        }
+        self.movie.score.just_entered = fresh;
 
         // Cache the tempo for this frame
         self.refresh_frame_tempo();
@@ -1990,6 +2074,7 @@ impl DirPlayer {
         self.pending_goto_net_movie = None;
         self.goto_wait_active = false;
         self.pending_movie_init = false;
+        self.initial_frame_events_delivered = false;
         self.retired_cast_libs.clear();
         self.pending_restart = false;
 
@@ -2347,54 +2432,101 @@ impl DirPlayer {
             }
         }
 
-        let mut channel_numbers = self.movie.score.active_channel_numbers_for_frame(frame_num);
-        let mut seen_channels = channel_numbers
-            .iter()
-            .copied()
-            .collect::<std::collections::HashSet<_>>();
-        for channel in self.movie.score.channels.iter() {
-            if channel.number != 0
-                && channel.sprite.puppet
-                && channel.sprite.visible
-                && seen_channels.insert(channel.number)
-            {
-                channel_numbers.push(channel.number);
-            }
-        }
+        // Ask the RENDERER which channels are on stage, instead of rebuilding
+        // an "active channel" set here. The two lists disagreed: a film loop
+        // the renderer was drawing (a walking figure, member 185) was
+        // absent from this list, so it never advanced a frame and stood still,
+        // while an off-stage member (461) got advanced ~30 times a second
+        // forever. One list means the thing you see is the thing that animates.
+        let candidates: Vec<CastMemberRef> = self
+            .movie
+            .score
+            .get_sorted_channels(frame_num)
+            .into_iter()
+            .filter_map(|channel| channel.sprite.member.clone())
+            .collect();
 
         let mut member_refs = Vec::new();
         let mut seen_members = std::collections::HashSet::new();
-        for channel_number in channel_numbers {
-            let Some(channel) = self.movie.score.channels.get(channel_number) else {
-                continue;
-            };
-
-            if channel.number == 0 || !channel.sprite.visible {
-                continue;
-            }
-            let Some(member_ref) = channel.sprite.member.as_ref() else {
-                continue;
-            };
-
+        for member_ref in candidates {
             if !seen_members.insert(member_ref.clone()) {
                 continue;
             }
-
             let is_filmloop = self
                 .movie
                 .cast_manager
-                .find_member_by_ref(member_ref)
+                .find_member_by_ref(&member_ref)
                 .is_some_and(|member| {
                     member.member_type.member_type_id() == cast_member::CastMemberTypeId::FilmLoop
                 });
             if is_filmloop {
-                member_refs.push(member_ref.clone());
+                member_refs.push(member_ref);
+            }
+        }
+
+        // Film loops NEST, and only the stage's own channels were collected.
+        // The measured movie's walking figure is a walk cycle inside the credits
+        // loop, and each of its feet is a loop inside that again; none of them
+        // were ever advanced, so they sat frozen on frame 1 while the outer
+        // loop carried the frozen pose across the screen. The figure slid
+        // instead of walking.
+        let mut queue: Vec<CastMemberRef> = member_refs.clone();
+        let mut visited: std::collections::HashSet<CastMemberRef> =
+            member_refs.iter().cloned().collect();
+        while let Some(parent_ref) = queue.pop() {
+            for child_ref in self.filmloop_child_member_refs(&parent_ref) {
+                if !visited.insert(child_ref.clone()) {
+                    continue;
+                }
+                let is_filmloop = self
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(&child_ref)
+                    .is_some_and(|member| {
+                        member.member_type.member_type_id()
+                            == cast_member::CastMemberTypeId::FilmLoop
+                    });
+                if is_filmloop {
+                    member_refs.push(child_ref.clone());
+                    queue.push(child_ref);
+                }
             }
         }
 
         self.active_stage_filmloop_members_cache =
             Some((frame_num, generation, member_refs.clone()));
         member_refs
+    }
+
+    /// The members a film loop's own score puts in its channels. Resolved the
+    /// same way the renderer does, including the 65535 sentinel that means
+    /// "the cast library the loop itself lives in".
+    fn filmloop_child_member_refs(&self, member_ref: &CastMemberRef) -> Vec<CastMemberRef> {
+        let Some(member) = self.movie.cast_manager.find_member_by_ref(member_ref) else {
+            return Vec::new();
+        };
+        let CastMemberType::FilmLoop(film_loop) = &member.member_type else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for (_frame, channel_idx, data) in film_loop.score.channel_initialization_data.iter() {
+            if *channel_idx < 6 || data.cast_member == 0 {
+                continue;
+            }
+            let child = CastMemberRef {
+                cast_lib: if data.cast_lib == 65535 {
+                    member_ref.cast_lib
+                } else {
+                    data.cast_lib as i32
+                },
+                cast_member: data.cast_member as i32,
+            };
+            if seen.insert(child.clone()) {
+                out.push(child);
+            }
+        }
+        out
     }
 
     pub fn active_stage_script_instance_ids(&mut self) -> Vec<ScriptInstanceRef> {
@@ -3262,7 +3394,9 @@ impl DirPlayer {
             // the load-time logic in `load_movie_from_dir`. Label sources
             // do NOT trigger URL rewriting in net handlers — that's
             // reserved for `movie_path_override`. See `set_movie_path_label`.
-            BuiltInSymbol::MoviePath => {
+            // `the pathName` is the classic synonym of `the moviePath` —
+            // same folder-with-trailing-separator value.
+            BuiltInSymbol::MoviePath | BuiltInSymbol::PathName => {
                 let label = self.movie_path_label_effective();
                 if let Some(path) = label {
                     let base_path = dir_part_of_path(&path);
@@ -3336,7 +3470,7 @@ impl DirPlayer {
                                 Some(if prop.eq_ignore_ascii_case("frame") {
                                     film_loop.current_frame.max(1)
                                 } else {
-                                    film_loop.score.frame_count.unwrap_or(1).max(1)
+                                    film_loop.cached_total_frames.or(film_loop.score.frame_count).unwrap_or(1).max(1)
                                 })
                             }
                             _ => None,
@@ -3918,7 +4052,16 @@ impl DirPlayer {
                         if let CastMemberType::FilmLoop(film_loop) = &m.member_type {
                             let current = film_loop.current_frame;
 
-                            let frame_count = film_loop.score.frame_count.unwrap_or(1).max(1);
+                            // Use the length the RENDERER uses. The score's own
+                            // frame_count is only filled in by a D5 branch that a
+                            // D8.5 film loop never takes, so it stayed 1 and every
+                            // loop froze on its first frame while the renderer was
+                            // prepared to draw all 62 (or 190) of them.
+                            let frame_count = film_loop
+                                .cached_total_frames
+                                .or(film_loop.score.frame_count)
+                                .unwrap_or(1)
+                                .max(1);
 
                             let next = current + 1;
                             // `info.loops` is already the DECODED flag (1 = loop,
@@ -3942,7 +4085,8 @@ impl DirPlayer {
                     })
             })
             .collect();
-        
+
+
         // Process each filmloop
         for (member_ref, old_frame, new_frame) in active_filmloops {
             // Skip if frame didn't change
@@ -3991,7 +4135,16 @@ impl DirPlayer {
         for member_ref in active_filmloop_refs {
             if let Some(member) = self.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                 if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
-                    let frame_count = film_loop.score.frame_count.unwrap_or(1).max(1);
+                            // Use the length the RENDERER uses. The score's own
+                            // frame_count is only filled in by a D5 branch that a
+                            // D8.5 film loop never takes, so it stayed 1 and every
+                            // loop froze on its first frame while the renderer was
+                            // prepared to draw all 62 (or 190) of them.
+                            let frame_count = film_loop
+                                .cached_total_frames
+                                .or(film_loop.score.frame_count)
+                                .unwrap_or(1)
+                                .max(1);
 
                     let old_frame = film_loop.current_frame;
                     film_loop.current_frame += 1;
@@ -4219,6 +4372,32 @@ pub async fn player_call_global_handler(
         Ok(None) => {}
     }
 
+    // Command form of an Xtra instance method, `displayOpen(fileObj)`: the
+    // handlers that wait on the page (file dialogs) are awaited here, as the
+    // method form `fileObj.displayOpen()` does. The sync fallback in the
+    // built-in handlers cannot wait.
+    if let Some(first) = args.first().filter(|_| xtra::manager::xtra_command_may_await(handler_name.as_str())) {
+        let target = reserve_player_ref(|player| {
+            player
+                .get_datum(first)
+                .to_xtra_instance()
+                .ok()
+                .map(|(name, id)| (name.to_owned(), *id))
+        });
+        if let Some((xtra_name, instance_id)) = target {
+            if xtra::manager::xtra_instance_command_must_await(&xtra_name, handler_name.as_str()) {
+                let rest = args[1..].to_vec();
+                return Box::pin(xtra::manager::call_xtra_instance_async_handler(
+                    &xtra_name,
+                    instance_id,
+                    handler_name.as_str(),
+                    &rest,
+                ))
+                .await;
+            }
+        }
+    }
+
     if BuiltInHandlerManager::has_async_handler(handler_name) {
         return Box::pin(BuiltInHandlerManager::call_async_handler(
             handler_name,
@@ -4361,7 +4540,7 @@ pub fn hold_draw_for_input_handler() {
 /// Director runs one handler at a time: input that arrives while a frame
 /// handler is busy-waiting (`repeat while ... updateStage()`) is queued until
 /// the handler returns. The busy-wait yield lets the command and event loops
-/// run inside that wait, so a mouseEnter fired mid-animation on Maaneby's map
+/// run inside that wait, so a mouseEnter fired mid-animation on a measured map
 /// build sequence, where the original ignores the mouse until it is over.
 /// Waits for the gap; never drops the input.
 pub async fn wait_for_handler_gap() {
@@ -5713,6 +5892,9 @@ async fn run_movie_init_sequence() {
 
     reserve_player_mut(|player| {
         player.is_in_frame_update = false;
+        // The starting frame has now had prepareFrame, enterFrame and
+        // exitFrame. The first frame tick continues from the advance.
+        player.initial_frame_events_delivered = true;
     });
 
     // `--go N`, last: the movie's own prepareMovie / startMovie / exitFrame have
@@ -5745,6 +5927,25 @@ async fn transition_to_net_movie(task_id: u32, target: MovieFrameTarget) {
         reserve_player_mut(|player| {
             player.is_in_transition = false;
         });
+    }
+}
+
+/// The generator behind `random()` while the movie has not set
+/// `the randomSeed`. Director seeds it from the clock when the player starts,
+/// so each session draws differently; a fixed seed gave every page load the
+/// same sequence, so the same "random" tasks came up every time the game was
+/// opened. Setting `the randomSeed` still switches `random()` to the movie's
+/// own deterministic sequence (`Movie::next_random_int`). Native builds keep
+/// seed 0 so the test suites replay identically.
+fn session_rng() -> rand::rngs::SmallRng {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let seed = getrandom::u64().unwrap_or_else(|_| js_sys::Date::now().to_bits());
+        rand::rngs::SmallRng::seed_from_u64(seed)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        rand::rngs::SmallRng::seed_from_u64(0)
     }
 }
 
@@ -6077,7 +6278,11 @@ pub async fn run_single_frame() -> (bool, bool) {
     stream_status::dispatch_pending_stream_status().await;
 
     // --- Phase 1: Execute frame scripts ---
-    if !is_script_paused {
+    // Skipped on the first tick after a movie's init sequence: that sequence
+    // already ran the starting frame's prepareFrame and enterFrame.
+    let initial_frame_delivered =
+        reserve_player_ref(|player| player.initial_frame_events_delivered);
+    if !is_script_paused && !initial_frame_delivered {
         player_wait_available().await;
 
         let skip_frame = reserve_player_ref(|player| player.command_handler_yielding || player.in_mouse_command);
@@ -6157,52 +6362,53 @@ pub async fn run_single_frame() -> (bool, bool) {
         return (is_playing, is_script_paused);
     }
 
-    let (has_player_frame_changed, has_frame_changed_in_go, go_direction) =
+    let (has_player_frame_changed, has_frame_changed_in_go) =
         reserve_player_ref(|player| {
-            (
-                player.has_player_frame_changed,
-                player.has_frame_changed_in_go,
-                player.go_direction
-            )
+            (player.has_player_frame_changed, player.has_frame_changed_in_go)
         });
 
     player_wait_available().await;
 
-    // Relay exitFrame to timeout targets
-    dispatch_system_event_to_timeouts(BuiltInSymbol::ExitFrame, &vec![]).await;
+    // The starting frame's exitFrame was delivered by the init sequence.
+    // Consume the flag and keep whatever go() that exitFrame recorded:
+    // clearing go_same_frame here would turn a `go the frame` hold on the
+    // first frame into an advance.
+    let initial_frame_delivered = reserve_player_mut(|player| {
+        std::mem::replace(&mut player.initial_frame_events_delivered, false)
+    });
 
-    // Eager movie mount during a timeout's exitFrame: stop this frame cycle.
-    if reserve_player_ref(|player| player.pending_movie_init) {
-        return (is_playing, is_script_paused);
+    if !initial_frame_delivered {
+        // Relay exitFrame to timeout targets
+        dispatch_system_event_to_timeouts(BuiltInSymbol::ExitFrame, &vec![]).await;
+
+        // Eager movie mount during a timeout's exitFrame: stop this frame cycle.
+        if reserve_player_ref(|player| player.pending_movie_init) {
+            return (is_playing, is_script_paused);
+        }
     }
 
     let mut stayed_on_same_frame = false;
 
-    // Clear stale go_same_frame from previous frame's processing
-    reserve_player_mut(|player| {
-        player.go_same_frame = false;
-    });
+    if !initial_frame_delivered {
+        // Clear stale go_same_frame from previous frame's processing
+        reserve_player_mut(|player| {
+            player.go_same_frame = false;
+        });
+    }
 
     if has_player_frame_changed {
         player_wait_available().await;
 
-        if has_frame_changed_in_go && go_direction == 1 { // backwards
-            dispatch_event_to_all_behaviors(Symbol::builtin(BuiltInSymbol::ExitFrame), &vec![]).await;
-        } else {
-            // Forward advance/go: the arriving (or looping-in-place) frame's sprite
-            // BEHAVIORS were never sent exitFrame here — only the frame+movie scripts ran —
-            // so a sprite's FIRST exitFrame on the frame it lands on was lost (Director fires
-            // beginSprite -> enterFrame -> exitFrame in one frame visit; e.g. a RaycastCar's
-            // updateWheelModels ran a frame late, leaving its wheels in the hover-ray path).
-            // Dispatch the behaviors' exitFrame first (matching the backwards-go branch and
-            // the stayed-on-frame else branch below), then the frame+movie script exitFrames.
-            dispatch_event_to_all_behaviors(Symbol::from_str(&"exitFrame".to_string()), &vec![]).await;
-            if let Err(err) = player_invoke_frame_and_movie_scripts(Symbol::from_str(&"exitFrame".to_string()), &vec![]).await {
-                if err.code != ScriptErrorCode::Abort {
-                    reserve_player_mut(|player| player.on_script_error(&err));
-                }
-            }
-        }
+        // The frame the playhead landed on (forward or backward go, or an
+        // advance) gets its exitFrame here, once. Sprite behaviors come
+        // first, then the frame script and the movie scripts: the behavior
+        // dispatch ends with those itself. Calling the frame and movie scripts
+        // again after it delivered their exitFrame twice, and when the first
+        // delivery ran a go() the second one reached the NEXT frame's script
+        // before that frame was ever shown. A frame script that starts a sound
+        // on exitFrame then started it there and again on the following tick,
+        // so the clip was heard to start, cut off and restart.
+        dispatch_event_to_all_behaviors(Symbol::builtin(BuiltInSymbol::ExitFrame), &vec![]).await;
 
         player_wait_available().await;
 
@@ -6227,7 +6433,9 @@ pub async fn run_single_frame() -> (bool, bool) {
     } else {
         player_wait_available().await;
 
-        dispatch_event_to_all_behaviors(Symbol::builtin(BuiltInSymbol::ExitFrame), &vec![]).await;
+        if !initial_frame_delivered {
+            dispatch_event_to_all_behaviors(Symbol::builtin(BuiltInSymbol::ExitFrame), &vec![]).await;
+        }
 
         player_wait_available().await;
 
@@ -8138,6 +8346,111 @@ mod handler_gap_tests {
             });
             let released = timeout(Duration::from_millis(200), wait_for_handler_gap()).await;
             assert!(released.is_ok());
+        });
+    }
+}
+
+#[cfg(test)]
+mod landed_frame_exit_tests {
+    use super::*;
+    use crate::director::chunks::handler::{Bytecode, HandlerDef};
+    use crate::director::chunks::script::ScriptChunk;
+    use crate::director::enums::ScriptType;
+    use crate::director::lingo::datum::Datum;
+    use crate::director::lingo::opcode::OpCode;
+    use crate::player::cast_lib::{CastLib, CastLibState};
+    use crate::player::cast_lib::CastMemberRef;
+    use std::cell::RefCell;
+    use crate::player::script::Script;
+    use crate::player::testing::{run_test, TestPlayer};
+
+    /// A cast whose one movie script counts its exitFrame calls in a global:
+    /// `on exitFrame` / `gExits = gExits + 1`.
+    fn counting_cast() -> CastLib {
+        let exit_frame = Symbol::from_str("exitFrame");
+        let counter = Symbol::from_str("gExits");
+        let handler = HandlerDef {
+            name_id: 0,
+            bytecode_array: vec![
+                Bytecode::new(OpCode::GetGlobal, 1, 0),
+                Bytecode::new(OpCode::PushInt8, 1, 1),
+                Bytecode::new(OpCode::Add, 0, 2),
+                Bytecode::new(OpCode::SetGlobal, 1, 3),
+                Bytecode::new(OpCode::Ret, 0, 4),
+            ],
+            bytecode_index_map: FxHashMap::default(),
+            argument_name_ids: vec![],
+            local_name_ids: vec![],
+            global_name_ids: vec![1],
+            compiled_ir: std::cell::RefCell::new(None),
+        };
+        let member_ref = CastMemberRef { cast_lib: 1, cast_member: 1 };
+        let mut handlers = FxHashMap::default();
+        handlers.insert(exit_frame, Rc::new(handler));
+        let script = Script {
+            member_ref,
+            name: "counter".to_string(),
+            chunk: ScriptChunk {
+                script_number: 1,
+                literals: vec![],
+                handlers: vec![],
+                property_name_ids: vec![],
+                property_defaults: Default::default(),
+            },
+            script_type: ScriptType::Movie,
+            handlers,
+            handler_names_raw: vec!["exitFrame".to_string()],
+            handler_names: vec![exit_frame],
+            properties: RefCell::new(FxHashMap::default()),
+        };
+        let mut scripts = FxHashMap::default();
+        scripts.insert(1, Rc::new(script));
+        CastLib {
+            name: "Internal".to_string(),
+            file_name: String::new(),
+            number: 1,
+            is_external: false,
+            state: CastLibState::Loaded,
+            lctx: None,
+            members: FxHashMap::default(),
+            scripts,
+            name_symbols: vec![exit_frame, counter],
+            preload_mode: 0,
+            capital_x: false,
+            dir_version: 0,
+            palette_id_offset: 0,
+            name_index: RefCell::new(None),
+            font_table: Default::default(),
+        }
+    }
+
+    /// A go() moves the playhead at once; the tick after it delivers the
+    /// landed frame's exitFrame. The movie scripts must get it once, not once
+    /// from the behavior dispatch and once more from a separate frame and
+    /// movie script call.
+    #[test]
+    fn a_frame_reached_by_go_gets_one_exit_frame() {
+        init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            reserve_player_mut(|p| {
+                p.movie.cast_manager.casts.push(counting_cast());
+                p.movie.cast_manager.clear_movie_script_cache();
+                let zero = p.alloc_datum(Datum::Int(0));
+                p.globals.insert(Symbol::from_str("gExits"), zero);
+                p.is_playing = true;
+                p.is_script_paused = false;
+                p.movie.current_frame = 2;
+                p.has_player_frame_changed = true;
+                p.has_frame_changed_in_go = true;
+                p.go_direction = 2;
+            });
+            run_single_frame().await;
+            let exits = reserve_player_ref(|p| {
+                let r = p.globals.get(&Symbol::from_str("gExits")).unwrap().clone();
+                p.get_datum(&r).int_value().unwrap()
+            });
+            assert_eq!(exits, 1, "the landed frame's exitFrame reached the movie scripts {} times", exits);
         });
     }
 }

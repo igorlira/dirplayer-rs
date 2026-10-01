@@ -224,6 +224,10 @@ define_builtin_symbols! {
     "long time" => LongTime,
     "lastChannel" => LastChannel,
     "moviePath" => MoviePath,
+    // Director 5-era synonym for `the moviePath` (movie folder, trailing
+    // separator). Still emitted by MX 2004 movies: one measured title
+    // reads `the pathname` in its loader to build its settings-file paths.
+    "pathName" => PathName,
     "frame" => Frame,
     "path" => Path,
     "timer" => Timer,
@@ -490,6 +494,7 @@ define_builtin_symbols! {
     "setPref" => SetPref,
     "urlEncode" => UrlEncode,
     "goToNetPage" => GoToNetPage,
+    "printFrom" => PrintFrom,
     "goToNetMovie" => GoToNetMovie,
     "pass" => Pass,
     "union" => Union,

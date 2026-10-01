@@ -11,6 +11,8 @@ import {
   right_mouse_up,
   key_down,
   key_up,
+  release_all_keys,
+  sync_modifiers,
   wants_pointer_lock,
   player_set_picking_mode,
   player_get_sprite_at,
@@ -30,7 +32,20 @@ import {
   ime_composition_update,
   ime_composition_end,
   set_renderer_backend,
+  sprite_text_entry_rect,
+  text_entry_sprite_at,
+  focused_text_entry_rect,
 } from "vm-rust";
+import { diffProxyValue, ProxyKey, TEXT_PROXY_SENTINEL } from "./textProxy";
+
+// The modifier keys as the browser reports them on an input event. A key
+// released while another window has the focus (the print dialog Ctrl+P
+// opens, a file dialog, another app) sends no keyup here, so the VM would
+// read it as held until pressed again; every event carries the real state.
+type ModifierEvent = { ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean };
+function syncModifiersFrom(e: ModifierEvent) {
+  sync_modifiers(e.ctrlKey, e.shiftKey, e.altKey, e.metaKey);
+}
 import { useAppDispatch } from "../../store/hooks";
 import { channelSelected } from "../../store/uiSlice";
 
@@ -45,6 +60,11 @@ const MAX_SCALE = 10;
 // route to the locked element regardless. So skip it when locked, and keep the
 // call best-effort so a capture failure can never abort the rest of the handler
 // (the click that follows is what dispatches mouse_down → shooting to the VM).
+// The keydown/keyup a touch keyboard sends in place of a real key.
+function isPlaceholderKey(e: { key: string; keyCode: number }): boolean {
+  return e.keyCode === 229 || e.key === "Unidentified" || e.key === "Process";
+}
+
 function safeSetPointerCapture(el: HTMLElement, pointerId: number) {
   if (document.pointerLockElement) return;
   try {
@@ -248,6 +268,22 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
   // suppress the regular onInput char-by-char dispatch path so we don't double
   // up insertion (compositionend already commits the final string).
   const isComposingRef = useRef(false);
+  // On-screen keyboard support for touch input. A tap on a sprite that
+  // accepts typed text opens the device keyboard by focusing the hidden input
+  // (the "text proxy") when the finger lifts: touchend is the event mobile
+  // browsers accept as the user gesture for showing the keyboard, and
+  // cancelling it keeps the emulated mousedown that follows a tap from moving
+  // focus straight back off the proxy. `pendingTouchEntryRef` carries the
+  // tapped sprite from pointerdown to that touchend.
+  const pendingTouchEntryRef = useRef(0);
+  // True while the proxy is focused for a touch keyboard. Its value is then
+  // diffed against `proxyShadowRef` (what was already delivered) instead of
+  // being read character by character, see textProxy.ts.
+  const touchProxyRef = useRef(false);
+  const proxyShadowRef = useRef("");
+  const proxyOpenedAtRef = useRef(0);
+  const proxySpriteRef = useRef(0);
+  const proxyPollRef = useRef<number | null>(null);
   // single-finger pan (when panMode is on)
   const singlePanRef = useRef<{ startPointer: Pt; startPan: Pt } | null>(null);
   const middlePanRef = useRef<{ startPointer: Pt; startPan: Pt } | null>(null);
@@ -371,6 +407,7 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
     // Handle keyboard during pointer lock (focus may be on canvas, not the div)
     const handleKeyDown = (e: KeyboardEvent) => {
       if (ownsPointerLock()) {
+        syncModifiersFrom(e);
         // Don't prevent ESC — browser needs it to exit pointer lock
         if (e.key !== "Escape") e.preventDefault();
         if (!e.repeat) {
@@ -383,10 +420,15 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
         key_up(e.key, e.keyCode);
       }
     };
+    // The page lost the focus: whatever is released from here on is not
+    // reported to it, so start from no keys held.
+    const handleBlur = () => release_all_keys();
     document.addEventListener("mousemove", handleLockedMouseMove);
     document.addEventListener("keydown", handleKeyDown);
     document.addEventListener("keyup", handleKeyUp);
+    window.addEventListener("blur", handleBlur);
     return () => {
+      window.removeEventListener("blur", handleBlur);
       document.removeEventListener("mousemove", handleLockedMouseMove);
       document.removeEventListener("keydown", handleKeyDown);
       document.removeEventListener("keyup", handleKeyUp);
@@ -445,6 +487,129 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
     };
   }, []);
 
+  // Lay the proxy over the field (canvas rect from the VM) so the browser
+  // scrolls the right part of the page into view above the keyboard.
+  function positionTextProxy(rect: ArrayLike<number>) {
+    const input = hiddenInputRef.current;
+    if (!input || rect.length !== 4) return;
+    const s = effectiveScaleRef.current;
+    const p = panRef.current;
+    input.style.left = `${p.x + rect[0] * s}px`;
+    input.style.top = `${p.y + rect[1] * s}px`;
+    input.style.width = `${Math.max(1, (rect[2] - rect[0]) * s)}px`;
+    input.style.height = `${Math.max(1, (rect[3] - rect[1]) * s)}px`;
+  }
+
+  function resetTextProxyValue(input: HTMLInputElement) {
+    input.value = TEXT_PROXY_SENTINEL;
+    proxyShadowRef.current = TEXT_PROXY_SENTINEL;
+    try {
+      input.setSelectionRange(TEXT_PROXY_SENTINEL.length, TEXT_PROXY_SENTINEL.length);
+    } catch {
+      /* selection is best-effort */
+    }
+  }
+
+  function openTextProxy(spriteId: number) {
+    const input = hiddenInputRef.current;
+    if (!input) return;
+    // Already focused: the player may have dismissed the keyboard. Only a
+    // fresh focus brings it back.
+    if (document.activeElement === input) input.blur();
+    touchProxyRef.current = true;
+    isComposingRef.current = false;
+    proxySpriteRef.current = spriteId;
+    positionTextProxy(sprite_text_entry_rect(spriteId));
+    input.focus();
+    resetTextProxyValue(input);
+    proxyOpenedAtRef.current = performance.now();
+    if (proxyPollRef.current === null) {
+      proxyPollRef.current = window.setInterval(pollTextProxy, 200);
+    }
+  }
+
+  // Follow the field while it holds keyboard focus; close the keyboard once
+  // the movie moves focus elsewhere (a new screen, focus given to a
+  // non-editable sprite) or a host-declared entry disappears. The grace
+  // period covers the mouseDown that sets the focus not having been
+  // processed yet.
+  function pollTextProxy() {
+    const input = hiddenInputRef.current;
+    if (!input || !touchProxyRef.current || document.activeElement !== input) {
+      closeTextProxy();
+      return;
+    }
+    const rect = focused_text_entry_rect(proxySpriteRef.current);
+    if (rect.length === 4) {
+      positionTextProxy(rect);
+    } else if (performance.now() - proxyOpenedAtRef.current > 500) {
+      input.blur();
+    }
+  }
+
+  function closeTextProxy() {
+    if (proxyPollRef.current !== null) {
+      window.clearInterval(proxyPollRef.current);
+      proxyPollRef.current = null;
+    }
+    if (!touchProxyRef.current) return;
+    touchProxyRef.current = false;
+    isComposingRef.current = false;
+    proxySpriteRef.current = 0;
+    const input = hiddenInputRef.current;
+    if (!input) return;
+    input.value = "";
+    input.style.left = "0px";
+    input.style.top = "0px";
+    input.style.width = "1px";
+    input.style.height = "1px";
+  }
+
+  function pressProxyKeys(keys: ProxyKey[]) {
+    if (keys.length === 0) return;
+    for (const k of keys) key_down(k.key, k.code);
+    // Same deferred release as the character path in onInput: the keyDown
+    // handler runs asynchronously and reads the key state.
+    setTimeout(() => {
+      for (const k of keys) key_up(k.key, k.code);
+    }, 100);
+  }
+
+  // Deliver whatever the keyboard changed since the last call. `settle`
+  // empties the proxy back to the sentinel afterwards; never done while a
+  // composition is open, because rewriting the value under an IME breaks it.
+  function syncTextProxy(settle: boolean) {
+    const input = hiddenInputRef.current;
+    if (!input) return;
+    const value = input.value;
+    const keys = diffProxyValue(proxyShadowRef.current, value);
+    proxyShadowRef.current = value;
+    pressProxyKeys(keys);
+    if (settle && value !== TEXT_PROXY_SENTINEL) resetTextProxyValue(input);
+  }
+
+  useEffect(() => {
+    const el = outerRef.current;
+    if (!el) return;
+    const onTouchEnd = (e: TouchEvent) => {
+      const spriteId = pendingTouchEntryRef.current;
+      if (!spriteId || e.touches.length > 0) return;
+      pendingTouchEntryRef.current = 0;
+      e.preventDefault();
+      openTextProxy(spriteId);
+    };
+    el.addEventListener("touchend", onTouchEnd, { passive: false });
+    return () => {
+      el.removeEventListener("touchend", onTouchEnd);
+    };
+  // outerWidth/outerHeight used as a proxy for "container is mounted"
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [outerWidth, outerHeight]);
+
+  useEffect(() => () => closeTextProxy(),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  []);
+
   function pointerOuterPos(e: React.PointerEvent): Pt {
     const rect = outerRef.current?.getBoundingClientRect();
     return rect
@@ -495,6 +660,7 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
   }
 
   function dispatchVMMouse(name: "move" | "down" | "up", canvasX: number, canvasY: number, e: React.PointerEvent) {
+    syncModifiersFrom(e);
     if (pickingMode) {
       if (name === "move") {
         mouse_move(canvasX, canvasY);
@@ -530,10 +696,17 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
         }
         const spriteId = player_get_sprite_at(canvasX, canvasY);
         const isEditable = spriteId > 0 && is_sprite_editable_field(spriteId);
+        // A touch defers focusing the proxy to touchend (see
+        // pendingTouchEntryRef); focusing here would not show the keyboard,
+        // and a later focus() on an already focused input does nothing.
+        const isTouch = e.pointerType === "touch" || e.pointerType === "pen";
+        const touchEntrySprite = isTouch ? text_entry_sprite_at(canvasX, canvasY) : 0;
+        const touchEntry = touchEntrySprite > 0;
+        pendingTouchEntryRef.current = touchEntrySprite;
         mouse_down(canvasX, canvasY);
         if (isEditable) {
           e.preventDefault();
-          hiddenInputRef.current?.focus();
+          if (!isTouch) hiddenInputRef.current?.focus();
           // Detect rapid repeat clicks on the same sprite for word/line select.
           const now = performance.now();
           const prev = lastClickRef.current;
@@ -556,7 +729,7 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
         } else {
           textDragRef.current = null;
           lastClickRef.current = null;
-          if (document.activeElement === hiddenInputRef.current) {
+          if (!touchEntry && document.activeElement === hiddenInputRef.current) {
             hiddenInputRef.current?.blur();
             outerRef.current?.focus();
           }
@@ -605,6 +778,7 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
         singleTouchActiveRef.current = false;
       }
       singlePanRef.current = null;
+      pendingTouchEntryRef.current = 0;
       const { centroid, dist } = gestureCentroidAndDist();
       gestureRef.current = {
         initialDist: dist || 1,
@@ -784,6 +958,7 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
         // every key — both here on bubble and from the input's handler.
         if (document.activeElement === hiddenInputRef.current) return;
         e.preventDefault();
+        syncModifiersFrom(e);
         // Pass browser key-repeats through: Director fires `on keyDown`
         // repeatedly while a key is held (OS auto-repeat), and event-driven
         // movies rely on that — e.g. Tetris soft-drops one row per repeated
@@ -794,6 +969,7 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
       onKeyUp={e => {
         if (document.activeElement === hiddenInputRef.current) return;
         key_up(e.key, e.keyCode);
+        syncModifiersFrom(e);
       }}
     >
       <div
@@ -852,14 +1028,27 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
           opacity: 0.01,
           pointerEvents: 'none',
           zIndex: -1,
+          // 16px keeps iOS from zooming the page when the proxy is focused.
+          fontSize: '16px',
+          color: 'transparent',
+          caretColor: 'transparent',
+          background: 'transparent',
+          border: 0,
+          padding: 0,
+          outline: 'none',
         }}
         type="text"
         inputMode="text"
+        enterKeyHint="done"
         autoComplete="off"
         autoCorrect="off"
-        autoCapitalize="off"
+        autoCapitalize="none"
         spellCheck={false}
+        onBlur={() => closeTextProxy()}
         onKeyDown={e => {
+          // A touch keyboard's placeholder keydown (keyCode 229) carries no
+          // key; its text arrives through onInput.
+          if (touchProxyRef.current && isPlaceholderKey(e)) return;
           // Handle special keys that don't produce input events.
           // Allow browser key-repeat through to wasm so holding e.g. Backspace
           // continuously deletes characters at the browser's repeat cadence
@@ -896,16 +1085,26 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
           // Regular characters flow through to onInput below
         }}
         onKeyUp={e => {
+          if (touchProxyRef.current && isPlaceholderKey(e)) return;
           key_up(e.key, e.keyCode);
         }}
         onCompositionStart={() => {
           isComposingRef.current = true;
+          // Touch keyboards compose ordinary words too; their text is
+          // delivered as key presses by the diff in onInput instead.
+          if (touchProxyRef.current) return;
           ime_composition_start();
         }}
         onCompositionUpdate={e => {
+          if (touchProxyRef.current) return;
           ime_composition_update(e.data ?? "");
         }}
         onCompositionEnd={e => {
+          if (touchProxyRef.current) {
+            isComposingRef.current = false;
+            syncTextProxy(true);
+            return;
+          }
           ime_composition_end(e.data ?? "");
           isComposingRef.current = false;
           // Clear so the trailing onInput (which fires with the committed text)
@@ -913,6 +1112,12 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
           (e.currentTarget as HTMLInputElement).value = '';
         }}
         onInput={e => {
+          if (touchProxyRef.current) {
+            const composing = isComposingRef.current
+              || !!(e.nativeEvent as InputEvent).isComposing;
+            syncTextProxy(!composing);
+            return;
+          }
           // Skip while IME composition owns the input — compositionend commits
           // the final string via ime_composition_end above.
           if (isComposingRef.current) return;

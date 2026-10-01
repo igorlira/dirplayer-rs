@@ -1266,8 +1266,21 @@ impl JsApi {
                 member_map.str_set("dataSize", &JsValue::from(sound_member.sound.data().len() as u32));
             }
             CastMemberType::FilmLoop(film_loop_data) => {
-                member_map.str_set("width", &JsValue::from(film_loop_data.info.width));
-                member_map.str_set("height", &JsValue::from(film_loop_data.info.height));
+                // The info block's four leading fields are the member's RECT
+                // in Mac order, so these two hold its RIGHT and BOTTOM edges,
+                // not a size. Report the size the rect actually describes.
+                member_map.str_set(
+                    "width",
+                    &JsValue::from(
+                        film_loop_data.info.width as i32 - film_loop_data.info.reg_point.0 as i32,
+                    ),
+                );
+                member_map.str_set(
+                    "height",
+                    &JsValue::from(
+                        film_loop_data.info.height as i32 - film_loop_data.info.reg_point.1 as i32,
+                    ),
+                );
                 member_map.str_set("center", &JsValue::from(film_loop_data.info.center));
                 member_map.str_set("regX", &JsValue::from(film_loop_data.info.reg_point.0));
                 member_map.str_set("regY", &JsValue::from(film_loop_data.info.reg_point.1));

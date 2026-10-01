@@ -831,9 +831,7 @@ impl<'a> Pfr1HeaderParser<'a> {
 
         // Post-process (skip for compound glyphs — returns compound contours directly)
         if !is_compound {
-            self.remove_duplicate_points();
-            self.trim_contour_outliers();
-            self.close_contours();
+            self.finish_contours();
         }
 
         let mut glyph = OutlineGlyph::new();
@@ -2875,33 +2873,13 @@ impl<'a> Pfr1HeaderParser<'a> {
         }
     }
 
-    fn trim_contour_outliers(&mut self) {
-        for contour in &mut self.contours {
-            while contour.commands.len() >= 4 {
-                let n = contour.commands.len();
-                let last = &contour.commands[n - 1];
-
-                let mut min_x = f32::MAX;
-                let mut max_x = f32::MIN;
-                for i in 0..n - 1 {
-                    let cmd = &contour.commands[i];
-                    if cmd.x < min_x { min_x = cmd.x; }
-                    if cmd.x > max_x { max_x = cmd.x; }
-                }
-                let box_width = max_x - min_x;
-                if box_width < 1.0 { break; }
-
-                let ext_left = (min_x - last.x).max(0.0);
-                let ext_right = (last.x - max_x).max(0.0);
-                let extension = ext_left.max(ext_right);
-
-                if extension > box_width * 0.5 {
-                    contour.commands.pop();
-                } else {
-                    break;
-                }
-            }
-        }
+    /// Clean-up after a simple glyph's outline is parsed. Every point is
+    /// kept: a slanted stroke (slash, comma, acute accent, the bar of an o
+    /// with stroke) ends on a corner well to one side of the others, and
+    /// that corner is part of the shape.
+    fn finish_contours(&mut self) {
+        self.remove_duplicate_points();
+        self.close_contours();
     }
 
     fn close_contours(&mut self) {
@@ -3439,4 +3417,35 @@ pub fn parse_glyph(
     }
 
     best_glyph
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn quad(points: &[(f32, f32)]) -> PfrContour {
+        let mut c = PfrContour::new();
+        c.commands.push(PfrCmd::move_to(points[0].0, points[0].1));
+        for &(x, y) in &points[1..] {
+            c.commands.push(PfrCmd::line_to(x, y));
+        }
+        c
+    }
+
+    #[test]
+    fn slanted_stroke_keeps_all_four_corners() {
+        // A bold slash as an outline font draws it: the last corner sits
+        // left of the other three by more than half their width.
+        let corners = [(204.0, -25.0), (571.0, 1491.0), (360.0, 1491.0), (-3.0, -25.0)];
+        let mut parser = Pfr1HeaderParser::new(
+            &[], &[0; 4], 2048, 0, 0, 0.0, 0.0, &[], 0, 0, 0, None, None, None, 30,
+        );
+        parser.contours = vec![quad(&corners)];
+        parser.finish_contours();
+        let points: Vec<(f32, f32)> =
+            parser.contours[0].commands.iter().map(|c| (c.x, c.y)).collect();
+        assert_eq!(&points[..4], &corners[..]);
+        // closed back to the start
+        assert_eq!(points[4], corners[0]);
+    }
 }

@@ -2,6 +2,43 @@ use log::debug;
 
 use crate::player::keyboard_map;
 
+/// Director key code from the browser's `event.key` NAME.
+///
+/// `event.keyCode` is deprecated and some environments report 0 for every
+/// key. Movies read `the keyCode` for Escape (53), Delete (117), Return
+/// (36) and friends, so without a fallback those keys silently do nothing
+/// while letters (read through `the key`) keep working.
+fn sw_code_from_key_name(key: &str) -> Option<u16> {
+    let code = match key {
+        "Escape" | "Esc" => 53,
+        "Delete" => 117,
+        "Enter" => 36,
+        "Backspace" => 51,
+        "Tab" => 48,
+        " " | "Space" | "Spacebar" => 49,
+        "ArrowLeft" => 123,
+        "ArrowRight" => 124,
+        "ArrowDown" => 125,
+        "ArrowUp" => 126,
+        "Home" => 115,
+        "End" => 119,
+        "PageUp" => 116,
+        "PageDown" => 121,
+        _ => {
+            // Single characters: reuse the JS-keyCode table via the uppercase
+            // ASCII code, which is what a browser would otherwise have sent.
+            let mut chars = key.chars();
+            let c = chars.next()?;
+            if chars.next().is_some() {
+                return None;
+            }
+            let js = (c.to_ascii_uppercase() as u32) as u16;
+            return keyboard_map::get_keyboard_key_map_js_to_sw().get(&js).copied();
+        }
+    };
+    Some(code)
+}
+
 pub struct KeyboardKey {
     pub key: String,
     pub code: u16,
@@ -31,7 +68,11 @@ impl KeyboardManager {
     pub fn key_down(&mut self, key: String, code: u16) {
         let code_mapped = keyboard_map::get_keyboard_key_map_js_to_sw().get(&code);
         debug!("Key down: {} {} (mapped to: {:?})", key, code, code_mapped);
-        let mapped_code = *code_mapped.unwrap_or(&code);
+        // Fall back to the key NAME when the browser gave no usable keyCode.
+        let mapped_code = match code_mapped {
+            Some(m) => *m,
+            None => sw_code_from_key_name(&key).unwrap_or(code),
+        };
         self.last_key_time = Some(chrono::Local::now());
 
         // Map JS key names to Director key values
@@ -68,6 +109,24 @@ impl KeyboardManager {
         let code_to_remove = *code_mapped.unwrap_or(&code);
 
         self.down_keys.retain(|x| x.code != code_to_remove);
+    }
+
+    /// Forget a held modifier the browser says is no longer down. A key
+    /// released while another window has focus (a print or file dialog, a
+    /// switch to another app) never sends its keyup to the page, and the key
+    /// would read as held until pressed again. Director asks the operating
+    /// system for `the controlDown` each time, so it cannot get stuck.
+    pub fn release_modifier(&mut self, key: &str) {
+        self.down_keys.retain(|x| x.key != key);
+    }
+
+    /// Forget every held key. For the moments the page stops receiving key
+    /// events while keys may be down: it lost the focus, or the movie opened
+    /// the print dialog, which takes the keyboard. The keys that started the
+    /// print (Ctrl+P) are released in that dialog, and the page never hears
+    /// of it.
+    pub fn release_all(&mut self) {
+        self.down_keys.clear();
     }
 
     pub fn is_key_down(&self, key: &str) -> bool {
@@ -129,7 +188,11 @@ impl KeyboardManager {
         if let Some(ch) = Self::director_char_for(key) {
             return ch.to_string();
         }
-        if key.len() == 1 && key.as_bytes()[0] < 0x80 {
+        // A typed character, ASCII or not (a layout's letters such as a
+        // Nordic keyboard's own vowels are single keys too). Key NAMES such as
+        // "Shift" or "F1" are longer and have no character.
+        let mut chars = key.chars();
+        if chars.next().is_some() && chars.next().is_none() {
             key.clone()
         } else {
             "".to_string()
@@ -165,6 +228,15 @@ mod tests {
         assert_eq!(kb.key_code(), code);
         assert!(!kb.is_key_down(" "));
         assert_eq!(kb.key_pressed(), "", "keyPressed is about keys still down");
+    }
+
+    #[test]
+    fn a_non_ascii_character_is_the_key() {
+        let mut kb = KeyboardManager::new();
+        kb.key_down("\u{f8}".to_string(), 216);
+        assert_eq!(kb.key(), "\u{f8}");
+        kb.key_down("Shift".to_string(), 16);
+        assert_eq!(kb.key(), "", "a key name is not a character");
     }
 
     #[test]

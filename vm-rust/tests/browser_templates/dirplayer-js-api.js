@@ -111,6 +111,13 @@ export function onFlashResetAll() {
 }
 export function onStageSizeChanged() {}
 
+// FileIO's displayOpen/displaySave. No one answers a dialog in a test run, so
+// it is cancelled at once, as a player pressing Cancel would.
+export function showFileDialog() {
+  return Promise.resolve(null);
+}
+export function onFileDialogSaveWritten() {}
+
 // External Xtra plugin bridge — delegated to the real implementation.
 //
 // `dirplayer-js-api-real.js` is a copy of `dirplayer-js-api/index.js`

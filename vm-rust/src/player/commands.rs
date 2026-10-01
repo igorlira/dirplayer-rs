@@ -588,6 +588,16 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                     }
                 }
             }
+            // A press that arrives without a preceding move (a tap) still
+            // moves the pointer, so the sprites under it get mouseLeave and
+            // mouseEnter before mouseDown, as they do when the pointer is
+            // moved there first. Without this a button's mouseDown and
+            // mouseUp ran while another button was still the hovered one:
+            // a behaviour that remembers a button's size on mouseEnter and
+            // restores it on mouseLeave stored the already enlarged size on
+            // the late mouseEnter, and each tap grew the button a further
+            // tenth.
+            crate::player::events::dispatch_rollover_events_now().await;
 
             // `the mouseDownScript` (if set) runs at the END of the
             // mouseDown pipeline, alongside sprite/cast/frame dispatch.
@@ -1251,6 +1261,9 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             if !player_is_playing().await {
                 return Ok(DatumRef::Void);
             }
+            // As for the left button: the press position's mouseLeave and
+            // mouseEnter come before the press.
+            crate::player::events::dispatch_rollover_events_now().await;
             // Update mouse_loc + flag is already done in lib.rs
             // (right_mouse_down). Here we dispatch the `rightMouseDown`
             // event to the topmost active sprite (so behaviors with

@@ -708,3 +708,6 @@ function _completeOnDemandLoad(name, success) {
     console.error('[dirplayer] complete_external_xtra_load threw:', e);
   }
 }
+
+// File dialogs for the FileIO Xtra (displayOpen / displaySave).
+export { showFileDialog, onFileDialogSaveWritten, setFileDialogLanguage } from './file-dialog.js';

@@ -11,7 +11,7 @@ import {
 import { createFlashInstance, destroyFlashInstance, destroyAllFlashInstances, initFlashBridge } from "../services/flashPlayerManager";
 import store from "../store";
 import { breakpointListChanged, castLibNameChanged, castListChanged, castMemberChanged, castMemberListChanged, channelChanged, channelDisplayNameChanged, channelDisplayNamesChanged, datumSnapshot, debugContentAdded, debugMessageAdded, debugMessagesCleared, frameChanged, globalsChanged, movieLoaded, movieLoadFailed, onScriptError, removeTimeoutHandle, scopeListChanged, scoreChanged, scriptErrorCleared, scriptInstanceSnapshot, setTimeoutHandle } from "../store/vmSlice";
-import { OnMovieLoadedCallbackData, trigger_timeout, exportW3dObj, exportW3dRaw, listW3dMembers, get_breakpoints } from 'vm-rust'
+import { OnMovieLoadedCallbackData, trigger_timeout, exportW3dObj, exportW3dRaw, listW3dMembers, get_breakpoints, set_text_entry_members } from 'vm-rust'
 import { DatumRef, IVMScope, JsBridgeDatum, MemberSnapshot, ScoreSnapshot, ScoreSpriteSnapshot } from ".";
 import { onMemberSelected } from "../store/uiSlice";
 import { isUIShown } from "../utils/debug";
@@ -50,6 +50,10 @@ export function initVmCallbacks() {
   w.dirplayer_setXtraRegistry = setXtraRegistry;
   w.dirplayer_getXtraRegistry = getXtraRegistry;
   w.dirplayer_resolveAndLoadMovieXtras = resolveAndLoadMovieXtras;
+// Members a movie draws its own text input into, so a tap on them raises
+  // the on-screen keyboard on touch devices (see set_text_entry_members).
+  //   dirplayer_setTextEntryMembers(['name field'])
+  w.dirplayer_setTextEntryMembers = set_text_entry_members;
 
   // Expose trace log download on window
   (window as any).downloadTraceLog = () => {

@@ -230,3 +230,37 @@ export function externalXtraHasStaticHandler(xtraName: string, handler: string):
  * user-confirmation prompt before loading).
  */
 export function onRequestXtraLoad(name: string): void;
+
+/** A file the open dialog offers (from the FileIO virtual filesystem). */
+export type FileDialogFile = { name: string; modified: number; size: number };
+
+export type FileDialogRequest = {
+  kind: 'open' | 'save';
+  /** The movie's dialog title (save), or empty. */
+  title: string;
+  /** The movie's suggested file name (save), or empty. */
+  defaultName: string;
+  /** The FileIO filter mask as the movie set it. */
+  mask: string;
+  /** Extensions the mask names, without the dot ("mim"). */
+  extensions: string[];
+  /** Matching files, newest first (open). */
+  files: FileDialogFile[];
+};
+
+/**
+ * Called BY vm-rust for FileIO displayOpen/displaySave. Resolves with null
+ * when cancelled, else the chosen name, plus the file's bytes when it came
+ * from the player's computer. Never rejects.
+ */
+export function showFileDialog(request: FileDialogRequest): Promise<{ name: string; bytes?: Uint8Array } | null>;
+
+/** Called BY vm-rust once the file a save dialog named is written and closed. */
+export function onFileDialogSaveWritten(name: string, data: Uint8Array): void;
+
+/**
+ * The file dialogs' language: a BCP 47 tag or a function returning one.
+ * Without it they follow `window.dirplayerFileDialog.language`, then
+ * `<html lang>`. English, Danish, Swedish and Norwegian are built in.
+ */
+export function setFileDialogLanguage(lang: string | (() => string) | null): void;

@@ -1337,6 +1337,7 @@ impl BuiltInHandlerManager {
             Some(BuiltInSymbol::SetPref) => MovieHandlers::set_pref(args),
             Some(BuiltInSymbol::UrlEncode) => StringHandlers::url_encode(args),
             Some(BuiltInSymbol::GoToNetPage) => MovieHandlers::go_to_net_page(args),
+            Some(BuiltInSymbol::PrintFrom) => MovieHandlers::print_from(args),
             Some(BuiltInSymbol::GoToNetMovie) => MovieHandlers::go_to_net_movie(args),
             Some(BuiltInSymbol::Pass) => MovieHandlers::pass(args),
             Some(BuiltInSymbol::Union) => TypeHandlers::union(args),
@@ -1727,7 +1728,7 @@ impl BuiltInHandlerManager {
                     DatumType::PropList => PropListDatumHandlers::set_opt_prop(datum, args),
                     DatumType::ScriptInstanceRef => ScriptInstanceDatumHandlers::set_prop(datum, args),
                     // `member(x).char[a..b] = v` compiles to
-                    // setProp(member, #char, a, b, v) â€” a chunk write into the
+                    // setProp(member, #char, a, b, v) — a chunk write into the
                     // member's text, keeping everything outside the range.
                     DatumType::CastMemberRef => Self::set_member_chunk(datum, args),
                     _ => Err(ScriptError::new(
@@ -3024,7 +3025,7 @@ impl BuiltInHandlerManager {
             }
         })
     }
-    /// `setProp(member, #char|#word|#item|#line, first, last, value)` â€” the
+    /// `setProp(member, #char|#word|#item|#line, first, last, value)` — the
     /// compiled form of `member(x).char[a..b] = value`. Replaces exactly that
     /// range of the member's text and leaves the rest alone. `last` is
     /// optional: `member(x).char[a] = v` compiles with four arguments.
@@ -3074,7 +3075,21 @@ impl BuiltInHandlerManager {
         let item_delimiter = reserve_player_ref(|player| player.movie.item_delimiter);
         let chunk_expr = StringChunkExpr { chunk_type, start: first, end: last, item_delimiter };
         let new_text = StringChunkUtils::string_by_putting_into_chunk(&current, &chunk_expr, &replacement)?;
-        CastMemberRefHandlers::set_prop(&member_ref, Symbol::from_str("text"), Datum::String(new_text))?;
+        // Write through the chunk setter, not the `.text` property. The text
+        // setter resets styling, which Director does on a whole-text write but
+        // NOT on a chunk write: rewriting one line of a member whose first line
+        // is bold and whose rest is regular left the member with no runs at
+        // all, so every line then took the member-wide style and a map tooltip
+        // came out wholly bold. The chunk setter keeps each run's style and
+        // rewrites only the changed range.
+        reserve_player_mut(|player| {
+            StringChunkUtils::set_value(
+                player,
+                &crate::director::lingo::datum::StringChunkSource::Member(member_ref.clone()),
+                &chunk_expr,
+                new_text,
+            )
+        })?;
         Ok(DatumRef::Void)
     }
 
@@ -3237,4 +3252,6 @@ fn get_datum_script_instance_ids(
         }
     }
     Ok(instance_refs)
+
+
 }
