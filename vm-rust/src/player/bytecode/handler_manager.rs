@@ -260,6 +260,7 @@ impl StaticBytecodeHandlerManager {
             OpCode::PushChunkVarRef => StackBytecodeHandler::push_chunk_var_ref(ctx),
             OpCode::PushVarRef => StackBytecodeHandler::push_var_ref(ctx),
             OpCode::DeleteChunk => StringBytecodeHandler::delete_chunk(ctx),
+            OpCode::HiliteChunk => StringBytecodeHandler::hilite_chunk(ctx),
             OpCode::GetTopLevelProp => GetSetBytecodeHandler::get_top_level_prop(ctx),
             OpCode::PutChunk => StringBytecodeHandler::put_chunk(ctx),
             OpCode::OntoSpr => SpriteCompareBytecodeHandler::onto_sprite(ctx),

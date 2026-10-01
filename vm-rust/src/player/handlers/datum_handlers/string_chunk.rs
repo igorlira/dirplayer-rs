@@ -402,11 +402,56 @@ impl StringChunkUtils {
         Ok(result)
     }
 
+    /// `put x into/before/after line N of s` (or item N) where line N lies past
+    /// the end: Director pads with delimiters until line N exists, then places
+    /// x there. The padding is (N - existing) delimiters, where "existing"
+    /// ignores the empty chunk after a trailing delimiter. Measured against the
+    /// Director 6 projector: "u" & RETURN, put "x" after line 3 gives
+    /// "u" & RETURN & RETURN & RETURN & "x". Chat-log movies rely on this to
+    /// leave blank lines between entries (`put s after line (n + 2) of field`).
+    /// An empty string counts as one empty line, so `put "x" into line 1 of ""`
+    /// is just "x".
+    fn string_by_padding_past_end(
+        string: &str,
+        chunk_expr: &StringChunkExpr,
+        value: &str,
+    ) -> Option<String> {
+        let delimiter = match chunk_expr.chunk_type {
+            // Same line-break detection as `string_get_lines`.
+            StringChunkType::Line if string.contains("\r\n") => "\r\n".to_string(),
+            StringChunkType::Line if string.contains('\n') => "\n".to_string(),
+            StringChunkType::Line => "\r".to_string(),
+            StringChunkType::Item => chunk_expr.item_delimiter.to_string(),
+            _ => return None,
+        };
+        if chunk_expr.start <= -30000 {
+            return None;
+        }
+        let target = if chunk_expr.end > 0 { chunk_expr.end } else { chunk_expr.start };
+        if target <= 0 {
+            return None;
+        }
+        let existing = if string.is_empty() {
+            1
+        } else {
+            string.split(delimiter.as_str()).count() as i32
+                - if string.ends_with(delimiter.as_str()) { 1 } else { 0 }
+        };
+        if target <= existing && !string.is_empty() {
+            return None;
+        }
+        let padding = delimiter.repeat((target - existing).max(0) as usize);
+        Some(format!("{}{}{}", string, padding, value))
+    }
+
     pub fn string_by_putting_into_chunk(
         string: &str,
         chunk_expr: &StringChunkExpr,
         replace_with: &str,
     ) -> Result<String, ScriptError> {
+        if let Some(padded) = Self::string_by_padding_past_end(string, chunk_expr, replace_with) {
+            return Ok(padded);
+        }
         match chunk_expr.chunk_type {
             StringChunkType::Char => {
                 let mut new_string = string.to_owned();
@@ -450,6 +495,9 @@ impl StringChunkUtils {
         chunk_expr: &StringChunkExpr,
         insert_value: &str,
     ) -> Result<String, ScriptError> {
+        if let Some(padded) = Self::string_by_padding_past_end(string, chunk_expr, insert_value) {
+            return Ok(padded);
+        }
         match chunk_expr.chunk_type {
             StringChunkType::Char => {
                 let mut new_string = string.to_owned();
@@ -501,6 +549,9 @@ impl StringChunkUtils {
         chunk_expr: &StringChunkExpr,
         insert_value: &str,
     ) -> Result<String, ScriptError> {
+        if let Some(padded) = Self::string_by_padding_past_end(string, chunk_expr, insert_value) {
+            return Ok(padded);
+        }
         match chunk_expr.chunk_type {
             StringChunkType::Char => {
                 let mut new_string = string.to_owned();
@@ -1313,6 +1364,38 @@ mod tests {
             item_delimiter: ',',
         };
         StringChunkUtils::resolve_chunk_expr_string(s, &expr).unwrap()
+    }
+
+    fn put(s: &str, chunk_type: StringChunkType, n: i32, mode: &str, value: &str) -> String {
+        let expr = StringChunkExpr { chunk_type, start: n, end: 0, item_delimiter: ',' };
+        match mode {
+            "into" => StringChunkUtils::string_by_putting_into_chunk(s, &expr, value),
+            "before" => StringChunkUtils::string_by_putting_before_chunk(s, &expr, value),
+            _ => StringChunkUtils::string_by_putting_after_chunk(s, &expr, value),
+        }
+        .unwrap()
+    }
+
+    #[test]
+    fn put_past_the_last_line_pads_with_line_breaks() {
+        // Measured against the Director 6 projector: the empty line after a
+        // trailing RETURN does not count, so three more RETURNs are added.
+        assert_eq!(put("u\r", StringChunkType::Line, 3, "after", "x"), "u\r\r\rx");
+        assert_eq!(put("u", StringChunkType::Line, 3, "after", "x"), "u\r\rx");
+        // into/before land on the same (empty) padded line.
+        assert_eq!(put("u", StringChunkType::Line, 3, "into", "x"), "u\r\rx");
+        assert_eq!(put("u", StringChunkType::Line, 3, "before", "x"), "u\r\rx");
+        // The string's own line break is reused.
+        assert_eq!(put("a\r\nb", StringChunkType::Line, 4, "after", "x"), "a\r\nb\r\n\r\nx");
+        // An empty string is one empty line.
+        assert_eq!(put("", StringChunkType::Line, 1, "into", "x"), "x");
+        assert_eq!(put("", StringChunkType::Line, 3, "after", "x"), "\r\rx");
+    }
+
+    #[test]
+    fn put_past_the_last_item_pads_with_delimiters() {
+        assert_eq!(put("a", StringChunkType::Item, 3, "into", "x"), "a,,x");
+        assert_eq!(put("", StringChunkType::Item, 2, "into", "x"), ",x");
     }
 
     #[test]

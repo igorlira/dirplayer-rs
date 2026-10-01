@@ -6,6 +6,7 @@ use crate::{
         context_vars::{player_get_context_var, player_set_context_var, read_context_var_args},
         datum_formatting::{format_concrete_datum, datum_to_string_for_concat},
         datum_ref::DatumRef,
+        cast_member::CastMemberType,
         handlers::datum_handlers::string_chunk::StringChunkUtils,
         reserve_player_mut, DirPlayer, HandlerExecutionResult, ScriptError,
     },
@@ -406,8 +407,19 @@ impl StringBytecodeHandler {
                 scope.stack.pop().unwrap()
             };
 
-            // Read all chunk parameters
-            let chunks = Self::read_all_chunks(player, ctx)?;
+            // Read all chunk parameters. A computed index of 0 (`word 0 of s`,
+            // e.g. `word (the number of words in field "f") of field "f"` on an
+            // empty field) leaves every bound at zero; Director yields EMPTY.
+            let chunks = match Self::read_all_chunks(player, ctx) {
+                Ok(chunks) => chunks,
+                Err(err) if err.message == "getChunk: no valid chunks specified" => {
+                    let empty = player.alloc_datum(Datum::String(String::new()));
+                    let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                    scope.stack.push(empty);
+                    return Ok(HandlerExecutionResult::Advance);
+                }
+                Err(err) => return Err(err),
+            };
 
             // For chunked access on a CastMember (`member.line[5].word[1]`)
             // or on another StringChunk (already nested), build a StringChunk
@@ -526,6 +538,37 @@ impl StringBytecodeHandler {
         })
     }
 
+    /// `hilite <chunk> of field <id>`: select that chunk of the field's text,
+    /// as if the user had dragged across it, so the next keystroke replaces it.
+    /// Stack layout matches the decompiler: [chunk bounds], field id, cast id
+    /// (D5+). A field that can't be found is ignored, as in Director.
+    pub fn hilite_chunk(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+        reserve_player_mut(|player| {
+            let (id_ref, cast_id_ref) = read_context_var_args(player, 0x6, ctx.scope_ref);
+            let chunk_expr = Self::read_single_chunk_ref(player, ctx)?;
+            let member_ref = {
+                let cast_id = cast_id_ref.as_ref().map(|r| player.get_datum(r));
+                player
+                    .movie
+                    .cast_manager
+                    .find_member_ref_by_identifiers(player.get_datum(&id_ref), cast_id, &player.allocator)
+            };
+            let member_ref = match member_ref {
+                Ok(Some(r)) => r,
+                _ => return Ok(HandlerExecutionResult::Advance),
+            };
+            if let Some(member) = player.movie.cast_manager.find_member_by_ref_mut(&member_ref) {
+                if let CastMemberType::Field(field) = &mut member.member_type {
+                    let (start, end) = crate::player::handlers::datum_handlers::string_chunk::StringChunkHandlers::resolve_chunk_char_range(&field.text, &chunk_expr);
+                    field.sel_start = start as i32;
+                    field.sel_end = end as i32;
+                    field.sel_anchor = start as i32;
+                }
+            }
+            Ok(HandlerExecutionResult::Advance)
+        })
+    }
+
     pub fn contains_0str(
         ctx: &BytecodeHandlerContext,
     ) -> Result<HandlerExecutionResult, ScriptError> {
@@ -561,8 +604,16 @@ impl StringBytecodeHandler {
             // Read the target variable (top of stack: cast_id if field type, then id)
             let (id_ref, cast_id_ref) = read_context_var_args(player, var_type, ctx.scope_ref);
 
-            // Read the chunk expression from the stack (8 values: last_line..first_char)
-            let chunk_expr = Self::read_single_chunk_ref(player, ctx)?;
+            // Read the chunk expression from the stack (8 values: last_line..first_char).
+            // A computed index of 0 (`put x after line 0 of field "f"`, where 0 is
+            // `the number of lines` of an empty field) leaves all eight bounds at
+            // zero. Director accepts that and puts relative to the whole string,
+            // which is how movies start a log in an empty field; `None` marks it.
+            let chunk_expr = match Self::read_single_chunk_ref(player, ctx) {
+                Ok(expr) => Some(expr),
+                Err(err) if err.message == "getChunk: invalid chunk range" => None,
+                Err(err) => return Err(err),
+            };
 
             // Pop the value to put from the stack (pushed before chunk params)
             let value_ref = {
@@ -598,15 +649,18 @@ impl StringBytecodeHandler {
             let value_string = player.get_datum(&value_ref).string_value()?;
 
             // Apply the chunk operation based on put type
-            let new_string = match put_type {
-                PutType::Into => {
-                    StringChunkUtils::string_by_putting_into_chunk(&current_string, &chunk_expr, &value_string)?
+            let new_string = match (&chunk_expr, put_type) {
+                (None, PutType::Into) => value_string.clone(),
+                (None, PutType::Before) => format!("{}{}", value_string, current_string),
+                (None, PutType::After) => format!("{}{}", current_string, value_string),
+                (Some(chunk_expr), PutType::Into) => {
+                    StringChunkUtils::string_by_putting_into_chunk(&current_string, chunk_expr, &value_string)?
                 }
-                PutType::Before => {
-                    StringChunkUtils::string_by_putting_before_chunk(&current_string, &chunk_expr, &value_string)?
+                (Some(chunk_expr), PutType::Before) => {
+                    StringChunkUtils::string_by_putting_before_chunk(&current_string, chunk_expr, &value_string)?
                 }
-                PutType::After => {
-                    StringChunkUtils::string_by_putting_after_chunk(&current_string, &chunk_expr, &value_string)?
+                (Some(chunk_expr), PutType::After) => {
+                    StringChunkUtils::string_by_putting_after_chunk(&current_string, chunk_expr, &value_string)?
                 }
             };
 
