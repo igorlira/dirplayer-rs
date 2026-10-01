@@ -1745,7 +1745,7 @@ pub async fn dispatch_event_endsprite_for_score(score_ref: ScoreRef, sprite_nums
 /// Mirrors the mouse path: the member's own `member_script_ref` first, then a
 /// behavior script attached via `script_id` (those live in the cast's lctx
 /// rather than as Script-type members, so `get_script_by_ref` misses them).
-fn get_member_script_handler(
+pub(crate) fn get_member_script_handler(
     player: &mut crate::player::DirPlayer,
     sprite_num: i16,
     handler_name: &str,

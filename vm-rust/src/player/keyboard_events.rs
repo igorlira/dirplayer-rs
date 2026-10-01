@@ -43,6 +43,43 @@ fn get_next_focus_sprite_id(player: &DirPlayer, after: i16) -> i16 {
 }
 
 /// Whether the focused sprite's member is an editable Field or Text.
+/// Director gives the keyboard focus to the first editable field or text sprite
+/// on stage (lowest channel) until something else takes it, so a movie can say
+/// "just start typing" without the visitor clicking the field first. Fred the
+/// Webmate relies on this: it `hilite`s the prompt in its input field and expects
+/// the first keystroke to replace it.
+fn ensure_default_keyboard_focus(player: &mut DirPlayer) {
+    // -1 leaves the choice to the Score; 0 means a script turned typing off.
+    if player.keyboard_focus_sprite != -1 {
+        return;
+    }
+    // Fields are preferred over text members: a D6 movie's static text sprites
+    // (room titles and the like) can carry an editable flag they never use,
+    // while the input the movie means is a field. Within each kind, the lowest
+    // channel wins, as in Director.
+    let find = |want_field: bool| {
+        player.movie.score.channels.iter().find_map(|channel| {
+            if channel.number == 0 || !channel.sprite.visible || !(channel.sprite.entered || channel.sprite.puppet) {
+                return None;
+            }
+            let member_ref = channel.sprite.member.as_ref()?;
+            let member = player.movie.cast_manager.find_member_by_ref(member_ref)?;
+            let editable = match &member.member_type {
+                CastMemberType::Field(f) if want_field => f.editable || channel.sprite.editable,
+                CastMemberType::Text(t) if !want_field => {
+                    t.info.as_ref().map_or(false, |i| i.editable) || channel.sprite.editable
+                }
+                _ => false,
+            };
+            editable.then_some(channel.number)
+        })
+    };
+    let editable_channel = find(true).or_else(|| find(false));
+    if let Some(number) = editable_channel {
+        player.keyboard_focus_sprite = number as i16;
+    }
+}
+
 fn focused_member_is_editable(player: &DirPlayer) -> bool {
     if player.keyboard_focus_sprite < 0 {
         return false;
@@ -629,6 +666,7 @@ async fn player_key_down_inner(key: String, code: u16) -> Result<DatumRef, Scrip
     // handled immediately in the WASM entry point (lib.rs key_down()). Calling it
     // here would re-add keys from stale queued commands after the user released them.
     let (instance_ids, is_editable_member, sprite_id) = reserve_player_mut(|player| {
+        ensure_default_keyboard_focus(player);
         if player.keyboard_focus_sprite != -1 {
             let sprite_id = player.keyboard_focus_sprite as i16;
             player.sync_script_instance_list(sprite_id);
@@ -647,7 +685,8 @@ async fn player_key_down_inner(key: String, code: u16) -> Result<DatumRef, Scrip
 
     // Director event propagation order:
     // 1. Behavior scripts on focused sprite (synchronous)
-    // 2. If not handled → frame script → movie scripts
+    // 2. If not handled → the sprite's cast member script
+    // 3. If not handled → frame script → movie scripts
     // 3. Movie callback
     // 4. If no script handled it → default text insertion / navigation
     let mut handled = false;
@@ -657,6 +696,9 @@ async fn player_key_down_inner(key: String, code: u16) -> Result<DatumRef, Scrip
                 Symbol::builtin(BuiltInSymbol::KeyDown), &vec![], instances,
             ).await?;
         }
+    }
+    if !handled {
+        handled = invoke_focus_member_script("keyDown").await?;
     }
     if !handled {
         player_invoke_frame_and_movie_scripts(Symbol::builtin(BuiltInSymbol::KeyDown), &vec![]).await?;
@@ -739,6 +781,31 @@ async fn player_key_down_inner(key: String, code: u16) -> Result<DatumRef, Scrip
     Ok(DatumRef::Void)
 }
 
+/// Director sends key events to the focused sprite's behaviors, then "to a
+/// script attached to the cast member assigned to the sprite", then to the
+/// frame and movie scripts. Returns true when the focused sprite's member
+/// script has a handler for `handler_name` and it ran. Editable fields often
+/// carry their Return handling here (Fred the Webmate's input field:
+/// `on keyUp … if the key = RETURN then do(userreturnscript)`).
+async fn invoke_focus_member_script(handler_name: &str) -> Result<bool, ScriptError> {
+    let target = reserve_player_mut(|player| {
+        let sprite_num = player.keyboard_focus_sprite;
+        if sprite_num <= 0 {
+            return None;
+        }
+        crate::player::events::get_member_script_handler(player, sprite_num, handler_name)
+            .map(|handler| (sprite_num, handler))
+    });
+    let Some((sprite_num, handler)) = target else {
+        return Ok(false);
+    };
+    reserve_player_mut(|player| player.member_script_sprite_num = sprite_num);
+    let result = crate::player::player_call_script_handler(None, handler, &vec![]).await;
+    reserve_player_mut(|player| player.member_script_sprite_num = 0);
+    result?;
+    Ok(true)
+}
+
 /// Same fresh `stopEvent()` scope as `player_key_down` — a keyUp handler that
 /// stops the event must not silence the next one either.
 pub async fn player_key_up(key: String, code: u16) -> Result<DatumRef, ScriptError> {
@@ -767,6 +834,9 @@ async fn player_key_up_inner(key: String, code: u16) -> Result<DatumRef, ScriptE
                 Symbol::builtin(BuiltInSymbol::KeyUp), &vec![], instances,
             ).await?;
         }
+    }
+    if !handled {
+        handled = invoke_focus_member_script("keyUp").await?;
     }
     if !handled {
         player_invoke_frame_and_movie_scripts(Symbol::builtin(BuiltInSymbol::KeyUp), &vec![]).await?;
