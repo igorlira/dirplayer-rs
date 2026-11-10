@@ -5810,6 +5810,23 @@ pub(crate) async fn mount_net_movie(task_id: u32, target: MovieFrameTarget, eage
     // 3. Load the new movie data (preserving globals and allocator)
     reserve_player_mut(|player| {
         player.is_dispatching_events = prev_dispatching;
+        // The movie we are leaving may have Flash sprites in the same channels the new
+        // movie uses (a loader and its game both in channel 1). Tear those Ruffle
+        // instances down and forget that the channels were ready BEFORE the new movie's
+        // scripts run: otherwise its first beginSprite sends setVariable / goToFrame to
+        // the OLD movie's player, which is destroyed a moment later when the new member
+        // loads, and the values are lost.
+        player.flash_frame_buffers.clear();
+        player.flash_ready_sprites.clear();
+        JsApi::dispatch_flash_reset_all();
+        // Per-channel Flash bookkeeping belongs to the old movie's SWF too.
+        // `flash_prev_frame` feeds the "non-looping SWF wrapped: park it on its last
+        // frame" check; left at the old SWF's frame, the new SWF's frame 1 reads as a
+        // wrap and the new sprite is parked on its final frame.
+        for channel in player.movie.score.channels.iter_mut() {
+            channel.sprite.flash_prev_frame = 0;
+            channel.sprite.flash_asserted_frame = None;
+        }
         player.movie.score.reset();
         player.clear_script_instance_list_caches();
         player.movie.frame_script_instance = None;
