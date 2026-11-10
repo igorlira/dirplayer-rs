@@ -2525,6 +2525,10 @@ impl BuiltInHandlerManager {
                 {
                     return res;
                 }
+                // Director's Speech built-ins (voiceInitialize, voiceSpeak, ...), on the browser's Web Speech API.
+                if let Some(res) = crate::player::speech::try_call(name.as_str(), args) {
+                    return res;
+                }
                 let formatted_args = reserve_player_ref(|player| {
                     let mut s = String::new();
                     for arg in args {
