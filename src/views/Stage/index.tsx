@@ -445,11 +445,26 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
     };
   }, []);
 
+  // Pointer position in the outer container's own (layout) pixels.
+  //
+  // The page embedding the player may scale it with CSS — `transform: scale()`
+  // or `zoom` on an ancestor, e.g. to fit a 640x480 stage to the window or a
+  // phone. getBoundingClientRect() and clientX/clientY are then in on-screen
+  // pixels while the pan/scale maths below works in layout pixels, so every
+  // click landed off by the page's scale factor (at 1.33x a button near the
+  // bottom of the stage resolved below the stage and never fired). Dividing by
+  // the on-screen / layout size ratio undoes the page's scaling; it is exactly
+  // 1 when nothing outside the player scales it, so that case is unchanged.
   function pointerOuterPos(e: React.PointerEvent): Pt {
-    const rect = outerRef.current?.getBoundingClientRect();
-    return rect
-      ? { x: e.clientX - rect.left, y: e.clientY - rect.top }
-      : { x: 0, y: 0 };
+    const el = outerRef.current;
+    const rect = el?.getBoundingClientRect();
+    if (!el || !rect) return { x: 0, y: 0 };
+    const sx = el.offsetWidth > 0 ? rect.width / el.offsetWidth : 1;
+    const sy = el.offsetHeight > 0 ? rect.height / el.offsetHeight : 1;
+    return {
+      x: (e.clientX - rect.left) / (sx || 1),
+      y: (e.clientY - rect.top) / (sy || 1),
+    };
   }
 
   function markUserPanned() {
