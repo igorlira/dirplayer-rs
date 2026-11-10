@@ -12,7 +12,7 @@ use crate::{
 use super::{
     allocator::ScriptInstanceAllocatorTrait,
     cast_lib::CastMemberRef, handlers::datum_handlers::script_instance::ScriptInstanceUtils,
-    player_call_script_handler, player_semaphone, reserve_player_ref,
+    player_call_script_handler, player_call_script_handler_raw_args, player_semaphone, reserve_player_ref,
     script_ref::ScriptInstanceRef, DatumRef, ScriptError, ScriptErrorCode, ScriptReceiver,
     PLAYER_EVENT_TX, score::ScoreRef,
 };
@@ -403,6 +403,25 @@ pub async fn player_invoke_static_event(
     handler_name: Symbol,
     args: &Vec<DatumRef>,
 ) -> Result<bool, ScriptError> {
+    player_invoke_static_event_inner(handler_name, args, false).await
+}
+
+/// Like `player_invoke_static_event`, but binds `args` to the handler's
+/// parameters exactly as given, even when its first parameter is named `me`
+/// (no script ref is prepended). For callers that supply the handler's first
+/// argument themselves.
+pub async fn player_invoke_static_event_raw(
+    handler_name: Symbol,
+    args: &Vec<DatumRef>,
+) -> Result<bool, ScriptError> {
+    player_invoke_static_event_inner(handler_name, args, true).await
+}
+
+async fn player_invoke_static_event_inner(
+    handler_name: Symbol,
+    args: &Vec<DatumRef>,
+    use_raw_arg_list: bool,
+) -> Result<bool, ScriptError> {
     let active_static_scripts = reserve_player_mut(|player| {
         let frame_script = player
             .movie
@@ -483,10 +502,11 @@ pub async fn player_invoke_static_event(
                 .active_static_event_handlers
                 .push((script_member_ref.clone(), handler_name.to_owned().to_string(), args.clone()));
         });
-        let call_result = player_call_script_handler(
+        let call_result = player_call_script_handler_raw_args(
             receiver,  // Changed from None to receiver
             (script_member_ref, handler_name),
-            args
+            args,
+            use_raw_arg_list,
         ).await;
         reserve_player_mut(|player| {
             player.active_static_event_handlers.pop();
@@ -1254,11 +1274,16 @@ pub async fn tick_w3d_collisions() {
             // collisionData as the SECOND (`on collision target, collisionData`).
             // Without the target, collisionData lands in the first param and the
             // collisionData param is VOID (Splat's `on collision s, collisionData`).
-            let args = match fire.target {
-                Some(target) => vec![target, fire.data],
-                None => vec![fire.data],
+            //
+            // The target must land in the first param even when the script names
+            // it `me` (`on collideCallback3d me, colData` registered with
+            // `setCollisionCallback(#collideCallback3d, 3)`): the normal static
+            // path prepends the script ref for a leading `me`, which pushed the
+            // target into colData's slot ("Cannot get int property modelB").
+            let _ = match fire.target {
+                Some(target) => player_invoke_static_event_raw(Symbol::from_str(&fire.handler), &vec![target, fire.data]).await,
+                None => player_invoke_static_event(Symbol::from_str(&fire.handler), &vec![fire.data]).await,
             };
-            let _ = player_invoke_static_event(Symbol::from_str(&fire.handler), &args).await;
         }
     }
 }
