@@ -80,6 +80,11 @@ fn set_sprite_camera_list(
 // collide with stock Ruffle if both are loaded on the same page (e.g. via a
 // browser extension). Matching JS-side definitions live in
 // src/services/flashPlayerManager.ts::initFlashBridge.
+thread_local! {
+    /// sprite number → ActionScript path of its current tellTarget clip (see `flash_tell_target`).
+    static FLASH_TELL_TARGETS: std::cell::RefCell<std::collections::HashMap<i32, String>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
 #[wasm_bindgen]
 extern "C" {
     // All Lingo Flash bridge calls now take `sprite_num` because each Flash
@@ -241,6 +246,49 @@ impl SpriteDatumUtils {
 }
 
 impl SpriteDatumHandlers {
+    /// The clip a Flash sprite's timeline commands are currently aimed at:
+    /// `sprite(n).tellTarget("clip")` … `sprite(n).endTellTarget()` (Director's
+    /// Flash sprite commands, mirroring Flash 4's Tell Target action). While a
+    /// target is set, goToFrame / play / stop act on that clip
+    /// instead of the main timeline. Returns the clip as an ActionScript path.
+    fn flash_tell_target(sprite_num: i32) -> Option<String> {
+        FLASH_TELL_TARGETS.with(|m| m.borrow().get(&sprite_num).cloned())
+    }
+
+    /// "/a/b", "a/b", "a.b", "_root.a" or "_level0.a" → "_root.a.b" (Flash 4 slash
+    /// syntax or dot syntax, relative to the main timeline).
+    fn flash_target_as_path(target: &str) -> String {
+        let t = target.trim();
+        if t.is_empty() || t == "/" { return "_root".to_string(); }
+        let dotted = t.trim_start_matches('/').replace('/', ".");
+        let lower = dotted.to_ascii_lowercase();
+        if lower.starts_with("_root") || lower.starts_with("_level") { dotted } else { format!("_root.{}", dotted) }
+    }
+
+    /// Calls `<target>.<method>(arg)` in the sprite's Flash movie.
+    fn flash_call_on_target(sprite_num: i32, target: &str, method: &str, arg: Option<&str>) {
+        let args = match arg {
+            None => "[]".to_string(),
+            Some(a) if a.trim().parse::<i64>().is_ok() => format!("[{}]", a.trim()),
+            Some(a) => format!("[\"{}\"]", a.replace('\\', "\\\\").replace('"', "\\\"")),
+        };
+        if let Err(e) = ruffle_call_function(sprite_num, &format!("{}.{}", target, method), &args) {
+            warn!("Flash tellTarget {}.{} failed: {:?}", target, method, e);
+        }
+    }
+
+    /// The clip a play()/stop() call addresses: an explicit string argument
+    /// (`sprite(n).play("clip")`), else the sprite's tellTarget, else none (main timeline).
+    fn flash_command_target(sprite_num: i32, args: &Vec<DatumRef>) -> Option<String> {
+        let explicit = reserve_player_ref(|player| -> Result<Option<String>, ScriptError> {
+            Ok(match args.first().map(|a| player.get_datum(a)) {
+                Some(Datum::String(s)) if !s.is_empty() => Some(s.clone()),
+                _ => None,
+            })
+        }).ok().flatten();
+        explicit.map(|t| Self::flash_target_as_path(&t)).or_else(|| Self::flash_tell_target(sprite_num))
+    }
+
     /// Resolve a sprite datum to (sprite_num, cast_lib, cast_member). The
     /// sprite_num is the lookup key for the per-sprite Ruffle instance;
     /// cast_lib/cast_member are still needed by callers that build
@@ -294,7 +342,7 @@ impl SpriteDatumHandlers {
             "intersects" | "getprop" | "getat" | "setat" | "getaprop" | "setaprop" | "pointtoword" | "pointtoline" |
             "gotoframe" | "callframe" | "stop" | "play" | "rewind" | "hold" |
             "newobject" |
-            "hittest" | "getflashproperty" | "setflashproperty" | "telltarget" |
+            "hittest" | "getflashproperty" | "setflashproperty" | "telltarget" | "endtelltarget" |
             "findlabel" | "flashtostage" | "stagetoflash" | "mapstagetomember" | "getpropref" |
             // `camera` belongs with the other 3D camera-list accessors: it must reach
             // SpriteDatumHandlers::call so `sprite(n).camera(i)` indexes the list.
@@ -851,7 +899,11 @@ impl SpriteDatumHandlers {
                         if args.is_empty() { return Ok("1".to_string()); }
                         player.get_datum(&args[0]).string_value()
                     })?;
-                    ruffle_goto_frame(sn, &frame_or_label);
+                    match Self::flash_tell_target(sn) {
+                        // goToFrame plays from the frame (gotoAndPlay), as on the main timeline
+                        Some(target) => Self::flash_call_on_target(sn, &target, "gotoAndPlay", Some(&frame_or_label)),
+                        None => ruffle_goto_frame(sn, &frame_or_label),
+                    }
                 }
                 Ok(DatumRef::Void)
             }
@@ -867,7 +919,10 @@ impl SpriteDatumHandlers {
             }
             "stop" => {
                 if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
-                    ruffle_stop(sn);
+                    match Self::flash_command_target(sn, args) {
+                        Some(target) => Self::flash_call_on_target(sn, &target, "stop", None),
+                        None => ruffle_stop(sn),
+                    }
                 }
                 Ok(DatumRef::Void)
             }
@@ -875,6 +930,10 @@ impl SpriteDatumHandlers {
                 if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
                     // play() overrides a prior `sprite.frame = N` hold — clear
                     // the asserted frame so a fresh instance plays, not pins.
+                    if let Some(target) = Self::flash_command_target(sn, args) {
+                        Self::flash_call_on_target(sn, &target, "play", None);
+                        return Ok(DatumRef::Void);
+                    }
                     reserve_player_mut(|player| {
                         player.movie.score.get_sprite_mut(sn as i16).flash_asserted_frame = None;
                     });
@@ -1345,7 +1404,28 @@ impl SpriteDatumHandlers {
                     Ok(player.alloc_datum(Datum::Int(frame as i32)))
                 })
             }
-            "telltarget" | "flashtostage" | "stagetoflash" => {
+            // sprite(n).tellTarget("clip") … sprite(n).endTellTarget(): aim the sprite's
+            // timeline commands at a clip inside its Flash movie. Sveerz (Skunk Studios)
+            // builds its whole interface this way; with tellTarget ignored, a
+            // `goToFrame("off")` meant for one of twenty highlight clips hit the main
+            // timeline and threw the interface to its last frame.
+            "telltarget" => {
+                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
+                    let target = reserve_player_ref(|player| {
+                        if args.is_empty() { return Ok(String::new()); }
+                        player.get_datum(&args[0]).string_value()
+                    })?;
+                    FLASH_TELL_TARGETS.with(|m| { m.borrow_mut().insert(sn, Self::flash_target_as_path(&target)); });
+                }
+                Ok(DatumRef::Void)
+            }
+            "endtelltarget" => {
+                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
+                    FLASH_TELL_TARGETS.with(|m| { m.borrow_mut().remove(&sn); });
+                }
+                Ok(DatumRef::Void)
+            }
+            "flashtostage" | "stagetoflash" => {
                 warn!("Flash sprite method '{}' called but not yet implemented", handler_name);
                 Ok(DatumRef::Void)
             }
@@ -1621,5 +1701,23 @@ impl SpriteDatumHandlers {
         // In Director, calling a handler on a sprite that doesn't handle it
         // is silently ignored and returns void.
         Ok(DatumRef::Void)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SpriteDatumHandlers;
+
+    #[test]
+    fn tell_target_paths_become_actionscript_paths() {
+        let p = SpriteDatumHandlers::flash_target_as_path;
+        assert_eq!(p("clip"), "_root.clip");
+        assert_eq!(p("/clip"), "_root.clip");
+        assert_eq!(p("/menu/button1"), "_root.menu.button1");
+        assert_eq!(p("menu.button1"), "_root.menu.button1");
+        assert_eq!(p("_root.menu"), "_root.menu");
+        assert_eq!(p("_level0/menu"), "_level0.menu");
+        assert_eq!(p("/"), "_root");
+        assert_eq!(p(""), "_root");
     }
 }
