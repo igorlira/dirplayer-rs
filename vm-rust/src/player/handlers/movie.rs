@@ -761,10 +761,20 @@ impl MovieHandlers {
             let sprite = player.movie.score.get_sprite(sprite_num as i16)
                 .ok_or_else(|| ScriptError::new(format!("sendSprite: sprite {} not found", sprite_num)))?;
             let fallback = sprite.script_instance_list.clone();
-            let receivers = player.get_sprite_script_instance_ids(
+            let mut receivers = player.get_sprite_script_instance_ids(
                 sprite_num as i16,
                 fallback.as_slice(),
             );
+            // sendSprite(0, #msg): channel 0 is the frame script channel, so the message
+            // goes to the current frame's behavior. It must be the instance the frame loop
+            // itself runs (the one that got beginSprite and gets enterFrame / exitFrame),
+            // not a second instance held in channel 0's own list: a main loop kept in the
+            // frame script reads, in enterFrame, the properties its handlers set here.
+            if sprite_num == 0 {
+                if let Some(frame_instance) = player.movie.frame_script_instance.clone() {
+                    receivers = vec![frame_instance];
+                }
+            }
             Ok((message.clone(), remaining_args.clone(), receivers))
         })?;
 
