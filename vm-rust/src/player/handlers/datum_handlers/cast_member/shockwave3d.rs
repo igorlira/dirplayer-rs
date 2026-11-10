@@ -1160,6 +1160,25 @@ impl Shockwave3dMemberHandlers {
         })?;
 
         match handler_name_builtin {
+            // `member.texture.count` (and the model, modelResource, shader, light,
+            // camera, group and motion forms) reaches the member as a CALL of
+            // textureCount() etc. in some compiled movies, not as a property read.
+            // get_prop already answers these names; route the call form to it.
+            // Nabisco World's "Cookie Barz Armored Car" loops over
+            // `member.texture.count` at start-up and stopped with "No Shockwave3D
+            // member handler for 'textureCount'".
+            BuiltInSymbol::ModelCount | BuiltInSymbol::ModelResourceCount | BuiltInSymbol::ShaderCount
+            | BuiltInSymbol::TextureCount | BuiltInSymbol::LightCount | BuiltInSymbol::CameraCount
+            | BuiltInSymbol::GroupCount | BuiltInSymbol::MotionCount => {
+                reserve_player_mut(|player| {
+                    let cast_member_ref = match player.get_datum(datum) {
+                        Datum::CastMember(r) => r.to_owned(),
+                        _ => return Err(ScriptError::new("Expected cast member ref".to_string())),
+                    };
+                    let value = Self::get_prop(player, &cast_member_ref, handler_name)?;
+                    Ok(player.alloc_datum(value))
+                })
+            }
             BuiltInSymbol::GetPropRef => {
                 // member("x").model[1] → getPropRef(#model, 1)
                 reserve_player_mut(|player| {
