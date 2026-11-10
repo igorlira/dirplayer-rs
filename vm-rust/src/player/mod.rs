@@ -43,6 +43,7 @@ pub mod scope;
 pub mod score;
 pub mod script;
 pub mod script_ref;
+pub mod speech;
 pub mod sprite;
 pub mod stage;
 pub mod timeout;
