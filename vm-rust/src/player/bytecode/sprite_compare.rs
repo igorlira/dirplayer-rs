@@ -275,6 +275,20 @@ impl SpriteCompareBytecodeHandler {
                 }
             }
 
+            // A sprite with no cast member (memberNum set to -1 or 0, or a member that does
+            // not exist) shows nothing and has nothing to hit: `sprite a intersects b` is
+            // FALSE for it, whatever rect the channel still carries.
+            if intersects {
+                let has_member = |n: i16| {
+                    player.movie.score.get_channel(n).sprite.member.as_ref()
+                        .map(|m| m.cast_member > 0 && player.movie.cast_manager.find_member_by_ref(m).is_some())
+                        .unwrap_or(false)
+                };
+                if !has_member(source_sprite_num) || !has_member(target_sprite_num) {
+                    intersects = false;
+                }
+            }
+
             // Debug logging
             debug!("ontospr: sprite {} [{},{},{},{}] vs sprite {} [{},{},{},{}] => {}",
                 source_sprite_num, src_left, src_top, src_right, src_bottom,
