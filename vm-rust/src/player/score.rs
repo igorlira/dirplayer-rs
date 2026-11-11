@@ -6420,7 +6420,17 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                     } else {
                         return None;
                     };
-                    let line_count = text_member.text.matches(|c| c == '\n' || c == '\r').count() as i32 + 1;
+                    // Count the lines word wrap adds too. A system font can't be measured
+                    // here, so estimate half the font size per character. Without this a
+                    // one-paragraph text that wraps to four lines counted as one, the
+                    // #adjust rule below kept the authored height, and the lines past it
+                    // were clipped.
+                    let wraps = (text_member.word_wrap || force_wrap) && text_member.font_size > 0;
+                    let line_count: i32 = text_member.text.split(|c| c == '\n' || c == '\r').map(|par| {
+                        if !wraps { return 1; }
+                        let est_w = par.chars().count() as i32 * text_member.font_size as i32 / 2;
+                        ((est_w + text_width - 1) / text_width).max(1)
+                    }).sum();
                     Some(per_line * line_count
                         + text_member.top_spacing as i32
                         + text_member.bottom_spacing as i32)
