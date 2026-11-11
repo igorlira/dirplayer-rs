@@ -2515,6 +2515,25 @@ impl WebGL2Renderer {
                         }
                         _ => effective_bg,
                     };
+                    // A text sprite whose text color came from the score (rule 4 above) while its
+                    // background stayed the member's stored one can end up the same color as its
+                    // background, i.e. invisible. Snackwell's Backgammon (Director 7) stores its menu
+                    // labels as black on white and recolors every sprite in the score to palette
+                    // index 0 on 255 (white on black, on a black stage): the text became white on a
+                    // white box. When that happens, take the background from the score too.
+                    let text_bg_color = if !has_back_color && text_bg_color == text_fg_color {
+                        let palettes = player.movie.cast_manager.palettes();
+                        let (r, g, b) = resolve_color_ref(
+                            &palettes,
+                            &bg_color,
+                            &PaletteRef::BuiltIn(get_system_default_palette()),
+                            8,
+                        );
+                        let sprite_bg = ColorRef::Rgb(r, g, b);
+                        if sprite_bg != text_fg_color { sprite_bg } else { text_bg_color }
+                    } else {
+                        text_bg_color
+                    };
 
                     // Log color decision for text members
                     {
