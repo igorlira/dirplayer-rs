@@ -3718,6 +3718,23 @@ pub fn sprite_get_prop(
             let rect = get_sprite_rect_in_context(player, sprite_id);
             Ok(Datum::Rect([rect.0 as f64, rect.1 as f64, rect.2 as f64, rect.3 as f64], 0))
         }
+        // sprite.quad getter: the four corner points [topLeft, topRight, bottomRight,
+        // bottomLeft]; the sprite's rect corners until a quad has been set. Movies read
+        // it, change the points and write it back.
+        Some(BuiltInSymbol::Quad) => {
+            let quad = sprite.and_then(|s| s.quad);
+            let pts = match quad {
+                Some(q) => q,
+                None => {
+                    let r = get_sprite_rect_in_context(player, sprite_id);
+                    [(r.0 as i32, r.1 as i32), (r.2 as i32, r.1 as i32), (r.2 as i32, r.3 as i32), (r.0 as i32, r.3 as i32)]
+                }
+            };
+            let items: std::collections::VecDeque<DatumRef> = pts.iter()
+                .map(|(x, y)| player.alloc_datum(Datum::Point([*x as f64, *y as f64], 0)))
+                .collect();
+            Ok(Datum::List(crate::director::lingo::datum::DatumType::List, items, false))
+        }
         Some(BuiltInSymbol::Color) => Ok(Datum::ColorRef(
             sprite.map_or(ColorRef::PaletteIndex(255), |sprite| sprite.color.clone()),
         )),
