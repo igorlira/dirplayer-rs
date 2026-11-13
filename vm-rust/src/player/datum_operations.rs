@@ -128,11 +128,26 @@ fn list_to_rect_vals(player: &DirPlayer, list: &VecDeque<DatumRef>) -> Result<([
 /// to the way < and > operators work with strings" (dictionary, `max()`), and
 /// `#none > 0` is true, so max returns the symbol and min the integer, leaving
 /// `#none - 0` to evaluate.
+///
+/// A string chunk (`item 1 of s`, `s.line[2]`) is text too, and takes part as
+/// the string it holds. toxi's *macronaut* (Shockwave 3D, 2002) reads its
+/// soundtrack cue list, lines like `0:01:930`, with
+///
+///   pCueTimes.add(tCue.item[1] * 60000 + tCue.item[2] * 1000 + tCue.item[3] + tOffset)
+///
+/// which raised "Mul operator only works with ints and floats" on the chunk.
 fn symbol_as_arithmetic_operand(datum: &Datum) -> Option<Datum> {
     match datum {
         Datum::Symbol(name) => Some(Datum::String(name.clone().to_string())),
+        Datum::StringChunk(_, _, value) => Some(Datum::String(value.clone())),
         _ => None,
     }
+}
+
+/// Whether every item of a list is a number, so that a 3-item list can stand
+/// in for a vector's components.
+fn list_is_numeric(player: &DirPlayer, list: &VecDeque<DatumRef>) -> bool {
+    list.iter().all(|item| matches!(player.get_datum(item), Datum::Int(_) | Datum::Float(_)))
 }
 
 pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<Datum, ScriptError> {
@@ -206,8 +221,8 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
         ])),
         (Datum::Float(a), Datum::Vector(b)) => Ok(Datum::Vector([*a + b[0], *a + b[1], *a + b[2]])),
 
-        // Vector + List element-wise (3 elements)
-        (Datum::Vector(a), Datum::List(_, list, _)) if list.len() == 3 => {
+        // Vector + List element-wise (3 numbers)
+        (Datum::Vector(a), Datum::List(_, list, _)) if list.len() == 3 && list_is_numeric(player, list) => {
             let mut result = [0.0; 3];
             for i in 0..3 {
                 let val = match player.get_datum(&list[i]) {
@@ -223,7 +238,7 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
             }
             Ok(Datum::Vector(result))
         }
-        (Datum::List(_, list, _), Datum::Vector(b)) if list.len() == 3 => {
+        (Datum::List(_, list, _), Datum::Vector(b)) if list.len() == 3 && list_is_numeric(player, list) => {
             let mut result = VecDeque::with_capacity(3);
             for i in 0..3 {
                 let val = match player.get_datum(&list[i]) {
@@ -252,7 +267,13 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
         // mixed add aborted the handler; the script's own
         // `if gtv = 0 then gtv = [0,0,0]` shows a scalar result is expected when
         // every cell is missing.
-        (Datum::List(_, list, _), Datum::Int(_) | Datum::Float(_)) => {
+        //
+        // A vector is applied to each item the same way, unless the list is the
+        // 3-number form handled above. toxi's *macronaut* builds a sphere from a
+        // ring of vectors with
+        //   tVertices = tcircle * tcurradius + vector(0, -tradius * cos(tAngle * trad), 0)
+        // where `tcircle` holds 6 vectors.
+        (Datum::List(_, list, _), Datum::Int(_) | Datum::Float(_) | Datum::Vector(_)) => {
             let item_refs: Vec<DatumRef> = list.iter().cloned().collect();
             let scalar = right.clone();
             let mut ref_list = VecDeque::with_capacity(item_refs.len());
@@ -263,7 +284,7 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
             }
             Ok(Datum::List(DatumType::List, ref_list, false))
         }
-        (Datum::Int(_) | Datum::Float(_), Datum::List(_, list, _)) => {
+        (Datum::Int(_) | Datum::Float(_) | Datum::Vector(_), Datum::List(_, list, _)) => {
             let item_refs: Vec<DatumRef> = list.iter().cloned().collect();
             let scalar = left.clone();
             let mut ref_list = VecDeque::with_capacity(item_refs.len());
@@ -471,8 +492,8 @@ pub fn subtract_datums(
         ])),
         (Datum::Float(a), Datum::Vector(b)) => Ok(Datum::Vector([*a - b[0], *a - b[1], *a - b[2]])),
 
-        // Vector <-> List
-        (Datum::Vector(a), Datum::List(_, list, _)) if list.len() == 3 => {
+        // Vector <-> List (3 numbers)
+        (Datum::Vector(a), Datum::List(_, list, _)) if list.len() == 3 && list_is_numeric(player, list) => {
             let mut result = [0.0; 3];
             for i in 0..3 {
                 let val = match player.get_datum(&list[i]) {
@@ -488,7 +509,7 @@ pub fn subtract_datums(
             }
             Ok(Datum::Vector(result))
         }
-        (Datum::List(_, list, _), Datum::Vector(b)) if list.len() == 3 => {
+        (Datum::List(_, list, _), Datum::Vector(b)) if list.len() == 3 && list_is_numeric(player, list) => {
             let mut result = VecDeque::with_capacity(3);
             for i in 0..3 {
                 let val = match player.get_datum(&list[i]) {
@@ -519,8 +540,9 @@ pub fn subtract_datums(
         // already implements (and that this repo notes for list × scalar).
         // dkbarrel's `Terrain Builder.Barrelchkcol` does
         //     coldata = terrdata - playerY
-        // with terrdata a 9-element height list and playerY a number.
-        (Datum::List(_, list, _), Datum::Int(_) | Datum::Float(_)) => {
+        // with terrdata a 9-element height list and playerY a number. A vector
+        // applies per item too, as in `add_datums`.
+        (Datum::List(_, list, _), Datum::Int(_) | Datum::Float(_) | Datum::Vector(_)) => {
             let item_refs: Vec<DatumRef> = list.iter().cloned().collect();
             let scalar = right.clone();
             let mut ref_list = VecDeque::with_capacity(item_refs.len());
@@ -533,7 +555,7 @@ pub fn subtract_datums(
         }
         // Scalar - list is NOT commutative: each element is subtracted FROM the
         // scalar, so build `scalar - item` rather than reusing the arm above.
-        (Datum::Int(_) | Datum::Float(_), Datum::List(_, list, _)) => {
+        (Datum::Int(_) | Datum::Float(_) | Datum::Vector(_), Datum::List(_, list, _)) => {
             let item_refs: Vec<DatumRef> = list.iter().cloned().collect();
             let scalar = left.clone();
             let mut ref_list = VecDeque::with_capacity(item_refs.len());
@@ -1142,4 +1164,93 @@ pub fn concat_datums(
     let right_str = datum_to_string_for_concat(&right, player);
     
     Ok(Datum::String(format!("{}{}", left_str, right_str)))
+}
+
+#[cfg(test)]
+mod list_and_chunk_operand_tests {
+    use super::*;
+    use crate::director::lingo::datum::{StringChunkExpr, StringChunkSource, StringChunkType};
+    use crate::player::reserve_player_mut;
+    use crate::player::symbols::symbol_table::init_symbol_table;
+    use crate::player::testing::{run_test, TestPlayer};
+
+    fn list_of(player: &mut DirPlayer, items: Vec<Datum>) -> Datum {
+        let refs = items.into_iter().map(|d| player.alloc_datum(d)).collect();
+        Datum::List(DatumType::List, refs, false)
+    }
+
+    fn vectors_in(player: &DirPlayer, list: &Datum) -> Vec<[f64; 3]> {
+        list.to_list().unwrap().iter().map(|r| match player.get_datum(r) {
+            Datum::Vector(v) => *v,
+            _ => panic!("expected a vector"),
+        }).collect()
+    }
+
+    fn item_of(player: &mut DirPlayer, text: &str, n: i32) -> Datum {
+        let source = player.alloc_datum(Datum::String(text.to_string()));
+        let expr = StringChunkExpr { chunk_type: StringChunkType::Item, start: n, end: n, item_delimiter: ':' };
+        let value = text.split(':').nth((n - 1) as usize).unwrap().to_string();
+        Datum::StringChunk(StringChunkSource::Datum(source), expr, value)
+    }
+
+    #[test]
+    fn a_vector_is_added_to_each_vector_in_a_list() {
+        init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            reserve_player_mut(|p| {
+                let ring = list_of(p, vec![
+                    Datum::Vector([1.0, 0.0, 0.0]), Datum::Vector([0.0, 1.0, 0.0]),
+                    Datum::Vector([0.0, 0.0, 1.0]), Datum::Vector([1.0, 1.0, 1.0]),
+                ]);
+                let sum = add_datums(ring, Datum::Vector([1.0, 2.0, 3.0]), p).unwrap();
+                assert_eq!(vectors_in(p, &sum), vec![[2.0, 2.0, 3.0], [1.0, 3.0, 3.0], [1.0, 2.0, 4.0], [2.0, 3.0, 4.0]]);
+
+                // three vectors are three items too, not three components
+                let three = list_of(p, vec![Datum::Vector([1.0, 1.0, 1.0]); 3]);
+                let diff = subtract_datums(three, Datum::Vector([1.0, 1.0, 1.0]), p).unwrap();
+                assert_eq!(vectors_in(p, &diff), vec![[0.0, 0.0, 0.0]; 3]);
+
+                let three = list_of(p, vec![Datum::Vector([1.0, 1.0, 1.0]); 3]);
+                let sum = add_datums(Datum::Vector([0.0, 0.0, 1.0]), three, p).unwrap();
+                assert_eq!(vectors_in(p, &sum), vec![[1.0, 1.0, 2.0]; 3]);
+            });
+        });
+    }
+
+    #[test]
+    fn a_three_number_list_still_adds_component_wise() {
+        init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            reserve_player_mut(|p| {
+                let xyz = list_of(p, vec![Datum::Int(1), Datum::Int(2), Datum::Int(3)]);
+                match add_datums(Datum::Vector([1.0, 1.0, 1.0]), xyz, p).unwrap() {
+                    Datum::Vector(v) => assert_eq!(v, [2.0, 3.0, 4.0]),
+                    _ => panic!("expected a vector"),
+                }
+            });
+        });
+    }
+
+    #[test]
+    fn a_string_chunk_is_a_number_in_arithmetic() {
+        init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            reserve_player_mut(|p| {
+                // `tCue.item[1] * 60000 + tCue.item[2] * 1000 + tCue.item[3]` on "1:02:930"
+                let minutes = item_of(p, "1:02:930", 1);
+                let minutes = p.alloc_datum(minutes);
+                let factor = p.alloc_datum(Datum::Int(60000));
+                assert!(matches!(multiply_datums(minutes, factor, p).unwrap(), Datum::Float(f) if f == 60000.0));
+
+                let millis = item_of(p, "1:02:930", 3);
+                assert!(matches!(add_datums(millis, Datum::Int(70), p).unwrap(), Datum::Float(f) if f == 1000.0));
+
+                let seconds = item_of(p, "1:02:930", 2);
+                assert!(matches!(subtract_datums(seconds, Datum::Int(2), p).unwrap(), Datum::Float(f) if f == 0.0));
+            });
+        });
+    }
 }

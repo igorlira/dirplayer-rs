@@ -622,8 +622,15 @@ impl ListDatumHandlers {
             };
 
             let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
-            let clamped = position.min(list_vec.len());
-            list_vec.insert(clamped, item_ref);
+            // Past the end, the list grows up to the position, padded the way
+            // `set_at` pads. Stanza's game loader (Kaliber10000 issue 111)
+            // reserves its sprite channels with `addAt(channelRegister, 80, 0)`
+            // on an empty list, then takes free ones with
+            // `getOne(channelRegister, 0)`; clamping left a single channel.
+            while list_vec.len() < position {
+                list_vec.push_back(DatumRef::Void);
+            }
+            list_vec.insert(position, item_ref);
             player.note_actor_list_mutation(datum);
             player.note_script_instance_list_mutation(datum);
             Ok(DatumRef::Void)
@@ -714,5 +721,55 @@ impl ListDatumHandlers {
             let joined = pieces.join(&delimiter);
             Ok(player.alloc_datum(Datum::String(joined)))
         })
+    }
+}
+
+#[cfg(test)]
+mod add_at_tests {
+    use super::*;
+    use crate::director::lingo::datum::DatumType;
+    use crate::player::reserve_player_ref;
+    use crate::player::symbols::symbol_table::init_symbol_table;
+    use crate::player::testing::{run_test, TestPlayer};
+
+    #[test]
+    fn add_at_past_the_end_grows_the_list() {
+        init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            // `addAt(channelRegister, 80, 0)` on [], then `getOne(channelRegister, 0)`
+            let (list, position, zero) = reserve_player_mut(|p| {
+                (
+                    p.alloc_datum(Datum::List(DatumType::List, VecDeque::new(), false)),
+                    p.alloc_datum(Datum::Int(80)),
+                    p.alloc_datum(Datum::Int(0)),
+                )
+            });
+            ListDatumHandlers::add_at(&list, &vec![position, zero.clone()]).unwrap();
+            assert_eq!(reserve_player_ref(|p| p.get_datum(&list).to_list().unwrap().len()), 80);
+            let free = ListDatumHandlers::get_one(&list, &vec![zero]).unwrap();
+            assert_eq!(reserve_player_ref(|p| p.get_datum(&free).int_value().unwrap()), 1);
+        });
+    }
+
+    #[test]
+    fn add_at_inside_the_list_still_inserts() {
+        init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            let (list, position, value) = reserve_player_mut(|p| {
+                let items = [1, 2, 3].iter().map(|n| p.alloc_datum(Datum::Int(*n))).collect();
+                (
+                    p.alloc_datum(Datum::List(DatumType::List, items, false)),
+                    p.alloc_datum(Datum::Int(2)),
+                    p.alloc_datum(Datum::Int(9)),
+                )
+            });
+            ListDatumHandlers::add_at(&list, &vec![position, value]).unwrap();
+            let items: Vec<i32> = reserve_player_ref(|p| {
+                p.get_datum(&list).to_list().unwrap().iter().map(|r| p.get_datum(r).int_value().unwrap()).collect()
+            });
+            assert_eq!(items, vec![1, 9, 2, 3]);
+        });
     }
 }
