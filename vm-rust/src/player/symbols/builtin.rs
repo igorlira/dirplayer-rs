@@ -108,6 +108,7 @@ define_builtin_symbols! {
     "period" => Period,
     // Global Lingo verbs dirplayer implements that the upstream table lacked.
     "netAbort" => NetAbort,
+    "clearCache" => ClearCache,
     "preLoadCast" => PreLoadCast,
     "unLoadCast" => UnLoadCast,
     "preLoadMovie" => PreLoadMovie,

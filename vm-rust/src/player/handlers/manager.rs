@@ -1135,8 +1135,10 @@ impl BuiltInHandlerManager {
             Some(BuiltInSymbol::NetAbort) => NetHandlers::net_abort(args),
             // Cast/movie preload + unload commands: dirplayer loads everything
             // synchronously up front, so there is nothing to (un)cache. Accept
-            // as no-ops (netjack startMovie calls preLoadCast).
-            Some(BuiltInSymbol::MoveToFront | BuiltInSymbol::PreloadMember | BuiltInSymbol::PreloadBuffer | BuiltInSymbol::UnloadMember | BuiltInSymbol::Beep | BuiltInSymbol::PreLoadCast | BuiltInSymbol::UnLoadCast | BuiltInSymbol::PreLoadMovie | BuiltInSymbol::UnLoad) => Ok(DatumRef::Void),
+            // as no-ops (netjack startMovie calls preLoadCast). The same goes for
+            // `clearCache`, which empties the browser's network cache (The
+            // Slide-Box, Kaliber10000 issue 110, calls it before loading slides).
+            Some(BuiltInSymbol::MoveToFront | BuiltInSymbol::PreloadMember | BuiltInSymbol::PreloadBuffer | BuiltInSymbol::UnloadMember | BuiltInSymbol::Beep | BuiltInSymbol::PreLoadCast | BuiltInSymbol::UnLoadCast | BuiltInSymbol::PreLoadMovie | BuiltInSymbol::UnLoad | BuiltInSymbol::ClearCache) => Ok(DatumRef::Void),
             // Director's flushInputEvents() discards queued mouse/key events;
             // the browser player has no such queue to flush.
             Some(BuiltInSymbol::FlushInputEvents) => Ok(DatumRef::Void),
