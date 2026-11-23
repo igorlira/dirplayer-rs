@@ -152,6 +152,19 @@ impl PropListUtils {
         right: &Datum,
         allocator: &DatumAllocator,
     ) -> Result<bool, ScriptError> {
+        // A chunk expression (`line[i].item[1]`, `word 2 of s`, ...) evaluates to a
+        // StringChunk datum, but in Director it is simply a string, so it must
+        // match string AND symbol keys exactly like a plain string does.
+        if matches!(left, Datum::StringChunk(..)) {
+            if let Ok(s) = left.string_value() {
+                return Self::datum_equals_for_lookup(&Datum::String(s), right, allocator);
+            }
+        }
+        if matches!(right, Datum::StringChunk(..)) {
+            if let Ok(s) = right.string_value() {
+                return Self::datum_equals_for_lookup(left, &Datum::String(s), allocator);
+            }
+        }
         let result = match (left, right) {
             // Director propList key lookup is CASE-INSENSITIVE. This matters
             // especially now that Symbols are interned: `as_str()` returns the
@@ -1229,6 +1242,66 @@ impl PropListDatumHandlers {
             TypeUtils::get_sub_prop(&result, &args[2], player)
         } else {
             Ok(result)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PropListUtils;
+    use crate::director::lingo::datum::{Datum, StringChunkExpr, StringChunkSource, StringChunkType};
+    use crate::player::allocator::DatumAllocator;
+    use crate::player::symbols::{symbol::Symbol, symbol_table::init_symbol_table};
+    use crate::player::DatumRef;
+
+    /// What `line[i].item[1]` evaluates to: a chunk expression, not a plain string.
+    fn chunk(text: &str) -> Datum {
+        Datum::StringChunk(
+            StringChunkSource::Datum(DatumRef::Void),
+            StringChunkExpr {
+                chunk_type: StringChunkType::Item,
+                start: 1,
+                end: 1,
+                item_delimiter: '/',
+            },
+            text.to_string(),
+        )
+    }
+
+    #[test]
+    fn string_chunk_matches_symbol_and_string_keys() {
+        init_symbol_table();
+        let allocator = DatumAllocator::default();
+        let symbol_key = Datum::Symbol(Symbol::from_str("chunklookup_a"));
+        let string_key = Datum::String("chunklookup_a".to_string());
+        let chunk_key = chunk("chunklookup_a");
+        let other_chunk = chunk("chunklookup_b");
+
+        // `findPos`/`getaProp` with a chunk expression must behave like a plain string:
+        // Habbo's `Avatar Effect Class.setAnimation` looks up `#fx25_1` with
+        // `tList.line[i].item[1]`, and a miss silently drops the effect's animation.
+        for (left, right) in [
+            (&chunk_key, &symbol_key),
+            (&symbol_key, &chunk_key),
+            (&chunk_key, &string_key),
+            (&string_key, &chunk_key),
+            (&chunk_key, &chunk("chunklookup_a")),
+        ] {
+            assert!(
+                PropListUtils::datum_equals_for_lookup(left, right, &allocator).unwrap(),
+                "a StringChunk key should match an equal symbol/string/chunk key"
+            );
+        }
+
+        for (left, right) in [
+            (&other_chunk, &symbol_key),
+            (&symbol_key, &other_chunk),
+            (&other_chunk, &string_key),
+        ] {
+            assert!(
+                !PropListUtils::datum_equals_for_lookup(left, right, &allocator).unwrap(),
+                "a StringChunk key must not match a different key"
+            );
         }
     }
 }
